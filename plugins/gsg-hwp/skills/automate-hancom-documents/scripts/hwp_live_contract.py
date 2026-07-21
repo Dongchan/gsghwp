@@ -59,6 +59,38 @@ class SelectionPosition(ContractModel):
     end_character: int
 
 
+type ActiveTargetKind = Literal[
+    "caret",
+    "table_cell",
+    "selected_text",
+    "column_selection",
+    "selected_cells",
+    "selected_table",
+    "selected_control",
+    "unknown",
+]
+type SelectionModeName = Literal[
+    "none",
+    "text",
+    "column",
+    "cells",
+    "control",
+    "unknown",
+]
+
+
+class ActiveHwpTarget(ContractModel):
+    basis: Literal["current_or_last_hwp_position"] = "current_or_last_hwp_position"
+    kind: ActiveTargetKind
+    selection_mode_raw: int = Field(ge=0)
+    selection_mode: SelectionModeName
+    strict_selection: bool
+    multiple_cells: bool
+    control_type: str | None = None
+    control_instance_id: str | None = None
+    cell_address: str | None = Field(default=None, pattern=r"^[A-Z]+[1-9][0-9]*$")
+
+
 class CharacterStyle(ContractModel):
     face_name: str
     height_hwpunit: int
@@ -91,6 +123,7 @@ class LiveContext(ContractModel):
     current_page: int
     cursor: CursorPosition
     selection: SelectionPosition
+    active_target: ActiveHwpTarget
     selected_text: str
     page_text: str
     character_style: CharacterStyle
@@ -198,14 +231,19 @@ LayoutBlock = Annotated[
 
 
 class LayoutPlan(ContractModel):
-    target: Literal["current", "document_end"] = "current"
+    target: Literal["current", "document_end", "after_page"] = "current"
+    page: int | None = Field(default=None, ge=1)
     replace_selection: bool = False
     blocks: tuple[LayoutBlock, ...] = Field(min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def validate_size(self) -> LayoutPlan:
+        if self.target == "after_page" and self.page is None:
+            raise ValueError("after_page target requires page")
+        if self.target != "after_page" and self.page is not None:
+            raise ValueError("page is only valid with after_page target")
         if self.target != "current" and self.replace_selection:
-            raise ValueError("document_end target cannot replace a selection")
+            raise ValueError(f"{self.target} target cannot replace a selection")
         cells = sum(
             len(row)
             for block in self.blocks
@@ -284,6 +322,7 @@ class LayoutPlan(ContractModel):
                     expanded.append(block)
         return LayoutPlan(
             target=self.target,
+            page=self.page,
             replace_selection=self.replace_selection,
             blocks=tuple(expanded),
         )

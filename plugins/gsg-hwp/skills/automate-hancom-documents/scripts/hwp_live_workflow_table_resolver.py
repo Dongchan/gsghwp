@@ -55,6 +55,12 @@ def resolve_workflow_table(
 ) -> ResolvedWorkflowTable:
     indexed = tuple(enumerate(snapshot.tables, start=1))
     filtered = indexed
+    if target is not None and target.control_instance_id is not None:
+        filtered = tuple(
+            item
+            for item in filtered
+            if item[1].control_instance_id == target.control_instance_id
+        )
     if target is not None and target.table_index is not None:
         filtered = tuple(item for item in filtered if item[0] == target.table_index)
     if target is not None and target.caption_contains is not None:

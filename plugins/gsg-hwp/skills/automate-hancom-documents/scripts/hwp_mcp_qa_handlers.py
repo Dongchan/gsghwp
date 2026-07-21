@@ -5,7 +5,12 @@ from typing import final
 
 from hwp_document_rebuild import DocumentRebuildResult, rebuild_document
 from hwp_live_bridge import HancomBridge
-from hwp_live_bridge_contract import BridgeState, HancomDialogDismissResult, HancomWindowState
+from hwp_live_bridge_contract import (
+    BridgeState,
+    HancomDialogDismissResult,
+    HancomWindowState,
+    HancomWindowStateList,
+)
 from hwp_live_contract import (
     LayoutPlan,
     LayoutResult,
@@ -43,7 +48,10 @@ class McpQaHandlers:
         return await self._dispatcher.run(self._bridge.list_open_documents)
 
     async def hwp_inspect_window_state(self, window_handle: int) -> HancomWindowState:
-        return await self._dispatcher.run(self._bridge.window_state, window_handle)
+        return await self._dispatcher.watch(self._bridge.window_state, window_handle)
+
+    async def hwp_list_window_states(self) -> HancomWindowStateList:
+        return await self._dispatcher.watch(self._bridge.list_window_states)
 
     async def hwp_dismiss_dialogs(
         self,

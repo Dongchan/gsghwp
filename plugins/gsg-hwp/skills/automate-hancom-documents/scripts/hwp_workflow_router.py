@@ -77,6 +77,16 @@ _DEFINITIONS: Final = (
         aliases=("문서 끝에 표 추가", "문서 마지막에 레이아웃 추가"),
     ),
     _WorkflowDefinition(
+        "document.insert_layout",
+        "현재 커서 또는 지정 쪽 다음에 표·문단·그림 레이아웃을 삽입",
+        "recipe",
+        ("ApplyLayout",),
+        (
+            ("현재커서", "중간", "쪽다음", "페이지다음", "afterpage"),
+            ("표삽입", "글추가", "레이아웃삽입", "insertlayout"),
+        ),
+    ),
+    _WorkflowDefinition(
         "document.rebuild",
         "문서의 지원 블록을 새 문서 구조로 재구성",
         "recipe",

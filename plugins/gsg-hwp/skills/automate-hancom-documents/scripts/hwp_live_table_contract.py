@@ -10,6 +10,7 @@ from hwp_live_values import Alignment, ContractModel, Rgb
 
 
 VerticalAlignment = Literal["inherit", "top", "center", "bottom"]
+BorderMode = Literal["inherit", "explicit"]
 BorderStyle = Literal[
     "none",
     "solid",
@@ -94,9 +95,9 @@ class CellPadding(ContractModel):
 
 class TableMerge(ContractModel):
     row: int = Field(ge=0, le=49)
-    column: int = Field(ge=0, le=19)
+    column: int = Field(ge=0, le=49)
     row_span: int = Field(default=1, ge=1, le=50)
-    column_span: int = Field(default=1, ge=1, le=20)
+    column_span: int = Field(default=1, ge=1, le=50)
 
     @model_validator(mode="after")
     def validate_span(self) -> TableMerge:
@@ -136,6 +137,13 @@ class TableCell(ContractModel):
 
 class TableBlock(ContractModel):
     kind: Literal["table"]
+    border_mode: BorderMode = Field(
+        default="inherit",
+        description=(
+            "Use explicit for visual layout grids: omitted edges become no-border and "
+            "a declared shared edge is mirrored to its adjacent cell."
+        ),
+    )
     caption: str | None = Field(default=None, min_length=1, max_length=2_000)
     caption_style_name: str | None = Field(default=None, min_length=1, max_length=100)
     base_style_name: str | None = Field(default=None, min_length=1, max_length=100)
@@ -169,8 +177,8 @@ class TableBlock(ContractModel):
         if self.caption is not None and _starts_with_manual_table_number(self.caption):
             raise ValueError("caption must contain only the title; HWP inserts the table number")
         columns = len(self.rows[0])
-        if columns < 1 or columns > 20:
-            raise ValueError("table must contain 1 to 20 columns")
+        if columns < 1 or columns > 50:
+            raise ValueError("table must contain 1 to 50 columns")
         if any(len(row) != columns for row in self.rows):
             raise ValueError("table rows must have equal column counts")
         if self.column_widths_mm is not None:

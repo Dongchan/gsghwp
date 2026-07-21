@@ -64,11 +64,11 @@ class HwpPublicTools:
         cells: dict[str, str] | None = None,
         rows: Annotated[
             list[list[str]] | None,
-            Field(description="사용자가 start_cell을 명시한 경우에만 쓰는 행렬"),
+            Field(description="start_cell 또는 현재 한컴 표 셀·선택 셀 블록에서 시작하는 행렬"),
         ] = None,
         start_cell: Annotated[
             str | None,
-            Field(description="rows와 함께 사용하며 추측해서 만들지 않는 시작 셀 주소"),
+            Field(description="rows의 명시 시작 셀. 생략하면 현재 한컴 표 셀·선택 셀 블록·선택 표를 사용"),
         ] = None,
         fill_blanks_only: bool = False,
         document_path: str | None = None,

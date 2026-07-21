@@ -16,8 +16,9 @@ from hwp_mcp_operation import McpOperationHandler
 from hwp_mcp_operation_executor import HwpOperationExecutor
 from hwp_mcp_qa_handlers import McpQaHandlers
 from hwp_mcp_registration import McpToolBindings, register_mcp_tools
+from hwp_mcp_resources import register_guidance_resources
 from hwp_mcp_registry import McpProfile, configured_mcp_profile
-from hwp_native_install import require_native_bridge_registered
+from hwp_native_install import ensure_native_bridge_registered
 from hwp_operation_journal import OperationJournal
 from hwp_public_document_tools import HwpPublicDocumentTools
 from hwp_public_inspection_tools import HwpPublicInspectionTools
@@ -93,13 +94,14 @@ def build_server(
         ),
         profile,
     )
+    register_guidance_resources(server)
     return server
 
 
 def main() -> None:
     _ = stderr.write(f"{startup_runtime_record()}\n")
     _ = stderr.flush()
-    _ = require_native_bridge_registered()
+    _ = ensure_native_bridge_registered()
     build_server(
         LiveHwpController(),
         profile=configured_mcp_profile(argv[1:]),

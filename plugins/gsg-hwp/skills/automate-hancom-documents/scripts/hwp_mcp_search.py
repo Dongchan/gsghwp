@@ -209,6 +209,15 @@ _INTENT_ALIASES: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
             "문단 표 그림 추가",
             "편집 가능한 블록 추가",
         ),
+        "hwp_insert_layout": (
+            "현재 커서 표 삽입",
+            "현재 커서의 본문 중간에 글과 표를 추가",
+            "본문 중간 표 삽입",
+            "내용 중간 글 추가",
+            "8쪽 다음 쪽 추가",
+            "특정 페이지 다음 새 페이지",
+            "이미지를 편집 가능한 표로",
+        ),
         "hwp_save_reopen_verify": (
             "저장 후 다시 열기",
             "저장 재개방 검증",

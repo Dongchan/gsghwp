@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import ClassVar, cast
+from typing import ClassVar, cast, final
 from unittest.mock import patch
 
 import anyio
+import pytest
 from pydantic import BaseModel, ConfigDict
 
 
@@ -18,6 +19,13 @@ SCRIPTS = (
 sys.path.insert(0, str(SCRIPTS))
 
 from hwp_live_bridge import HancomBridge  # noqa: E402
+from hwp_live_bridge_contract import (  # noqa: E402
+    HancomDialogDismissResult,
+    HancomWindowChildState,
+    HancomWindowState,
+    HancomWindowStateList,
+)
+from hwp_errors import HwpLiveError  # noqa: E402
 from hwp_live_api import HwpComApplication, HwpComDocument  # noqa: E402
 from hwp_live_contract import (  # noqa: E402
     ConnectedDocument,
@@ -32,6 +40,7 @@ from hwp_live_structure_contract import (  # noqa: E402
     FastPageInspection,
     StructurePosition,
 )
+from hwp_live_windows import WindowStateReader  # noqa: E402
 from hwp_mcp import build_server  # noqa: E402
 from hwp_mcp_dispatch import McpThreadDispatcher  # noqa: E402
 from hwp_mcp_operation import McpOperationHandler  # noqa: E402
@@ -58,6 +67,65 @@ def _document() -> OpenDocument:
         active=True,
         window_handle=101,
     )
+
+
+@final
+class _PopupWindowReader:
+    _state: HancomWindowState
+
+    def __init__(self, state: HancomWindowState) -> None:
+        self._state = state
+
+    def list_visible_hwp_windows(self) -> HancomWindowStateList:
+        return HancomWindowStateList(windows=(self._state,))
+
+    def read(self, window_handle: int) -> HancomWindowState:
+        _ = window_handle
+        return self._state
+
+    def dismiss_dialogs(self, window_handle: int) -> HancomDialogDismissResult:
+        _ = window_handle
+        raise AssertionError("팝업 자동 진단은 창을 닫지 않아야 합니다")
+
+
+def test_bridge_error_includes_visible_hwp_popup_text() -> None:
+    popup = HancomWindowState(
+        window_handle=21502142,
+        process_id=12456,
+        exists=True,
+        visible=True,
+        enabled=True,
+        foreground=True,
+        title="Hwp",
+        class_name="#32770",
+        dialogs=(),
+        children=(
+            HancomWindowChildState(
+                window_handle=21502143,
+                title="TypeInitializationException: PopupBorderImpl",
+                class_name="Static",
+                visible=True,
+                enabled=True,
+            ),
+        ),
+    )
+    bridge = HancomBridge(
+        LiveHwpController(),
+        window_reader=cast(WindowStateReader, _PopupWindowReader(popup)),
+    )
+    try:
+        with patch.object(
+            LiveHwpController,
+            "list_open_documents",
+            side_effect=HwpLiveError("RPC 서버를 사용할 수 없습니다(-2147023174)"),
+        ):
+            with pytest.raises(HwpLiveError) as captured:
+                _ = bridge.list_open_documents()
+    finally:
+        bridge.close()
+
+    assert "RPC 서버를 사용할 수 없습니다(-2147023174)" in captured.value.reason
+    assert "PopupBorderImpl" in captured.value.reason
 
 
 def test_production_read_tools_need_no_session_preflight() -> None:

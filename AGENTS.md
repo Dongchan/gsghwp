@@ -6,7 +6,7 @@
 
 실제 설치 전에 다음 내용을 사용자에게 분명히 알린다.
 
-1. `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.51\HancomLiveBridge.dll`이 복사 또는 교체된다.
+1. `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.55\HancomLiveBridge.dll`이 복사 또는 교체된다.
 2. `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll`이 복사 또는 교체된다.
 3. HKCU의 다음 세 값이 변경된다.
    - `Software\HNC\HwpUserAction\Modules`

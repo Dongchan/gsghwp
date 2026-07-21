@@ -9,7 +9,9 @@ from hwp_errors import HwpLiveError
 from hwp_live_bridge_contract import (
     HancomDialogDismissResult,
     HancomDialogState,
+    HancomWindowChildState,
     HancomWindowState,
+    HancomWindowStateList,
 )
 
 
@@ -18,6 +20,13 @@ WindowEnumerator = Callable[[int, int], bool]
 
 @runtime_checkable
 class Win32GuiModule(Protocol):
+    def EnumChildWindows(
+        self,
+        window_handle: int,
+        callback: WindowEnumerator,
+        extra: int,
+    ) -> None: ...
+
     def EnumWindows(self, callback: WindowEnumerator, extra: int) -> None: ...
 
     def GetClassName(self, window_handle: int) -> str: ...
@@ -55,6 +64,8 @@ class PyWinTypesModule(Protocol):
 
 
 class WindowStateReader(Protocol):
+    def list_visible_hwp_windows(self) -> HancomWindowStateList: ...
+
     def read(self, window_handle: int) -> HancomWindowState: ...
 
     def dismiss_dialogs(self, window_handle: int) -> HancomDialogDismissResult: ...
@@ -152,6 +163,28 @@ class Win32WindowStateReader:
         self._gui.EnumWindows(collect, 0)
         return tuple(sorted(dialogs, key=lambda item: item.window_handle))
 
+    def _children(self, window_handle: int) -> tuple[HancomWindowChildState, ...]:
+        children: list[HancomWindowChildState] = []
+
+        def collect(child_handle: int, extra: int) -> bool:
+            _ = extra
+            try:
+                children.append(
+                    HancomWindowChildState(
+                        window_handle=child_handle,
+                        title=self._gui.GetWindowText(child_handle),
+                        class_name=self._gui.GetClassName(child_handle),
+                        visible=self._gui.IsWindowVisible(child_handle),
+                        enabled=self._gui.IsWindowEnabled(child_handle),
+                    )
+                )
+            except _WINDOW_ERROR:
+                return True
+            return True
+
+        self._gui.EnumChildWindows(window_handle, collect, 0)
+        return tuple(sorted(children, key=lambda item: item.window_handle))
+
     def read(self, window_handle: int) -> HancomWindowState:
         if not self._gui.IsWindow(window_handle):
             return HancomWindowState(
@@ -164,6 +197,7 @@ class Win32WindowStateReader:
                 title="",
                 class_name="",
                 dialogs=(),
+                children=(),
             )
         try:
             _, process_id = self._process.GetWindowThreadProcessId(window_handle)
@@ -178,9 +212,36 @@ class Win32WindowStateReader:
                 title=self._gui.GetWindowText(window_handle),
                 class_name=self._gui.GetClassName(window_handle),
                 dialogs=self._dialogs(window_handle, process_id, enabled),
+                children=self._children(window_handle),
             )
         except _WINDOW_ERROR as error:
             raise HwpLiveError("한컴 창과 대화상자 상태를 읽을 수 없습니다") from error
+
+    def list_visible_hwp_windows(self) -> HancomWindowStateList:
+        handles: list[int] = []
+
+        def collect(window_handle: int, extra: int) -> bool:
+            _ = extra
+            try:
+                if not self._gui.IsWindowVisible(window_handle):
+                    return True
+                class_name = self._gui.GetClassName(window_handle)
+                title = self._gui.GetWindowText(window_handle)
+                if (
+                    "hwp" in class_name.casefold()
+                    or title == "Hwp"
+                    or "hwp" in title.casefold()
+                    or title.endswith(" - 한글")
+                ):
+                    handles.append(window_handle)
+            except _WINDOW_ERROR:
+                return True
+            return True
+
+        self._gui.EnumWindows(collect, 0)
+        return HancomWindowStateList(
+            windows=tuple(self.read(handle) for handle in sorted(set(handles)))
+        )
 
     def dismiss_dialogs(self, window_handle: int) -> HancomDialogDismissResult:
         before = self.read(window_handle)

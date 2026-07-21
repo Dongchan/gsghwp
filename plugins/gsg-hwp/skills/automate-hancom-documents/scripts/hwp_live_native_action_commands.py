@@ -16,6 +16,17 @@ class NativeSelection:
     selected: bool
     start: NativePosition
     end: NativePosition
+    mode: int = 0
+    cell_addresses: tuple[str, ...] = ()
+    cell_address_error: str = ""
+
+    @property
+    def base_mode(self) -> int:
+        return self.mode & 0x0F
+
+    @property
+    def strict(self) -> bool:
+        return bool(self.mode & 0x10)
 
 
 @dataclass(frozen=True, slots=True)

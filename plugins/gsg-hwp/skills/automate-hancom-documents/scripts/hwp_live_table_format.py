@@ -6,6 +6,7 @@ from hwp_errors import HwpLiveError
 from hwp_live_api import LiveHwpApplication
 from hwp_live_formatting import apply_paragraph_style, hwp_color
 from hwp_live_table_contract import BorderStyle, CellBorders, TableBlock, TableCell, TableMerge
+from hwp_table_address import cell_address
 
 
 _LINE_TYPES: dict[BorderStyle, str] = {
@@ -90,10 +91,7 @@ def _select_merge(
     guard: Callable[[], None],
     require_cell: Callable[[str | None], None],
 ) -> None:
-    def address(row: int, column: int) -> str:
-        return f"{chr(65 + column)}{row + 1}"
-
-    anchor_address = address(merge.row, merge.column)
+    anchor_address = cell_address(merge.row, merge.column)
     guard()
     if not hwp.goto_addr(anchor_address):
         raise HwpLiveError("한컴 병합 시작 셀로 이동하지 못했습니다")
@@ -110,12 +108,12 @@ def _select_merge(
         if not hwp.TableRightCell():
             raise HwpLiveError("한컴 병합 열 범위를 선택하지 못했습니다")
         endpoint_column = merge.column + offset
-        require_cell(address(merge.row, endpoint_column))
+        require_cell(cell_address(merge.row, endpoint_column))
     for offset in range(1, merge.row_span):
         guard()
         if not hwp.TableLowerCell():
             raise HwpLiveError("한컴 병합 행 범위를 선택하지 못했습니다")
-        require_cell(address(merge.row + offset, endpoint_column))
+        require_cell(cell_address(merge.row + offset, endpoint_column))
 
 
 def apply_merges(
@@ -136,7 +134,7 @@ def apply_merges(
         if not hwp.TableMergeCell():
             raise HwpLiveError("한컴 표 셀을 병합하지 못했습니다")
         guard()
-        anchor_address = f"{chr(65 + merge.column)}{merge.row + 1}"
+        anchor_address = cell_address(merge.row, merge.column)
         if not hwp.goto_addr(anchor_address):
             raise HwpLiveError("한컴 병합 셀로 다시 이동하지 못했습니다")
         require_cell(anchor_address)

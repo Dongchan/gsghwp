@@ -13,6 +13,7 @@ from hwp_live_bridge_contract import (
     BridgeState,
     HancomDialogDismissResult,
     HancomWindowState,
+    HancomWindowStateList,
 )
 from hwp_live_bridge_mutation import HancomBridgeDocumentMutationMixin
 from hwp_live_bridge_operation import HancomBridgeOperationMixin
@@ -100,7 +101,40 @@ class HancomBridge(HancomBridgeOperationMixin, HancomBridgeDocumentMutationMixin
             if self._closed:
                 raise HwpLiveError("한컴 브리지가 이미 종료되었습니다")
             future = self._executor.submit(operation)
-        return future.result()
+        try:
+            return future.result()
+        except HwpLiveError as error:
+            popup = self._popup_diagnostic()
+            if popup is None:
+                raise
+            raise HwpLiveError(
+                f"{error.reason}; 감지된 한컴 오류 창: {popup}"
+            ) from error
+
+    def _popup_diagnostic(self) -> str | None:
+        try:
+            windows = self._windows.list_visible_hwp_windows().windows
+        except (HwpLiveError, OSError, RuntimeError):
+            return None
+        diagnostics: list[str] = []
+        for window in windows:
+            if window.class_name != "#32770" and not window.dialogs:
+                continue
+            texts = tuple(
+                dict.fromkeys(
+                    text.strip()
+                    for text in (
+                        window.title,
+                        *(child.title for child in window.children),
+                    )
+                    if text.strip()
+                )
+            )
+            detail = " | ".join(texts[:8])
+            diagnostics.append(
+                f"HWND={window.window_handle}, class={window.class_name}, text={detail}"
+            )
+        return "; ".join(diagnostics) or None
 
     @override
     def _bridge_controller(self) -> LiveHwpController:
@@ -178,7 +212,10 @@ class HancomBridge(HancomBridgeOperationMixin, HancomBridgeDocumentMutationMixin
     def window_state(self, window_handle: int) -> HancomWindowState:
         if window_handle < 1:
             raise HwpLiveError("한컴 창 핸들은 1 이상이어야 합니다")
-        return self._call(lambda: self._windows.read(window_handle))
+        return self._windows.read(window_handle)
+
+    def list_window_states(self) -> HancomWindowStateList:
+        return self._windows.list_visible_hwp_windows()
 
     def dismiss_dialogs(self, window_handle: int) -> HancomDialogDismissResult:
         if window_handle < 1:

@@ -14,7 +14,10 @@ from hwp_live_contract import (
     ParagraphBlock,
 )
 from hwp_live_table_contract import TableBlock
-from hwp_table_border_inheritance import inherit_conflicting_shared_borders
+from hwp_table_border_inheritance import (
+    explicit_shared_borders,
+    inherit_conflicting_shared_borders,
+)
 
 
 _ROLE_ALIASES = {
@@ -150,7 +153,11 @@ def _table_style(
     fallback_style_id: int,
     content_width_mm: float,
 ) -> TableBlock:
-    block = inherit_conflicting_shared_borders(block)
+    block = (
+        explicit_shared_borders(block)
+        if block.border_mode == "explicit"
+        else inherit_conflicting_shared_borders(block)
+    )
     base_style_id = block.base_style_id
     if base_style_id is None:
         base_style_id = _first_style(

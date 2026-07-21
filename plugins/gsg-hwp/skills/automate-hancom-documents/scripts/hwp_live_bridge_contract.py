@@ -17,6 +17,14 @@ class HancomDialogState(ContractModel):
     modal: bool
 
 
+class HancomWindowChildState(ContractModel):
+    window_handle: int = Field(ge=1)
+    title: str = Field(max_length=4_000)
+    class_name: str = Field(max_length=200)
+    visible: bool
+    enabled: bool
+
+
 class HancomWindowState(ContractModel):
     window_handle: int = Field(ge=1)
     process_id: int = Field(ge=0)
@@ -27,6 +35,11 @@ class HancomWindowState(ContractModel):
     title: str = Field(max_length=1_000)
     class_name: str = Field(max_length=200)
     dialogs: tuple[HancomDialogState, ...]
+    children: tuple[HancomWindowChildState, ...] = ()
+
+
+class HancomWindowStateList(ContractModel):
+    windows: tuple[HancomWindowState, ...]
 
 
 class HancomDialogDismissResult(ContractModel):

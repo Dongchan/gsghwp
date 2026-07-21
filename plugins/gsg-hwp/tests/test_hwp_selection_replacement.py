@@ -19,6 +19,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from hwp_live_bridge import HancomBridge  # noqa: E402
 from hwp_live_contract import (  # noqa: E402
+    ActiveHwpTarget,
     CharacterStyle,
     ConnectedDocument,
     CursorPosition,
@@ -71,6 +72,13 @@ def _selected_context(document: OpenDocument) -> LiveContext:
             end_list=0,
             end_paragraph=8,
             end_character=5,
+        ),
+        active_target=ActiveHwpTarget(
+            kind="selected_text",
+            selection_mode_raw=1,
+            selection_mode="text",
+            strict_selection=False,
+            multiple_cells=False,
         ),
         selected_text="기존 문장\r\n둘째 문장",
         page_text="기존 문장\r\n둘째 문장",

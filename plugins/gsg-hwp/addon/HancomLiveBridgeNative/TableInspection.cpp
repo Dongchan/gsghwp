@@ -55,6 +55,69 @@ bool ItemDispatch(
         SUCCEEDED(AsDispatch(raw, value));
 }
 
+bool StringProperty(
+    IDispatch* const object,
+    const wchar_t* const name,
+    std::wstring* const value) {
+    CComVariant raw;
+    return SUCCEEDED(PropertyGet(object, name, &raw)) &&
+        SUCCEEDED(AsString(raw, value));
+}
+
+bool XmlAttributeLong(
+    const std::wstring& xml,
+    const size_t tagStart,
+    const size_t tagEnd,
+    const wchar_t* const name,
+    LONG* const value) {
+    const std::wstring marker = std::wstring(name) + L"=\"";
+    size_t position = xml.find(marker, tagStart);
+    if (position == std::wstring::npos || position >= tagEnd) {
+        return false;
+    }
+    position += marker.size();
+    unsigned long long parsed = 0;
+    const size_t digitStart = position;
+    while (position < tagEnd && xml[position] >= L'0' && xml[position] <= L'9') {
+        parsed = parsed * 10 + static_cast<unsigned long long>(xml[position] - L'0');
+        if (parsed > static_cast<unsigned long long>((std::numeric_limits<LONG>::max)())) {
+            return false;
+        }
+        ++position;
+    }
+    if (position == digitStart || position >= xml.size() || xml[position] != L'\"') {
+        return false;
+    }
+    *value = static_cast<LONG>(parsed);
+    return true;
+}
+
+bool TableFormulaIsSafe(IDispatch* const hwp) {
+    CComVariant raw;
+    std::wstring xml;
+    if (FAILED(Method(
+            hwp,
+            L"GetTextFile",
+            {CComVariant(L"HWPML2X"), CComVariant(L"saveblock:true")},
+            &raw)) ||
+        FAILED(AsString(raw, &xml))) {
+        return false;
+    }
+    const size_t table = xml.find(L"<TABLE");
+    const size_t end = table == std::wstring::npos
+        ? std::wstring::npos
+        : xml.find(L'>', table + 6);
+    LONG rows = 0;
+    LONG columns = 0;
+    constexpr unsigned long long kMaximumSafeFormulaCells = 81;
+    return table != std::wstring::npos && end != std::wstring::npos &&
+        XmlAttributeLong(xml, table, end, L"RowCount", &rows) &&
+        XmlAttributeLong(xml, table, end, L"ColCount", &columns) &&
+        rows > 0 && columns > 0 &&
+        static_cast<unsigned long long>(rows) *
+            static_cast<unsigned long long>(columns) <= kMaximumSafeFormulaCells;
+}
+
 bool ReadCurrentCellSize(
     IDispatch* const hwp,
     LONG* const width,
@@ -285,35 +348,7 @@ bool CellCoordinates(
     const std::wstring& address,
     LONG* const row,
     LONG* const column) {
-    if (row == nullptr || column == nullptr || address.empty()) {
-        return false;
-    }
-    unsigned long long columnValue = 0;
-    size_t index = 0;
-    while (index < address.size() && address[index] >= L'A' && address[index] <= L'Z') {
-        columnValue = columnValue * 26 + static_cast<unsigned long long>(address[index] - L'A' + 1);
-        if (columnValue > static_cast<unsigned long long>((std::numeric_limits<LONG>::max)())) {
-            return false;
-        }
-        ++index;
-    }
-    if (index == 0 || index == address.size()) {
-        return false;
-    }
-    unsigned long long rowValue = 0;
-    while (index < address.size() && address[index] >= L'0' && address[index] <= L'9') {
-        rowValue = rowValue * 10 + static_cast<unsigned long long>(address[index] - L'0');
-        if (rowValue > static_cast<unsigned long long>((std::numeric_limits<LONG>::max)())) {
-            return false;
-        }
-        ++index;
-    }
-    if (index != address.size() || rowValue < 1) {
-        return false;
-    }
-    *row = static_cast<LONG>(rowValue);
-    *column = static_cast<LONG>(columnValue);
-    return true;
+    return ParseCellAddress(address, row, column);
 }
 
 bool InferCellSpans(
@@ -351,9 +386,11 @@ bool InferCellSpans(
             return Fail(error, L"table cell could not be positioned for row span inspection");
         }
         if (RunAction(action, L"TableLowerCell") && ParentMatches(hwp, tableInstanceId)) {
+            const std::wstring nextAddress = CellAddress(hwp);
             LONG nextRow = 0;
             LONG nextColumn = 0;
-            if (CellCoordinates(CellAddress(hwp), &nextRow, &nextColumn) && nextRow > row) {
+            if (CellCoordinates(nextAddress, &nextRow, &nextColumn) && nextRow > row) {
+                cell.downAddress = nextAddress;
                 cell.rowSpan = nextRow - row;
             }
         }
@@ -362,10 +399,12 @@ bool InferCellSpans(
             return Fail(error, L"table cell could not be positioned for column span inspection");
         }
         if (RunAction(action, L"TableRightCell") && ParentMatches(hwp, tableInstanceId)) {
+            const std::wstring nextAddress = CellAddress(hwp);
             LONG nextRow = 0;
             LONG nextColumn = 0;
-            if (CellCoordinates(CellAddress(hwp), &nextRow, &nextColumn) &&
+            if (CellCoordinates(nextAddress, &nextRow, &nextColumn) &&
                 nextRow == row && nextColumn > column) {
+                cell.rightAddress = nextAddress;
                 directColumnSpans[index] = nextColumn - column;
             }
         }
@@ -451,6 +490,69 @@ bool SelectTableControl(
             SelectExactTable(hwp, action, tableInstanceId);
     } catch (...) {
         return false;
+    }
+}
+
+bool ReadSelectedCellAddresses(
+    IDispatch* const hwp,
+    std::vector<std::wstring>* const addresses,
+    std::wstring* const error) noexcept {
+    try {
+        if (hwp == nullptr || addresses == nullptr) {
+            return Fail(error, L"selected cell address output is invalid");
+        }
+        addresses->clear();
+        if (!TableFormulaIsSafe(hwp)) {
+            return Fail(
+                error,
+                L"TableFormula selection is larger than 9 by 9 or its table size could not be verified");
+        }
+        CComPtr<IDispatch> action;
+        CComPtr<IDispatch> set;
+        CComVariant raw;
+        CComVariant ignored;
+        std::wstring command;
+        if (FAILED(Method(
+                hwp,
+                L"CreateAction",
+                {CComVariant(L"TableFormula")},
+                &raw)) ||
+            FAILED(AsDispatch(raw, action))) {
+            return Fail(error, L"TableFormula action could not be created");
+        }
+        raw.Clear();
+        if (FAILED(Method(action, L"CreateSet", {}, &raw)) ||
+            FAILED(AsDispatch(raw, set))) {
+            return Fail(error, L"TableFormula parameter set could not be created");
+        }
+        if (FAILED(Method(
+                action,
+                L"GetDefault",
+                {CComVariant(set)},
+                &ignored))) {
+            return Fail(error, L"TableFormula action GetDefault failed");
+        }
+        raw.Clear();
+        if (FAILED(Method(set, L"Item", {CComVariant(L"Command")}, &raw)) ||
+            FAILED(AsString(raw, &command))) {
+            return Fail(error, L"TableFormula Command item could not be read");
+        }
+        if (!ParseSelectedCellAddresses(command, addresses)) {
+            return Fail(error, L"TableFormula Command did not contain selected cell addresses");
+        }
+        if (addresses->size() < 2) {
+            addresses->clear();
+            return Fail(
+                error,
+                L"TableFormula Command resolved only one strict-selection cell: " +
+                    command.substr(0, 160));
+        }
+        return true;
+    } catch (...) {
+        if (addresses != nullptr) {
+            addresses->clear();
+        }
+        return Fail(error, L"selected cell address inspection failed unexpectedly");
     }
 }
 
@@ -594,10 +696,31 @@ bool InspectTableCells(
         if (cells->empty()) {
             return Fail(error, L"table contains no addressable cells");
         }
-        return InferCellSpans(hwp, action, tableInstanceId, cells, error);
+        if (!InferCellSpans(hwp, action, tableInstanceId, cells, error)) {
+            return false;
+        }
+        CellTopology topology;
+        if (!topology.Build(*cells, error)) {
+            return false;
+        }
+        *cells = topology.Cells();
+        return true;
     } catch (...) {
         return Fail(error, L"table inspection failed unexpectedly");
     }
+}
+
+bool InspectTableTopology(
+    IDispatch* const hwp,
+    const std::wstring& tableInstanceId,
+    CellTopology* const topology,
+    std::wstring* const error) noexcept {
+    if (topology == nullptr) {
+        return Fail(error, L"table topology output is invalid");
+    }
+    std::vector<TableCellRecord> cells;
+    return InspectTableCells(hwp, tableInstanceId, &cells, error) &&
+        topology->Build(std::move(cells), error);
 }
 
 }

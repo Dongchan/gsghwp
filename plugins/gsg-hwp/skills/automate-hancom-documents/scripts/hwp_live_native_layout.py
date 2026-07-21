@@ -16,6 +16,7 @@ from hwp_live_native_action_models import (
     InsertPictureCommand,
     InsertTextCommand,
     MoveDocumentEndCommand,
+    MovePageCommand,
     NativeActionCommand,
     NativeActionRequest,
     NativeCharacterFormat,
@@ -43,6 +44,7 @@ class NativeLayoutContext:
         tuple[str, NativeCharacterFormat, NativeParagraphFormat], ...
     ] = ()
     caption_format_sources: tuple[tuple[str, NativePosition], ...] = ()
+    page_count: int | None = None
     expected_cursor: NativePosition | None = None
     expected_selection: NativeSelection | None = None
 
@@ -53,8 +55,34 @@ def build_native_layout_request(
     assets: Mapping[Path, Path],
 ) -> NativeActionRequest:
     commands: list[NativeActionCommand] = []
-    if plan.target == "document_end":
-        commands.append(MoveDocumentEndCommand())
+    match plan.target:
+        case "current":
+            pass
+        case "document_end":
+            commands.append(MoveDocumentEndCommand())
+        case "after_page":
+            if plan.page is None:
+                raise HwpLiveError("쪽 다음 삽입에는 page가 필요합니다")
+            if context.page_count is not None and plan.page > context.page_count:
+                raise HwpLiveError("삽입 기준 쪽이 현재 문서 쪽 수를 초과합니다")
+            if context.page_count is not None and plan.page == context.page_count:
+                commands.extend(
+                    (
+                        MovePageCommand(plan.page),
+                        RunCommand("MovePageEnd"),
+                        RunCommand("BreakPage"),
+                    )
+                )
+            else:
+                commands.extend(
+                    (
+                        MovePageCommand(plan.page + 1),
+                        RunCommand("MovePageBegin"),
+                        RunCommand("BreakPage"),
+                        MovePageCommand(plan.page + 1),
+                        RunCommand("MovePageBegin"),
+                    )
+                )
     if plan.replace_selection:
         if context.expected_selection is None or not context.expected_selection.selected:
             raise HwpLiveError("선택 영역 교체에는 선택 상태 스냅샷이 필요합니다")

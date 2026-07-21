@@ -24,6 +24,7 @@ from hwp_public_table_edit_contract import (
     PublicTableBorderWidth,
     PublicTableColor,
     PublicTableFormattingInput,
+    PublicTableSplitMode,
     PublicTableVerticalAlignment,
 )
 from hwp_public_table_edit_execution import (
@@ -102,7 +103,7 @@ class HwpPublicTableEditTools:
         self,
         *,
         target: PublicTableTarget | None = None,
-        cell: PublicCellReference,
+        cell: PublicCellReference | None = None,
         row_height_mm: Annotated[float | None, Field(ge=1, le=250)] = None,
         column_width_mm: Annotated[float | None, Field(ge=1, le=250)] = None,
         bold: bool | None = None,
@@ -123,7 +124,11 @@ class HwpPublicTableEditTools:
                 request_id=f"hwp-public-{uuid4().hex}",
                 query=metadata.FORMAT_TABLE_INTENT,
             ),
-            cells=(NamedPublicCellReference("cell", cell),),
+            cells=(
+                ()
+                if cell is None
+                else (NamedPublicCellReference("cell", cell),)
+            ),
         )
         resolved = await self._resolved(request)
         match resolved:
@@ -133,7 +138,7 @@ class HwpPublicTableEditTools:
                 assert_never(unreachable)
             case _:
                 requested = PublicTableFormattingInput(
-                    cell=resolved.addresses[0],
+                    cell=resolved.addresses[0] if resolved.addresses else None,
                     row_height_mm=row_height_mm,
                     column_width_mm=column_width_mm,
                     bold=bold,
@@ -212,6 +217,7 @@ class HwpPublicTableEditTools:
         columns: Annotated[int, Field(ge=1, le=65_535)],
         rows: Annotated[int, Field(ge=1, le=65_535)],
         distribute_height: bool = False,
+        split_mode: PublicTableSplitMode = "equal",
     ) -> PublicActionResult:
         request = PublicTableEditResolutionRequest(
             resolution=PublicTableResolutionRequest(
@@ -233,6 +239,7 @@ class HwpPublicTableEditTools:
                     columns=columns,
                     rows=rows,
                     distribute_height=distribute_height,
+                    split_mode=split_mode,
                 )
                 return await self._execute(
                     request.resolution.query,

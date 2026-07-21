@@ -25,6 +25,7 @@ from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
 
 WORKFLOW_REQUIRED_INPUTS: Mapping[HwpWorkflowId, tuple[str, ...]] = {
     "document.append_layout": ("inputs.layout",),
+    "document.insert_layout": ("inputs.layout",),
     "document.insert_page": ("inputs.target", "inputs.layout"),
     "document.delete_page": ("inputs.target",),
     "control.delete": ("inputs.target",),

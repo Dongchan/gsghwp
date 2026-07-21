@@ -1,0 +1,113 @@
+#include "../CellTopology.h"
+
+#include <iostream>
+#include <string>
+#include <vector>
+
+namespace {
+
+using hancom::inspection::CellDirection;
+using hancom::inspection::CellTopology;
+using hancom::inspection::CellTopologyCell;
+using hancom::inspection::CellTopologyStep;
+using hancom::inspection::ParseSelectedCellAddresses;
+
+CellTopologyCell Cell(
+    const wchar_t* const address,
+    const long rowSpan,
+    const long columnSpan,
+    const wchar_t* const right,
+    const wchar_t* const down) {
+    CellTopologyCell cell;
+    cell.address = address;
+    long row = 0;
+    long column = 0;
+    if (hancom::inspection::ParseCellAddress(cell.address, &row, &column)) {
+        cell.listId = row * 100 + column;
+    }
+    cell.rowSpan = rowSpan;
+    cell.columnSpan = columnSpan;
+    cell.rightAddress = right;
+    cell.downAddress = down;
+    return cell;
+}
+
+int Fail(const char* const message) {
+    std::cerr << message << '\n';
+    return 1;
+}
+
+}
+
+int wmain() {
+    std::vector<std::wstring> selectedAddresses;
+    if (!ParseSelectedCellAddresses(
+            L"= B2,C2,B3,C3;",
+            &selectedAddresses) ||
+        selectedAddresses !=
+            std::vector<std::wstring>{L"B2", L"C2", L"B3", L"C3"}) {
+        return Fail("TableFormula cell addresses were not parsed");
+    }
+
+    CellTopology topology;
+    std::wstring error;
+    if (!topology.Build(
+            {
+                Cell(L"A1", 1, 2, L"C1", L"A2"),
+                Cell(L"C1", 1, 2, L"E1", L"B2"),
+                Cell(L"E1", 1, 1, L"", L"D2"),
+                Cell(L"A2", 1, 1, L"B2", L""),
+                Cell(L"B2", 1, 2, L"D2", L""),
+                Cell(L"D2", 1, 2, L"", L""),
+            },
+            &error)) {
+        return Fail("irregular topology did not build");
+    }
+
+    const std::vector<std::wstring> column = topology.IntersectingColumn(3);
+    if (column != std::vector<std::wstring>{L"C1", L"B2"}) {
+        return Fail("physical column intersections were not resolved from spans");
+    }
+
+    std::vector<CellTopologyStep> path;
+    std::vector<std::wstring> region;
+    if (!topology.PlanRectangularMerge(L"A1", L"C1", &path, &region, &error) ||
+        path.size() != 1 || path.front().direction != CellDirection::Right ||
+        path.front().destination != L"C1") {
+        return Fail("A1 to C1 did not use the one actual right neighbour");
+    }
+
+    if (topology.PlanRectangularMerge(L"A1", L"B2", &path, &region, &error)) {
+        return Fail("partial-overlap merge region was not rejected");
+    }
+
+    if (!topology.PlanRectangularMerge(L"A1", L"D2", &path, &region, &error) ||
+        path.size() != 3 || path[0].destination != L"C1" ||
+        path[1].destination != L"E1" || path[2].destination != L"D2") {
+        return Fail("merge endpoint was not reached through actual neighbours");
+    }
+    std::wstring first;
+    std::wstring last;
+    if (!topology.PlanRectangularSelection(
+            204,
+            101,
+            &first,
+            &last,
+            &path,
+            &region,
+            &error) ||
+        first != L"A1" || last != L"D2" || region.size() != 6 || path.size() != 3) {
+        return Fail("reversed cell selection was not normalized from list ids");
+    }
+    if (!topology.PlanRectangularSelection(
+            std::vector<std::wstring>{L"A1", L"C1"},
+            &first,
+            &last,
+            &path,
+            &region,
+            &error) ||
+        first != L"A1" || last != L"C1" || region.size() != 2 || path.size() != 1) {
+        return Fail("cell selection was not normalized from physical addresses");
+    }
+    return 0;
+}

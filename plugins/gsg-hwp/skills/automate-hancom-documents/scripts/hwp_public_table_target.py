@@ -51,11 +51,6 @@ class PublicTableDataInput(ContractModel):
                 "public_table_data_mode",
                 "records, cells, rows 중 정확히 하나를 전달하세요",
             )
-        if self.rows is not None and self.start_cell is None:
-            raise PydanticCustomError(
-                "public_table_rows_start_cell",
-                "rows를 사용할 때 start_cell이 필요합니다",
-            )
         return self
 
     def to_canonical_data(self) -> HwpOperateData:
@@ -79,10 +74,8 @@ class UnknownPublicTargetError(ValueError):
 
     def __init__(self, target_id: str) -> None:
         self.target_id = target_id
-        super().__init__(
-            "현재 hwp_inspect_page_fast 조회 결과나 앞선 후보 응답에서 "
-            f"확인되지 않은 target_id입니다: {target_id}"
-        )
+        prefix = "현재 hwp_inspect_page_fast 조회 결과나 앞선 후보 응답에서 "
+        super().__init__(prefix + f"확인되지 않은 target_id입니다: {target_id}")
 
 
 @final

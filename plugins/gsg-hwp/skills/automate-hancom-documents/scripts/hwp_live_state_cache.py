@@ -78,6 +78,8 @@ def changed_paths(
         paths.append("context.cursor")
     if before.context.selection != after.context.selection:
         paths.append("context.selection")
+    if before.context.active_target != after.context.active_target:
+        paths.append("context.active_target")
     if before.context.selected_text != after.context.selected_text:
         paths.append("context.selected_text")
     if before.context.page_text != after.context.page_text:

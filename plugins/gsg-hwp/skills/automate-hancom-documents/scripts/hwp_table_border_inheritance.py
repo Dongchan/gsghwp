@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from typing import Literal
 
-from hwp_live_table_contract import CellBorders, TableBlock, TableCell
+from hwp_live_table_contract import CellBorder, CellBorders, TableBlock, TableCell
 
 
 type _BorderEdge = Literal["left", "right", "top", "bottom"]
 type _Coordinate = tuple[int, int]
+
+
+_EDGES: tuple[_BorderEdge, ...] = ("left", "right", "top", "bottom")
+_NO_BORDER = CellBorder(style="none")
 
 
 def _merge_owners(block: TableBlock) -> dict[_Coordinate, _Coordinate]:
@@ -19,9 +23,78 @@ def _merge_owners(block: TableBlock) -> dict[_Coordinate, _Coordinate]:
     return owners
 
 
-def _edge(cell: TableCell, edge: _BorderEdge) -> object | None:
+def _edge(cell: TableCell, edge: _BorderEdge) -> CellBorder | None:
     borders = cell.borders
     return None if borders is None else getattr(borders, edge)
+
+
+def _explicit_edge(
+    first: CellBorder | None,
+    second: CellBorder | None,
+) -> CellBorder | None:
+    if first is None:
+        return second
+    if second is None or first == second:
+        return first
+    if first.style == "none":
+        return second
+    if second.style == "none":
+        return first
+    return first
+
+
+def explicit_shared_borders(block: TableBlock) -> TableBlock:
+    owners = _merge_owners(block)
+
+    def owner(row: int, column: int) -> _Coordinate:
+        return owners.get((row, column), (row, column))
+
+    coordinates = {
+        owner(row, column)
+        for row in range(len(block.rows))
+        for column in range(len(block.rows[0]))
+    }
+    resolved: dict[_Coordinate, dict[_BorderEdge, CellBorder | None]] = {
+        coordinate: {
+            edge: _edge(block.rows[coordinate[0]][coordinate[1]], edge)
+            for edge in _EDGES
+        }
+        for coordinate in coordinates
+    }
+
+    def share(
+        first: _Coordinate,
+        first_edge: _BorderEdge,
+        second: _Coordinate,
+        second_edge: _BorderEdge,
+    ) -> None:
+        if first == second:
+            return
+        edge = _explicit_edge(resolved[first][first_edge], resolved[second][second_edge])
+        resolved[first][first_edge] = edge
+        resolved[second][second_edge] = edge
+
+    columns = len(block.rows[0])
+    for row in range(len(block.rows)):
+        for column in range(columns - 1):
+            share(owner(row, column), "right", owner(row, column + 1), "left")
+    for row in range(len(block.rows) - 1):
+        for column in range(columns):
+            share(owner(row, column), "bottom", owner(row + 1, column), "top")
+
+    rows = [list(row) for row in block.rows]
+    for row, column in coordinates:
+        rows[row][column] = rows[row][column].model_copy(
+            update={
+                "borders": CellBorders(
+                    **{
+                        edge: resolved[(row, column)][edge] or _NO_BORDER
+                        for edge in _EDGES
+                    }
+                )
+            }
+        )
+    return block.model_copy(update={"rows": tuple(tuple(row) for row in rows)})
 
 
 def _inherit_edge(

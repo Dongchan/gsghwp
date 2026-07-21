@@ -18,6 +18,7 @@ from hwp_live_formatting import apply_paragraph_style, apply_text_style
 from hwp_live_table_contract import TableBlock, TableCell
 from hwp_live_table_format import apply_cell_geometry, apply_merges
 from hwp_picture_placement import enforce_picture_size
+from hwp_table_address import cell_address
 
 
 def _base_style_key(name: str) -> int | str:
@@ -153,7 +154,7 @@ def insert_table(
     require_cell("A1")
     for row_index, row in enumerate(block.rows):
         for column_index, cell in enumerate(row):
-            address = f"{chr(65 + column_index)}{row_index + 1}"
+            address = cell_address(row_index, column_index)
             table_guard()
             if not hwp.goto_addr(address):
                 raise HwpLiveError(f"한컴 표의 {address} 셀로 이동하지 못했습니다")

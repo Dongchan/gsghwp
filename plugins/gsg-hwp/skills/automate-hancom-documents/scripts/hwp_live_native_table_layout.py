@@ -25,17 +25,7 @@ from hwp_live_native_action_models import (
 from hwp_live_native_layout_format import cell_format_commands
 from hwp_live_native_text_format import ParagraphFormatting, paragraph_command, style_command
 from hwp_live_table_contract import TableBlock, TableCell
-
-
-def cell_address(row: int, column: int) -> str:
-    if row < 0 or column < 0:
-        raise HwpLiveError("표 셀 행과 열은 음수일 수 없습니다")
-    letters = ""
-    value = column + 1
-    while value:
-        value, remainder = divmod(value - 1, 26)
-        letters = chr(65 + remainder) + letters
-    return f"{letters}{row + 1}"
+from hwp_table_address import cell_address
 
 
 def _style_id(

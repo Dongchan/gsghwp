@@ -190,4 +190,10 @@ def wrapper_arguments(
                 {"blocks": layout["blocks"]}
             )
         return _arguments(payload)
+    if workflow == "document.insert_layout":
+        if inputs.layout is not None:
+            payload["layout"] = _JSON_VALUE.validate_python(
+                _model_payload(inputs.layout)
+            )
+        return _arguments(payload)
     return _arguments(payload)

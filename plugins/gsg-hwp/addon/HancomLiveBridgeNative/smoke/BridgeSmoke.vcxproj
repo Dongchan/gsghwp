@@ -49,6 +49,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="BridgeSmoke.cpp" />
+    <ClCompile Include="..\CellTopology.cpp" />
     <ClCompile Include="..\DispatchInvoke.cpp" />
     <ClCompile Include="..\TableInspection.cpp" />
   </ItemGroup>

@@ -90,7 +90,7 @@ msbuild HancomLiveBridgeNative.vcxproj /p:Configuration=Release /p:Platform=Win3
 ```
 
 In HWP 2024, register `bin\Release\HancomLiveBridge.dll` through
-`도구 > COM 추가 기능 설정`. Elevated privileges are not required.
+`도구 > COM 추가 기능 설정`. Administrator privileges are not required.
 Restart HWP once only when replacing the loaded DLL.
 
 The Win32 smoke executable can verify a running HWP process from the same

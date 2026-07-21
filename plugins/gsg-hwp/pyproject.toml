@@ -1,8 +1,7 @@
 [project]
-name = "gsg-hwp"
-version = "0.3.85"
+name = "gsg-hwp-beta"
+version = "0.3.87"
 description = "Hancom document automation plugin runtime"
-authors = [{ name = "inodesign" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "mcp==1.26.0",

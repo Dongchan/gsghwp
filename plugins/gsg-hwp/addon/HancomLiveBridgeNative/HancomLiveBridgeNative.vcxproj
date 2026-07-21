@@ -63,6 +63,7 @@
     <ClCompile Include="BatchProtocol.cpp" />
     <ClCompile Include="Bridge.cpp" />
     <ClCompile Include="BridgeStatus.cpp" />
+    <ClCompile Include="CellTopology.cpp" />
     <ClCompile Include="DispatchInvoke.cpp" />
     <ClCompile Include="DocumentLifecycle.cpp" />
     <ClCompile Include="LiveInspection.cpp" />
@@ -85,6 +86,7 @@
     <ClInclude Include="BatchExecutor.h" />
     <ClInclude Include="BatchProtocol.h" />
     <ClInclude Include="BridgeStatus.h" />
+    <ClInclude Include="CellTopology.h" />
     <ClInclude Include="DispatchInvoke.h" />
     <ClInclude Include="DocumentLifecycle.h" />
     <ClInclude Include="LiveInspection.h" />

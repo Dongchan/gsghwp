@@ -17,10 +17,11 @@ type PublicTableVerticalAlignment = Literal["top", "center", "bottom", "inherit"
 type PublicTableColor = Annotated[str, Field(min_length=1, max_length=50)]
 type PublicTableBorderStyle = HwpBorderStyle
 type PublicTableBorderWidth = HwpBorderWidth
+type PublicTableSplitMode = Literal["equal", "existing_grid"]
 
 
 class PublicTableFormattingInput(ContractModel):
-    cell: PublicCellAddress
+    cell: PublicCellAddress | None = None
     row_height_mm: float | None = Field(default=None, ge=1, le=250)
     column_width_mm: float | None = Field(default=None, ge=1, le=250)
     bold: bool | None = None
@@ -37,10 +38,11 @@ class PublicTableFormattingInput(ContractModel):
 
     def to_parameters(self) -> Mapping[str, OperationInputValue]:
         parameters: dict[str, OperationInputValue] = {
-            "cell": self.cell.upper(),
             "alignment": self.alignment,
             "vertical_alignment": self.vertical_alignment,
         }
+        if self.cell is not None:
+            parameters["cell"] = self.cell.upper()
         if self.row_height_mm is not None:
             parameters["row_height_mm"] = self.row_height_mm
         if self.column_width_mm is not None:
@@ -88,6 +90,7 @@ class PublicSplitTableCellInput(ContractModel):
     columns: int = Field(ge=1, le=65_535)
     rows: int = Field(ge=1, le=65_535)
     distribute_height: bool = False
+    split_mode: PublicTableSplitMode = "equal"
 
     @model_validator(mode="after")
     def require_meaningful_split(self) -> PublicSplitTableCellInput:
@@ -105,5 +108,5 @@ class PublicSplitTableCellInput(ContractModel):
             "rows": self.rows,
             "distribute_height": self.distribute_height,
             "merge": False,
-            "mode2": False,
+            "split_mode": self.split_mode,
         }

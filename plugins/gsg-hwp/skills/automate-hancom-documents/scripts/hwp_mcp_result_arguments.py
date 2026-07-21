@@ -27,6 +27,7 @@ type ProductionWorkflowId = Literal[
     "table.merge_cells",
     "table.split_cells",
     "document.append_layout",
+    "document.insert_layout",
     "document.save_reopen_verify",
 ]
 

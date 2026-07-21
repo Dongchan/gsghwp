@@ -85,6 +85,8 @@ def test_tool_search_routes_common_live_edit_intents_to_concrete_tools() -> None
         ("방금 편집을 롤백해", "hwp_undo"),
         ("현재 문서 구조를 빠르게 조회해", "hwp_inspect_page_fast"),
         ("캡션과 병합 셀까지 상세 구조 조회해", "hwp_inspect_structure"),
+        ("8쪽 다음에 새 쪽을 추가하고 표를 삽입해", "hwp_insert_layout"),
+        ("현재 커서의 본문 중간에 글과 표를 추가해", "hwp_insert_layout"),
     )
 
     for query, expected in cases:

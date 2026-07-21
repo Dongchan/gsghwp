@@ -90,7 +90,7 @@ def test_main_defers_wrapper_and_operation_registry_loading() -> None:
     server = MagicMock()
     with (
         patch.object(hwp_mcp, "startup_runtime_record", return_value="runtime"),
-        patch.object(hwp_mcp, "require_native_bridge_registered"),
+        patch.object(hwp_mcp, "ensure_native_bridge_registered"),
         patch.object(hwp_mcp, "build_server", return_value=server),
         patch.object(hwp_mcp, "configured_mcp_profile", return_value="production"),
         patch.object(hwp_mcp, "preload_live_wrapper", create=True) as preload,

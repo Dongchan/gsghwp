@@ -483,6 +483,10 @@ def decode_snapshot(payload: str) -> NativeSnapshot:
     style = lines[7].split("\t")
     character = lines[8].split("\t")
     paragraph = lines[9].split("\t")
+    legacy_selection = len(selection) == 8 and selection[0] == "SELECTION"
+    current_selection = len(selection) == 9 and selection[0] == "SELECTION"
+    addressed_selection = len(selection) == 10 and selection[0] == "SELECTION"
+    diagnostic_selection = len(selection) == 11 and selection[0] == "SELECTION"
     if (
         len(document) != 3
         or document[0] != "DOC"
@@ -490,8 +494,12 @@ def decode_snapshot(payload: str) -> NativeSnapshot:
         or state[0] != "STATE"
         or len(cursor) != 4
         or cursor[0] != "CURSOR"
-        or len(selection) != 8
-        or selection[0] != "SELECTION"
+        or not (
+            legacy_selection
+            or current_selection
+            or addressed_selection
+            or diagnostic_selection
+        )
         or len(text) != 2
         or text[0] != "TEXT"
         or len(context) != 4
@@ -505,10 +513,33 @@ def decode_snapshot(payload: str) -> NativeSnapshot:
     ):
         raise HwpLiveError("네이티브 현재 상태 레코드가 올바르지 않습니다")
     current = NativePosition(*(_integer(value, "커서") for value in cursor[1:]))
+    selection_position = 2 if legacy_selection else 3
+    selected_cells = (
+        tuple(
+            address.strip().upper()
+            for address in _decode(selection[9]).split(",")
+            if address.strip()
+        )
+        if addressed_selection or diagnostic_selection
+        else ()
+    )
     selected = NativeSelection(
         selected=_boolean(selection[1], "선택 상태"),
-        start=NativePosition(*(_integer(value, "선택 시작") for value in selection[2:5])),
-        end=NativePosition(*(_integer(value, "선택 끝") for value in selection[5:8])),
+        start=NativePosition(
+            *(
+                _integer(value, "선택 시작")
+                for value in selection[selection_position : selection_position + 3]
+            )
+        ),
+        end=NativePosition(
+            *(
+                _integer(value, "선택 끝")
+                for value in selection[selection_position + 3 : selection_position + 6]
+            )
+        ),
+        mode=0 if legacy_selection else _integer(selection[2], "선택 모드"),
+        cell_addresses=selected_cells,
+        cell_address_error=_decode(selection[10]) if diagnostic_selection else "",
     )
     return NativeSnapshot(
         document_id=_integer(document[1], "문서 ID"),

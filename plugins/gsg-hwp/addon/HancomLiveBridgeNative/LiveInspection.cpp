@@ -33,9 +33,32 @@ struct Position {
 
 struct Selection {
     bool selected = false;
+    LONG mode = 0;
     Position start;
     Position end;
+    std::wstring controlType;
+    std::wstring controlInstance;
+    std::vector<std::wstring> cellAddresses;
+    std::wstring cellAddressError;
 };
+
+constexpr LONG kSelectionModeMask = 0x0F;
+constexpr LONG kSelectionNone = 0;
+constexpr LONG kSelectionText = 1;
+constexpr LONG kSelectionColumn = 2;
+constexpr LONG kSelectionCells = 3;
+constexpr LONG kSelectionControl = 4;
+constexpr LONG kSelectionStrict = 0x10;
+
+bool ControlIdentity(
+    IDispatch* control,
+    std::wstring* type,
+    std::wstring* instance);
+void CurrentControl(
+    IDispatch* hwp,
+    std::wstring* type,
+    std::wstring* instance);
+bool RunHwpAction(IDispatch* hwp, const wchar_t* actionName);
 
 struct Formatting {
     LONG styleId = -1;
@@ -173,7 +196,8 @@ bool SetItemLong(IDispatch* const set, const wchar_t* const name, LONG* const va
 bool GetSelection(IDispatch* const hwp, Selection* const selection) {
     CComPtr<IDispatch> start;
     CComPtr<IDispatch> end;
-    if (!CreateSet(hwp, L"ListParaPos", start) || !CreateSet(hwp, L"ListParaPos", end)) {
+    if (!LongProperty(hwp, L"SelectionMode", &selection->mode) ||
+        !CreateSet(hwp, L"ListParaPos", start) || !CreateSet(hwp, L"ListParaPos", end)) {
         return false;
     }
     CComVariant raw;
@@ -187,35 +211,42 @@ bool GetSelection(IDispatch* const hwp, Selection* const selection) {
         !SetItemLong(end, L"Pos", &selection->end.character)) {
         return false;
     }
+    const LONG baseMode = selection->mode & kSelectionModeMask;
+    if (baseMode == kSelectionCells || baseMode == kSelectionControl) {
+        CurrentControl(hwp, &selection->controlType, &selection->controlInstance);
+    }
+    if (baseMode == kSelectionCells && (selection->mode & kSelectionStrict) != 0) {
+        static_cast<void>(ReadSelectedCellAddresses(
+            hwp,
+            &selection->cellAddresses,
+            &selection->cellAddressError));
+    }
     return true;
+}
+
+bool CanRestoreSelection(const Selection& selection) noexcept {
+    const LONG baseMode = selection.mode & kSelectionModeMask;
+    if (baseMode == kSelectionNone) {
+        return true;
+    }
+    if (baseMode == kSelectionText) {
+        return selection.selected && selection.start.list == selection.end.list;
+    }
+    if (baseMode == kSelectionCells) {
+        return (selection.selected || !selection.cellAddresses.empty()) &&
+            selection.controlType == L"tbl" &&
+            !selection.controlInstance.empty();
+    }
+    if (baseMode == kSelectionControl) {
+        return !selection.controlInstance.empty();
+    }
+    return false;
 }
 
 bool RestoreSelection(
     IDispatch* const hwp,
     const Position& cursor,
-    const Selection& selection) {
-    if (!selection.selected || selection.start.list != selection.end.list) {
-        return SetPosition(hwp, cursor);
-    }
-    if (!SetPosition(hwp, Position{selection.start.list, 0, 0})) {
-        return false;
-    }
-    CComVariant raw;
-    if (FAILED(Method(
-            hwp,
-            L"SelectText",
-            {
-                CComVariant(selection.start.paragraph),
-                CComVariant(selection.start.character),
-                CComVariant(selection.end.paragraph),
-                CComVariant(selection.end.character),
-            },
-            &raw))) {
-        return false;
-    }
-    bool selected = false;
-    return SUCCEEDED(AsBool(raw, &selected)) && selected;
-}
+    const Selection& selection);
 
 bool ActiveDocument(
     IDispatch* const hwp,
@@ -528,6 +559,126 @@ bool RunHwpAction(IDispatch* const hwp, const wchar_t* const actionName) {
         CallBoolean(action, L"Run", {CComVariant(actionName)}, &result) && result;
 }
 
+bool RestoreTextSelection(IDispatch* const hwp, const Selection& selection) {
+    if (!SetPosition(hwp, Position{selection.start.list, 0, 0})) {
+        return false;
+    }
+    CComVariant raw;
+    if (FAILED(Method(
+            hwp,
+            L"SelectText",
+            {
+                CComVariant(selection.start.paragraph),
+                CComVariant(selection.start.character),
+                CComVariant(selection.end.paragraph),
+                CComVariant(selection.end.character),
+            },
+            &raw))) {
+        return false;
+    }
+    bool selected = false;
+    LONG mode = 0;
+    return SUCCEEDED(AsBool(raw, &selected)) && selected &&
+        LongProperty(hwp, L"SelectionMode", &mode) &&
+        (mode & kSelectionModeMask) == kSelectionText;
+}
+
+bool RestoreCellSelection(IDispatch* const hwp, const Selection& selection) {
+    CellTopology topology;
+    std::wstring error;
+    if (!InspectTableTopology(
+            hwp,
+            selection.controlInstance,
+            &topology,
+            &error)) {
+        return false;
+    }
+    std::wstring first;
+    std::wstring last;
+    std::vector<CellTopologyStep> path;
+    std::vector<std::wstring> region;
+    const bool planned = selection.cellAddresses.empty()
+        ? topology.PlanRectangularSelection(
+            selection.start.list,
+            selection.end.list,
+            &first,
+            &last,
+            &path,
+            &region,
+            &error)
+        : topology.PlanRectangularSelection(
+            selection.cellAddresses,
+            &first,
+            &last,
+            &path,
+            &region,
+            &error);
+    if (!planned) {
+        return false;
+    }
+    const CellTopologyCell* const firstCell = topology.Find(first);
+    if (firstCell == nullptr ||
+        !SetPosition(hwp, Position{firstCell->listId, 0, 0}) ||
+        !RunHwpAction(hwp, L"TableCellBlock")) {
+        return false;
+    }
+    if (region.size() > 1) {
+        if (!RunHwpAction(hwp, L"TableCellBlockExtend")) {
+            return false;
+        }
+        for (const CellTopologyStep& step : path) {
+            const wchar_t* const action = step.direction == CellDirection::Right
+                ? L"TableRightCell"
+                : L"TableLowerCell";
+            if (!RunHwpAction(hwp, action) || CellAddress(hwp) != step.destination) {
+                return false;
+            }
+        }
+    }
+    LONG mode = 0;
+    return LongProperty(hwp, L"SelectionMode", &mode) &&
+        (mode & kSelectionModeMask) == kSelectionCells;
+}
+
+bool RestoreControlSelection(IDispatch* const hwp, const Selection& selection) {
+    if (selection.controlType == L"tbl" &&
+        SelectTableControl(hwp, selection.controlInstance)) {
+        return true;
+    }
+    CComVariant ignored;
+    static_cast<void>(Method(
+        hwp,
+        L"SelectCtrl",
+        {CComVariant(selection.controlInstance.c_str()), CComVariant(1L)},
+        &ignored));
+    CComPtr<IDispatch> selected;
+    std::wstring type;
+    std::wstring instance;
+    return DispatchProperty(hwp, L"CurSelectedCtrl", selected) &&
+        ControlIdentity(selected, &type, &instance) &&
+        type == selection.controlType && instance == selection.controlInstance;
+}
+
+bool RestoreSelection(
+    IDispatch* const hwp,
+    const Position& cursor,
+    const Selection& selection) {
+    const LONG baseMode = selection.mode & kSelectionModeMask;
+    if (baseMode == kSelectionNone) {
+        return SetPosition(hwp, cursor);
+    }
+    if (baseMode == kSelectionText) {
+        return RestoreTextSelection(hwp, selection);
+    }
+    if (baseMode == kSelectionCells) {
+        return RestoreCellSelection(hwp, selection);
+    }
+    if (baseMode == kSelectionControl) {
+        return RestoreControlSelection(hwp, selection);
+    }
+    return false;
+}
+
 bool ReadCurrentStyle(
     IDispatch* const hwp,
     LONG* const styleId,
@@ -719,6 +870,13 @@ std::wstring Snapshot(IDispatch* const hwp) noexcept {
         CurrentControl(hwp, &controlType, &controlInstance);
         const std::wstring selectedText = SelectedText(hwp, selection.selected);
         const std::wstring cell = CellAddress(hwp);
+        std::wostringstream selectedCells;
+        for (size_t index = 0; index < selection.cellAddresses.size(); ++index) {
+            if (index != 0) {
+                selectedCells << L',';
+            }
+            selectedCells << selection.cellAddresses[index];
+        }
         std::wostringstream output;
         output << L"HCS1\nDOC\t" << documentId << L'\t' << EncodeUtf8Base64(fullName)
                << L"\nSTATE\t" << currentPage << L'\t' << pageCount << L'\t'
@@ -726,9 +884,12 @@ std::wstring Snapshot(IDispatch* const hwp) noexcept {
                << L"\nCURSOR\t" << cursor.list << L'\t' << cursor.paragraph << L'\t'
                << cursor.character
                << L"\nSELECTION\t" << (selection.selected ? 1 : 0) << L'\t'
-               << selection.start.list << L'\t' << selection.start.paragraph << L'\t'
+               << selection.mode << L'\t' << selection.start.list << L'\t'
+               << selection.start.paragraph << L'\t'
                << selection.start.character << L'\t' << selection.end.list << L'\t'
-               << selection.end.paragraph << L'\t' << selection.end.character
+               << selection.end.paragraph << L'\t' << selection.end.character << L'\t'
+               << EncodeUtf8Base64(selectedCells.str()) << L'\t'
+               << EncodeUtf8Base64(selection.cellAddressError)
                << L"\nTEXT\t" << EncodeUtf8Base64(selectedText)
                << L"\nCONTEXT\t" << EncodeUtf8Base64(controlType) << L'\t'
                << EncodeUtf8Base64(controlInstance) << L'\t' << EncodeUtf8Base64(cell)
@@ -889,6 +1050,11 @@ static std::wstring InspectPagesResponse(
         if (!GetPosition(hwp, &cursor) || !GetSelection(hwp, &selection)) {
             return ErrorResponse(L"POSITION", L"current cursor and selection could not be preserved");
         }
+        if (!CanRestoreSelection(selection)) {
+            return ErrorResponse(
+                L"UNSUPPORTED_SELECTION",
+                L"the active HWP selection cannot be moved and restored safely");
+        }
 
         std::vector<std::wostringstream> pageControls(pages.size());
         CComPtr<IDispatch> control;
@@ -981,6 +1147,11 @@ static std::wstring InspectPageResponse(
         Selection selection;
         if (!GetPosition(hwp, &cursor) || !GetSelection(hwp, &selection)) {
             return ErrorResponse(L"POSITION", L"current cursor and selection could not be preserved");
+        }
+        if (!CanRestoreSelection(selection)) {
+            return ErrorResponse(
+                L"UNSUPPORTED_SELECTION",
+                L"the active HWP selection cannot be moved and restored safely");
         }
 
         std::wostringstream controls;
@@ -1087,6 +1258,11 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
         if (!GetPosition(hwp, &cursor) || !GetSelection(hwp, &selection) ||
             !BoolProperty(hwp, L"IsModified", &modified)) {
             return ErrorResponse(L"POSITION", L"current document state could not be preserved");
+        }
+        if (!CanRestoreSelection(selection)) {
+            return ErrorResponse(
+                L"UNSUPPORTED_SELECTION",
+                L"the active HWP selection cannot be moved and restored safely");
         }
 
         std::vector<DetailedControlRecord> records;

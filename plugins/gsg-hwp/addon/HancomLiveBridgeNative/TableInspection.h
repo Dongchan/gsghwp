@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CellTopology.h"
+
 #include <Windows.h>
 #include <oaidl.h>
 
@@ -8,22 +10,16 @@
 
 namespace hancom::inspection {
 
-struct TableCellRecord {
-    std::wstring tableInstanceId;
-    std::wstring address;
-    LONG listId = 0;
-    LONG rowSpan = 1;
-    LONG columnSpan = 1;
-    LONG pageStart = 1;
-    LONG pageEnd = 1;
-    std::wstring text;
-    LONG width = -1;
-    LONG height = -1;
-};
+using TableCellRecord = CellTopologyCell;
 
 bool ReadCurrentListText(
     IDispatch* hwp,
     std::wstring* text) noexcept;
+
+bool ReadSelectedCellAddresses(
+    IDispatch* hwp,
+    std::vector<std::wstring>* addresses,
+    std::wstring* error) noexcept;
 
 bool SelectTableControl(
     IDispatch* hwp,
@@ -33,6 +29,12 @@ bool InspectTableCells(
     IDispatch* hwp,
     const std::wstring& tableInstanceId,
     std::vector<TableCellRecord>* cells,
+    std::wstring* error) noexcept;
+
+bool InspectTableTopology(
+    IDispatch* hwp,
+    const std::wstring& tableInstanceId,
+    CellTopology* topology,
     std::wstring* error) noexcept;
 
 }

@@ -95,9 +95,20 @@ class HwpCellBorderFill(Protocol):
     def HSet(self) -> HwpSet: ...
 
 
+class HwpFieldControl(Protocol):
+    @property
+    def HSet(self) -> HwpSet: ...
+
+    @property
+    def Command(self) -> str: ...
+
+
 class HwpParameterSets(Protocol):
     @property
     def HCellBorderFill(self) -> HwpCellBorderFill: ...
+
+    @property
+    def HFieldCtrl(self) -> HwpFieldControl: ...
 
 
 class HwpAction(Protocol):
@@ -109,6 +120,15 @@ class HwpAction(Protocol):
 
 
 class HwpComApplication(HwpRegistrar, Protocol):
+    @property
+    def SelectionMode(self) -> int: ...
+
+    @property
+    def HAction(self) -> HwpAction: ...
+
+    @property
+    def HParameterSet(self) -> HwpParameterSets: ...
+
     @property
     def XHwpDocuments(self) -> HwpDocuments: ...
 

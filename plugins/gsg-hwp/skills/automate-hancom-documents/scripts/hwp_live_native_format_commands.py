@@ -19,13 +19,11 @@ from hwp_live_native_format_inputs import (
     SplitSpec,
     TableFormatSpec,
     TextFormatSpec,
-    table_cell_coordinate,
 )
 from hwp_live_native_format_target import ResolvedTable
 from hwp_live_native_layout_format import cell_format_commands
 from hwp_live_native_text_format import ParagraphFormatting, character_command, paragraph_command
 from hwp_live_table_contract import TableCell
-from hwp_live_native_table_layout import cell_address
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +35,7 @@ class TextFormatCommandPlan:
 class TableFormatCommandPlan:
     formatting: TableFormatSpec
     table: ResolvedTable
+    cells: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,19 +78,6 @@ def _unlock_table_size_action() -> ParameterActionCommand:
     )
 
 
-def _select_range(
-    first: str,
-    move_action: str,
-    count: int,
-) -> tuple[NativeActionCommand, ...]:
-    return (
-        CellCommand(first),
-        RunCommand("TableCellBlock"),
-        RunCommand("TableCellBlockExtend"),
-        *(RunCommand(move_action) for _ in range(count)),
-    )
-
-
 def build_native_format_commands(
     plan: NativeFormatCommandPlan,
 ) -> tuple[NativeActionCommand, ...]:
@@ -114,8 +100,8 @@ def build_native_format_commands(
             if command is not None
         )
     if isinstance(plan, TableFormatCommandPlan):
-        table = plan.table
         formatted = plan.formatting
+        cells = plan.cells or (() if formatted.cell is None else (formatted.cell,))
         commands: list[NativeActionCommand] = [
             SelectControlCommand(plan.table.instance_id),
             CaptureTableCommand(),
@@ -125,26 +111,22 @@ def build_native_format_commands(
             or formatted.row_height_mm is not None
         ):
             commands.append(_unlock_table_size_action())
-        row, column = table_cell_coordinate(formatted.cell)
         if formatted.column_width_mm is not None:
-            assert table.rows is not None
-            commands.extend(
-                _select_range(cell_address(0, column - 1), "TableLowerCell", table.rows - 1)
-            )
-            commands.extend(
-                (_size_action("Width", formatted.column_width_mm), RunCommand("Cancel"))
-            )
+            for cell in cells:
+                commands.extend((CellCommand(cell), RunCommand("TableCellBlockCol")))
+                commands.extend(
+                    (_size_action("Width", formatted.column_width_mm), RunCommand("Cancel"))
+                )
         if formatted.row_height_mm is not None:
-            assert table.columns is not None
-            commands.extend(
-                _select_range(cell_address(row - 1, 0), "TableRightCell", table.columns - 1)
-            )
-            commands.extend(
-                (_size_action("Height", formatted.row_height_mm), RunCommand("Cancel"))
-            )
+            for cell in cells:
+                commands.extend((CellCommand(cell), RunCommand("TableCellBlockRow")))
+                commands.extend(
+                    (_size_action("Height", formatted.row_height_mm), RunCommand("Cancel"))
+                )
         cell_commands = cell_format_commands(formatted.formatting)
         if cell_commands:
-            commands.extend((CellCommand(formatted.cell), *cell_commands))
+            for cell in cells:
+                commands.extend((CellCommand(cell), *cell_commands))
         return tuple(commands)
     if isinstance(plan, MergeCommandPlan):
         return (
@@ -170,7 +152,10 @@ def build_native_format_commands(
                     IntegerValue(int(split.distribute_height)),
                 ),
                 NativeSetter("Merge", IntegerValue(int(split.merge))),
-                NativeSetter("Mode2", IntegerValue(int(split.mode2))),
+                NativeSetter(
+                    "Mode2",
+                    IntegerValue(int(split.split_mode == "existing_grid")),
+                ),
             ),
         ),
     )

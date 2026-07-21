@@ -1,17 +1,17 @@
 {
-  "distribution": "1.0.1",
+  "distribution": "1.0.2",
   "developer": "inodesign",
-  "mcp": "0.3.85",
-  "launcher_sha256": "7455ee50505b7295ceefe45e343ab44809d8fa17d37193aa7e31365a49749897",
-  "event_bridge_sha256": "c3ca437c44f8e6fb3708f4b3049e9976227c57fc9a08e4fe3449dc558183bba4",
-  "native_bridge": "0.5.51",
-  "native_sha256": "9195f619d769aa4bbc64049e62f160ef64165f6f00cce9a6c5a5aeb3234ce66f",
+  "mcp": "0.3.87",
+  "launcher_sha256": "26caeefc3d301f06965e6e247f88e4ff53e9761cfec08e592f7a627d49418e88",
+  "event_bridge_sha256": "03f0918b96b9270a4098642e9991e1e949c89e61aae3de7ca41fb1fc8077be6e",
+  "native_bridge": "0.5.55",
+  "native_sha256": "9b03ca3acbb61a942e63767f8b6ddbe3afb0c303036cd359a7d02fa934e310a4",
   "file_path_checker_module": "FilePathCheckerModule",
   "file_path_checker_source": "pyhwpx==1.6.6",
   "file_path_checker_sha256": "9ac5b97c47ac8aed1e8bca27a3eef39411361d8f68c262509f0c40a8f9d21bb6",
   "protocol": 9,
   "catalog_hash": "ee7a1cdaa539e705f5ce6fa6357f92847b722e390d02c6160020234508a6394d",
-  "recipe_bundle_hash": "d30df31c30dfa82fae80a9fd520cc9d212acd9837ffafb5c732b395a929955a2",
+  "recipe_bundle_hash": "fb18c8aea133fc435f7daa93dde5d4f264c6bd3d689757ed0b5845b097af3d52",
   "official_api_catalog_entries": 1452,
   "official_api_enabled_routes": 1448,
   "official_api_disabled_case_ids": [
@@ -55,6 +55,7 @@
     "hwp_apply_style",
     "hwp_format_text",
     "hwp_replace_selected_text",
+    "hwp_insert_layout",
     "hwp_append_layout",
     "hwp_append_report",
     "hwp_append_excel_table",
@@ -66,6 +67,7 @@
     "hwp_inspect_structure",
     "hwp_render_page",
     "hwp_list_styles",
+    "hwp_list_window_states",
     "hwp_disconnect",
     "hwp_get_capabilities",
     "hwp_search_tools",
@@ -75,6 +77,6 @@
   "runtime_tools": [
     "hwp_reload"
   ],
-  "exposed_tool_count": 36,
-  "qa_tool_count": 53
+  "exposed_tool_count": 38,
+  "qa_tool_count": 55
 }

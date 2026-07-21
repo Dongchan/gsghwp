@@ -2,15 +2,22 @@
 
 GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서 현재 열려 있는 HWP 문서를 빠르게 조회하고 네이티브 방식으로 편집·검수하도록 연결하는 로컬 MCP**입니다.
 
-- 배포 버전: **v1.0.1**
-- MCP 런타임: `0.3.85`
-- C++ 네이티브 브리지: `0.5.51`
+- 배포 버전: **v1.0.2**
+- MCP 런타임: `0.3.87`
+- C++ 네이티브 브리지: `0.5.55`
 - 네이티브 프로토콜: `9`
 - 개발자: **inodesign**
-- 공개 도구: 업무 도구 35개 + 런타임 재로드 1개 = 총 36개
+- 공개 도구: 업무 도구 37개 + 런타임 재로드 1개 = 총 38개
 - 공식 API 카탈로그: 1,452개 중 네이티브 라우팅 1,448개
 
 버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록합니다.
+
+### v1.0.2 주요 변경
+
+- 병합·분할된 불규칙 표를 `CellTopology`로 먼저 해석하고, 표 서식 작업 전후의 외곽 크기와 셀 구조를 검증해 실패 시 되돌립니다.
+- 문서 끝뿐 아니라 현재 커서 또는 지정한 쪽 뒤에 편집 가능한 레이아웃을 넣는 `hwp_insert_layout`을 추가했습니다.
+- 열린 한/글 창의 문서·활성·가시 상태를 확인하는 `hwp_list_window_states`를 추가했습니다.
+- 선택 영역 대상 판별, 네이티브 스냅샷 호환, 참고 이미지 기반 레이아웃 재구성과 MCP 지침 리소스를 보강했습니다.
 
 ## 어떤 MCP인가요?
 
@@ -129,7 +136,7 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 | `action:0365` | `MakeIndex` | 찾아보기 만들기 | 라우팅 제외 |
 | `action:0608` | `SaveHistoryItem` | 새 버전으로 저장 | 네이티브 실행 실패가 확인되어 제외 |
 
-`1,448개 라우팅`은 `1,448개의 MCP 도구가 화면에 노출된다`는 뜻이 아닙니다. 실제 운영 표면은 작업 중심 도구 35개와 재로드 도구 1개로 제한합니다. 모든 API를 각각 도구로 노출하면 도구 스키마가 지나치게 커지고, AI가 비슷한 도구 사이에서 헤매며, 선택·전송·추론 병목이 생길 수 있기 때문입니다.
+`1,448개 라우팅`은 `1,448개의 MCP 도구가 화면에 노출된다`는 뜻이 아닙니다. 실제 운영 표면은 작업 중심 도구 37개와 재로드 도구 1개로 제한합니다. 모든 API를 각각 도구로 노출하면 도구 스키마가 지나치게 커지고, AI가 비슷한 도구 사이에서 헤매며, 선택·전송·추론 병목이 생길 수 있기 때문입니다.
 
 원하는 기능이 공개 도구에 없더라도 내부 카탈로그와 네이티브 라우트에 대응 기능이 이미 있는 경우가 많습니다. 다음처럼 에이전트에게 **필요한 기능 하나만** 연결해 달라고 요청할 수 있습니다.
 
@@ -152,7 +159,7 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 
 한컴 Automation은 문서를 읽거나 저장하기 전에 `RegisterModule("FilePathCheckDLL", "FilePathCheckerModule")`로 파일 경로 보안 모듈을 등록해야 합니다. 이 값이 없는 깨끗한 PC에서는 MCP 도구가 정상 로드되어도 문서 연결 단계에서 `한컴 파일 경로 보안 모듈 등록이 거부되었습니다` 오류가 발생합니다.
 
-v1.0.1 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePathCheckerModule.dll`의 SHA-256을 확인한 뒤 `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll`로 복사하고, 현재 사용자 레지스트리의 `HKCU\Software\HNC\HwpAutomation\Modules`에 같은 이름으로 등록합니다. 한컴 설치 폴더, HKLM, `regsvr32`와 관리자 권한은 사용하지 않습니다.
+v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePathCheckerModule.dll`의 SHA-256을 확인한 뒤 `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll`로 복사하고, 현재 사용자 레지스트리의 `HKCU\Software\HNC\HwpAutomation\Modules`에 같은 이름으로 등록합니다. 한컴 설치 폴더, HKLM, `regsvr32`와 관리자 권한은 사용하지 않습니다.
 
 기존 `FilePathCheckerModule` 값이나 같은 대상 DLL이 있으면 먼저 존재 여부·레지스트리 종류·값·원본 파일을 백업합니다. 제거할 때는 기존 항목을 정확히 복원하고, 원래 없었다면 GSG HWP가 추가한 항목만 제거합니다.
 
@@ -176,14 +183,14 @@ v1.0.1 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePathCheck
 
 | 항목 | 변경 내용 |
 |---|---|
-| 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.51\HancomLiveBridge.dll` 복사 또는 교체 |
+| 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.55\HancomLiveBridge.dll` 복사 또는 교체 |
 | 파일 경로 보안 DLL | `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll` 복사 또는 교체 |
 | 레지스트리 1 | `HKCU\Software\HNC\HwpUserAction\Modules`의 `한컴브릿지` 값 |
 | 레지스트리 2 | `HKCU\Software\HNC\HwpUserAction\Modules\Uses`의 `한컴브릿지` 값 |
 | 레지스트리 3 | `HKCU\Software\HNC\HwpAutomation\Modules`의 `FilePathCheckerModule` 값 |
 | 원본 백업 | `%LOCALAPPDATA%\GSG_HWP\backups\<시각-식별자>` |
 | 활성 설치 기록 | `%LOCALAPPDATA%\GSG_HWP\state\active-install.json` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.0.1\.venv` |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.0.2\.venv` |
 
 백업에는 다음 정보가 저장됩니다.
 

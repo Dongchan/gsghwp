@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+# noqa: E501  # noqa: SIZE_OK — declarative certification registry is one reviewable data table
+
 from dataclasses import dataclass
 from typing import Final, Literal
 
 from hwp_operation_contract import HwpWorkflowId, OperationCandidate
 
 
-RollbackBehavior = Literal["none", "no_automatic_rollback"]
+RollbackBehavior = Literal[
+    "none",
+    "no_automatic_rollback",
+    "automatic_undo_on_postcondition_failure",
+]
 RecipeAtomicity = Literal["native_batch", "transactional"]
 
 
@@ -193,8 +199,8 @@ CERTIFIED_PRIMITIVES: Final = {
     "ApplyTextFormat": CertifiedPrimitive("ApplyTextFormat", ("resolved native text range",), ("native character or paragraph formatting",), ("parameters",), _BUILDS, _FORMATS, "no_automatic_rollback", ("protocol-9 native action result is returned",)),
     "ApplyTableFormat": CertifiedPrimitive("ApplyTableFormat", ("resolved native table and cell",), ("native cell border, fill, or text formatting",), ("target", "parameters"), _BUILDS, _FORMATS, "no_automatic_rollback", ("target table remains structurally observable",)),
     "ResolveCells": CertifiedPrimitive("ResolveCells", ("resolved native table",), ("validated cell address or range",), ("target", "parameters"), _BUILDS, _FORMATS, "none", ("every requested address belongs to the resolved table",)),
-    "TableMergeCell": CertifiedPrimitive("TableMergeCell", ("validated rectangular cell range",), ("native merged cell",), ("parameters.start", "parameters.end"), _BUILDS, _FORMATS, "no_automatic_rollback", ("target table remains structurally observable",)),
-    "TableSplitCell": CertifiedPrimitive("TableSplitCell", ("validated native table cell",), ("native split rows and columns",), ("parameters.cell", "parameters.columns", "parameters.rows"), _BUILDS, _FORMATS, "no_automatic_rollback", ("target table remains structurally observable",)),
+    "TableMergeCell": CertifiedPrimitive("TableMergeCell", ("validated rectangular cell range",), ("native merged cell",), ("parameters.start", "parameters.end"), _BUILDS, _FORMATS, "automatic_undo_on_postcondition_failure", ("target table remains structurally observable",)),
+    "TableSplitCell": CertifiedPrimitive("TableSplitCell", ("validated native table cell",), ("native split rows and columns",), ("parameters.cell", "parameters.columns", "parameters.rows"), _BUILDS, _FORMATS, "automatic_undo_on_postcondition_failure", ("target table remains structurally observable",)),
 }
 
 CERTIFIED_RECIPES: Final = {
@@ -220,6 +226,13 @@ CERTIFIED_RECIPES: Final = {
         1,
         ("MoveDocEnd", "ApplyLayout"),
         "transactional",
+    ),
+    "document.insert_layout": CertifiedRecipe(
+        "document.insert_layout.v1",
+        "document.insert_layout",
+        1,
+        ("ApplyLayout",),
+        "native_batch",
     ),
     "table.fill_existing": CertifiedRecipe(
         "table.fill_existing.v1",

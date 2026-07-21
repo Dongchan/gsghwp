@@ -18,6 +18,7 @@ from mcp.types import ContentBlock, Tool
 from pydantic import JsonValue, TypeAdapter
 
 from hwp_mcp_registry import configured_mcp_profile
+from hwp_mcp_resources import register_guidance_resources
 from hwp_mcp_worker_supervisor import HwpWorkerLaunch, HwpWorkerSupervisor
 from hwp_runtime_identity import (
     PLUGIN_ROOT,
@@ -185,7 +186,9 @@ def build_proxy(launch: HwpWorkerLaunch | None = None) -> ReloadingHwpMCP:
         async with supervisor.running():
             yield
 
-    return ReloadingHwpMCP(supervisor, lifespan)
+    server = ReloadingHwpMCP(supervisor, lifespan)
+    register_guidance_resources(server)
+    return server
 
 
 def main() -> None:

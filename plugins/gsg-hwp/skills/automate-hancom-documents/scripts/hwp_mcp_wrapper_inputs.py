@@ -187,7 +187,7 @@ class HwpCellSplit(ContractModel):
     rows: int = Field(ge=1, le=65_535)
     distribute_height: bool = False
     merge: bool = False
-    mode2: bool = True
+    split_mode: Literal["equal", "existing_grid"] = "equal"
 
     def to_parameters(self) -> Mapping[str, OperationInputValue]:
         return {
@@ -196,5 +196,5 @@ class HwpCellSplit(ContractModel):
             "rows": self.rows,
             "distribute_height": self.distribute_height,
             "merge": self.merge,
-            "mode2": self.mode2,
+            "split_mode": self.split_mode,
         }

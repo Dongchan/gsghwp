@@ -12,7 +12,7 @@ from hwp_live_native_batch import execute_native_lifecycle
 from hwp_live_operation import operate_validated
 from hwp_live_operation_recipe import (
     is_document_end_layout_intent,
-    operate_document_end_layout,
+    operate_layout,
 )
 from hwp_live_session_data import LiveHwpDataSession
 from hwp_live_session_lifecycle import lifecycle_preflight_result, lifecycle_result
@@ -157,11 +157,12 @@ class LiveHwpOperationSession(LiveHwpDataSession):
             return natural_execution.complete(policy_result)
         if (
             resolution.status == "resolved"
-            and resolution.workflow_id == "document.append_layout"
+            and resolution.workflow_id
+            in {"document.append_layout", "document.insert_layout"}
         ) or (
             workflow is None and is_document_end_layout_intent(intent_or_operation_id)
         ):
-            result = operate_document_end_layout(
+            result = operate_layout(
                 candidate,
                 intent_or_operation_id,
                 layout,
@@ -172,10 +173,15 @@ class LiveHwpOperationSession(LiveHwpDataSession):
                 guard=guard,
                 atomic=effective_policy.atomic,
             )
+            recipe_id = (
+                "recipe:page.append_from_template.v1"
+                if layout is None or layout.target == "document_end"
+                else "recipe:document.insert_layout.v1"
+            )
             return natural_execution.complete(
                 result.model_copy(
                     update={
-                        "recipe_id": "recipe:page.append_from_template.v1",
+                        "recipe_id": recipe_id,
                         "workflow_candidates": resolution.candidates,
                         "required_inputs": (
                             ("inputs.layout",) if result.status == "needs_input" else ()
@@ -224,7 +230,7 @@ class LiveHwpOperationSession(LiveHwpDataSession):
             )
         if layout is not None:
             raise HwpLiveError(
-                "layout 입력은 문서 끝 레이아웃 레시피 의도와 함께 사용해야 합니다"
+                "layout 입력은 문서 레이아웃 삽입 레시피 의도와 함께 사용해야 합니다"
             )
         if natural_execution.workflow is not None:
             return natural_execution.unsupported_dispatch_result(resolution)

@@ -14,8 +14,6 @@ The catalog keeps all 1,452 official cases searchable. Runtime batch execution r
 
 Use `hwp_get_capabilities` separately to learn what the current plugin exposes and whether each tool is C++/ATL-required, native-preferred, COM, ROT, or hybrid. Catalog presence does not mean a public mutation tool exists.
 
-Production intentionally exposes task-oriented tools instead of one MCP tool per enabled API case. If a requested feature has a catalog entry and an enabled native route but no public tool, add only that feature's typed tool or certified recipe, including target/state checks and result verification. Do not expose all 1,448 routes at once; a very large overlapping tool surface increases schema transfer, model selection ambiguity, and latency.
-
 Rules:
 
 - Search exact official identifiers before implementing a call.

@@ -268,9 +268,11 @@ def test_existing_table_cell_can_resize_its_entire_row_and_column() -> None:
         )
     ]
 
-    assert selected_cells == ["B1", "A1"]
-    assert navigation.count("TableLowerCell") == 3
-    assert navigation.count("TableRightCell") == 3
+    assert selected_cells == ["B1", "B1"]
+    assert navigation.count("TableCellBlockCol") == 1
+    assert navigation.count("TableCellBlockRow") == 1
+    assert "TableLowerCell" not in navigation
+    assert "TableRightCell" not in navigation
     assert size_unlocks == [2]
     assert sizes == {
         "ShapeTableCell/Width": 20.0,
@@ -290,7 +292,7 @@ def test_existing_table_merge_and_split_clear_size_protection_first() -> None:
         MergeCommandPlan(MergeSpec("A2", "B2"), table)
     )
     split_commands = build_native_format_commands(
-        SplitCommandPlan(SplitSpec("C2", 2, 1, False, False, False), table)
+        SplitCommandPlan(SplitSpec("C2", 2, 1, False, False, "equal"), table)
     )
 
     for commands in (merge_commands, split_commands):
@@ -328,7 +330,7 @@ def test_public_single_cell_split_does_not_enable_grid_adjustment_mode() -> None
         rows=1,
         distribute_height=False,
         merge=False,
-        mode2=bool(parameters["mode2"]),
+        split_mode="equal",
     )
     commands = build_native_format_commands(
         SplitCommandPlan(
@@ -351,7 +353,7 @@ def test_public_single_cell_split_does_not_enable_grid_adjustment_mode() -> None
         if setter.path == "Mode2"
     )
 
-    assert parameters["mode2"] is False
+    assert parameters["split_mode"] == "equal"
     assert isinstance(mode2, IntegerValue)
     assert mode2.value == 0
 
@@ -387,7 +389,7 @@ def test_native_table_scans_include_locally_split_cells_beyond_grid_end() -> Non
     action_source = (root / "ActionExecutor.cpp").read_text(encoding="utf-8")
     inspection_source = (root / "TableInspection.cpp").read_text(encoding="utf-8")
 
-    assert "ExtendTableListEnd" in action_source
+    assert "InspectTableTopology" in action_source
     assert "ExtendTableListEnd" in inspection_source
     assert "lastList = ExtendTableListEnd" in inspection_source
 
@@ -403,6 +405,7 @@ def test_format_table_schema_exposes_existing_row_and_column_dimensions() -> Non
     properties = schemas["hwp_format_table"].properties
     assert "row_height_mm" in properties
     assert "column_width_mm" in properties
+    assert "cell" not in schemas["hwp_format_table"].required
 
 
 def test_fast_inspection_reports_actual_cell_width_and_height() -> None:

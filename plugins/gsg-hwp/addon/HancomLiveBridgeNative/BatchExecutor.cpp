@@ -1,6 +1,7 @@
 #include "BatchExecutor.h"
 
 #include "DispatchInvoke.h"
+#include "TableInspection.h"
 
 #include <atlbase.h>
 #include <atlcomcli.h>
@@ -42,9 +43,21 @@ struct Position {
 
 struct Selection {
     bool selected = false;
+    LONG mode = 0;
     Position start;
     Position end;
+    std::wstring controlType;
+    std::wstring controlInstance;
+    std::vector<std::wstring> cellAddresses;
+    std::wstring cellAddressError;
 };
+
+constexpr LONG kSelectionModeMask = 0x0F;
+constexpr LONG kSelectionNone = 0;
+constexpr LONG kSelectionText = 1;
+constexpr LONG kSelectionCells = 3;
+constexpr LONG kSelectionControl = 4;
+constexpr LONG kSelectionStrict = 0x10;
 
 bool SetError(
     ExecutionResult* const result,
@@ -191,9 +204,17 @@ bool GetSelection(
     IDispatch* const hwp,
     Selection* const selection,
     ExecutionResult* const result) {
+    CComVariant modeValue;
+    HRESULT status = PropertyGet(hwp, L"SelectionMode", &modeValue);
+    if (SUCCEEDED(status)) {
+        status = AsLong(modeValue, &selection->mode);
+    }
+    if (FAILED(status)) {
+        return SetError(result, L"STATE_CAPTURE", L"", HResultText(L"SelectionMode", status));
+    }
     CComVariant startValue;
     CComVariant endValue;
-    HRESULT status = Method(hwp, L"CreateSet", {CComVariant(L"ListParaPos")}, &startValue);
+    status = Method(hwp, L"CreateSet", {CComVariant(L"ListParaPos")}, &startValue);
     CComPtr<IDispatch> start;
     if (SUCCEEDED(status)) {
         status = AsDispatch(startValue, start);
@@ -241,40 +262,75 @@ bool GetSelection(
         }
         return true;
     };
-    return readItem(start, L"List", &selection->start.list) &&
-        readItem(start, L"Para", &selection->start.paragraph) &&
-        readItem(start, L"Pos", &selection->start.character) &&
-        readItem(end, L"List", &selection->end.list) &&
-        readItem(end, L"Para", &selection->end.paragraph) &&
-        readItem(end, L"Pos", &selection->end.character);
+    if (!readItem(start, L"List", &selection->start.list) ||
+        !readItem(start, L"Para", &selection->start.paragraph) ||
+        !readItem(start, L"Pos", &selection->start.character) ||
+        !readItem(end, L"List", &selection->end.list) ||
+        !readItem(end, L"Para", &selection->end.paragraph) ||
+        !readItem(end, L"Pos", &selection->end.character)) {
+        return false;
+    }
+    const LONG baseMode = selection->mode & kSelectionModeMask;
+    if (baseMode == kSelectionCells || baseMode == kSelectionControl) {
+        CComVariant controlValue;
+        CComPtr<IDispatch> control;
+        const wchar_t* const property = baseMode == kSelectionControl
+            ? L"CurSelectedCtrl"
+            : L"ParentCtrl";
+        status = PropertyGet(hwp, property, &controlValue);
+        if (SUCCEEDED(status)) {
+            status = AsDispatch(controlValue, control);
+        }
+        CComVariant typeValue;
+        if (SUCCEEDED(status)) {
+            status = PropertyGet(control, L"CtrlID", &typeValue);
+        }
+        if (SUCCEEDED(status)) {
+            status = AsString(typeValue, &selection->controlType);
+        }
+        CComVariant instanceValue;
+        if (SUCCEEDED(status)) {
+            status = Method(control, L"GetCtrlInstID", {}, &instanceValue);
+        }
+        if (SUCCEEDED(status)) {
+            status = AsString(instanceValue, &selection->controlInstance);
+        }
+        if (FAILED(status)) {
+            return SetError(result, L"STATE_CAPTURE", L"", HResultText(property, status));
+        }
+    }
+    if (baseMode == kSelectionCells && (selection->mode & kSelectionStrict) != 0) {
+        static_cast<void>(hancom::inspection::ReadSelectedCellAddresses(
+            hwp,
+            &selection->cellAddresses,
+            &selection->cellAddressError));
+    }
+    return true;
+}
+
+bool CanRestoreSelection(const Selection& selection) noexcept {
+    const LONG baseMode = selection.mode & kSelectionModeMask;
+    if (baseMode == kSelectionNone) {
+        return true;
+    }
+    if (baseMode == kSelectionText) {
+        return selection.selected && selection.start.list == selection.end.list;
+    }
+    if (baseMode == kSelectionCells) {
+        return (selection.selected || !selection.cellAddresses.empty()) &&
+            selection.controlType == L"tbl" &&
+            !selection.controlInstance.empty();
+    }
+    if (baseMode == kSelectionControl) {
+        return !selection.controlInstance.empty();
+    }
+    return false;
 }
 
 bool RestoreSelection(
     IDispatch* const hwp,
     const Position& cursor,
-    const Selection& selection) {
-    if (!selection.selected || selection.start.list != selection.end.list) {
-        return SetExactPosition(hwp, cursor);
-    }
-    if (!SetExactPosition(hwp, Position{selection.start.list, 0, 0})) {
-        return false;
-    }
-    CComVariant returned;
-    if (FAILED(Method(
-            hwp,
-            L"SelectText",
-            {
-                CComVariant(selection.start.paragraph),
-                CComVariant(selection.start.character),
-                CComVariant(selection.end.paragraph),
-                CComVariant(selection.end.character),
-            },
-            &returned))) {
-        return false;
-    }
-    bool selected = false;
-    return SUCCEEDED(AsBool(returned, &selected)) && selected;
-}
+    const Selection& selection);
 
 bool SetPosition(
     IDispatch* const hwp,
@@ -575,6 +631,139 @@ bool GetCellAddress(
     *address = indicator.substr(opening + 1, closing - opening - 1);
     std::transform(address->begin(), address->end(), address->begin(), towupper);
     return true;
+}
+
+bool RestoreTextSelection(IDispatch* const hwp, const Selection& selection) {
+    if (!SetExactPosition(hwp, Position{selection.start.list, 0, 0})) {
+        return false;
+    }
+    CComVariant returned;
+    if (FAILED(Method(
+            hwp,
+            L"SelectText",
+            {
+                CComVariant(selection.start.paragraph),
+                CComVariant(selection.start.character),
+                CComVariant(selection.end.paragraph),
+                CComVariant(selection.end.character),
+            },
+            &returned))) {
+        return false;
+    }
+    bool selected = false;
+    CComVariant modeValue;
+    LONG mode = 0;
+    return SUCCEEDED(AsBool(returned, &selected)) && selected &&
+        SUCCEEDED(PropertyGet(hwp, L"SelectionMode", &modeValue)) &&
+        SUCCEEDED(AsLong(modeValue, &mode)) &&
+        (mode & kSelectionModeMask) == kSelectionText;
+}
+
+bool RestoreCellSelection(IDispatch* const hwp, const Selection& selection) {
+    hancom::inspection::CellTopology topology;
+    std::wstring error;
+    if (!hancom::inspection::InspectTableTopology(
+            hwp,
+            selection.controlInstance,
+            &topology,
+            &error)) {
+        return false;
+    }
+    std::wstring first;
+    std::wstring last;
+    std::vector<hancom::inspection::CellTopologyStep> path;
+    std::vector<std::wstring> region;
+    const bool planned = selection.cellAddresses.empty()
+        ? topology.PlanRectangularSelection(
+            selection.start.list,
+            selection.end.list,
+            &first,
+            &last,
+            &path,
+            &region,
+            &error)
+        : topology.PlanRectangularSelection(
+            selection.cellAddresses,
+            &first,
+            &last,
+            &path,
+            &region,
+            &error);
+    if (!planned) {
+        return false;
+    }
+    const hancom::inspection::CellTopologyCell* const firstCell = topology.Find(first);
+    CComPtr<IDispatch> action;
+    ExecutionResult local;
+    if (firstCell == nullptr ||
+        !GetDispatchProperty(hwp, L"HAction", action, &local) ||
+        !SetExactPosition(hwp, Position{firstCell->listId, 0, 0}) ||
+        !RunAction(action, L"TableCellBlock", &local)) {
+        return false;
+    }
+    if (region.size() > 1) {
+        if (!RunAction(action, L"TableCellBlockExtend", &local)) {
+            return false;
+        }
+        for (const hancom::inspection::CellTopologyStep& step : path) {
+            const wchar_t* const actionName =
+                step.direction == hancom::inspection::CellDirection::Right
+                ? L"TableRightCell"
+                : L"TableLowerCell";
+            std::wstring current;
+            if (!RunAction(action, actionName, &local) ||
+                !GetCellAddress(hwp, &current, &local) ||
+                current != step.destination) {
+                return false;
+            }
+        }
+    }
+    CComVariant modeValue;
+    LONG mode = 0;
+    return SUCCEEDED(PropertyGet(hwp, L"SelectionMode", &modeValue)) &&
+        SUCCEEDED(AsLong(modeValue, &mode)) &&
+        (mode & kSelectionModeMask) == kSelectionCells;
+}
+
+bool RestoreControlSelection(IDispatch* const hwp, const Selection& selection) {
+    if (selection.controlType == L"tbl" &&
+        hancom::inspection::SelectTableControl(hwp, selection.controlInstance)) {
+        return true;
+    }
+    CComVariant ignored;
+    static_cast<void>(Method(
+        hwp,
+        L"SelectCtrl",
+        {CComVariant(selection.controlInstance.c_str()), CComVariant(1L)},
+        &ignored));
+    CComPtr<IDispatch> selected;
+    std::wstring type;
+    std::wstring instance;
+    ExecutionResult local;
+    return TryDispatchProperty(hwp, L"CurSelectedCtrl", selected) &&
+        TryStringProperty(selected, L"CtrlID", &type) &&
+        GetControlInstanceId(selected, &instance, &local) &&
+        type == selection.controlType && instance == selection.controlInstance;
+}
+
+bool RestoreSelection(
+    IDispatch* const hwp,
+    const Position& cursor,
+    const Selection& selection) {
+    const LONG baseMode = selection.mode & kSelectionModeMask;
+    if (baseMode == kSelectionNone) {
+        return SetExactPosition(hwp, cursor);
+    }
+    if (baseMode == kSelectionText) {
+        return RestoreTextSelection(hwp, selection);
+    }
+    if (baseMode == kSelectionCells) {
+        return RestoreCellSelection(hwp, selection);
+    }
+    if (baseMode == kSelectionControl) {
+        return RestoreControlSelection(hwp, selection);
+    }
+    return false;
 }
 
 bool VerifyCellContext(
@@ -1149,6 +1338,16 @@ ExecutionResult Execute(IDispatch* const hwp, const Request& request) noexcept {
                            &result) &&
                     GetSelection(hwp, &selection, &result);
             })) {
+            return finish();
+        }
+        if (!CanRestoreSelection(selection)) {
+            SetError(
+                &result,
+                L"UNSUPPORTED_SELECTION",
+                L"",
+                selection.cellAddressError.empty()
+                    ? L"the active HWP selection cannot be moved and restored safely"
+                    : selection.cellAddressError);
             return finish();
         }
         stateCaptured = true;

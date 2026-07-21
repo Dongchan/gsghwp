@@ -11,6 +11,7 @@ HwpWorkflowId = Literal[
     "document.inspect_structure",
     "document.navigate",
     "document.append_layout",
+    "document.insert_layout",
     "document.rebuild",
     "document.save_reopen_verify",
     "document.replace_selection",

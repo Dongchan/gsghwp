@@ -81,13 +81,23 @@ $mcp = Get-Content -LiteralPath (Join-Path $pluginRoot ".mcp.json") -Raw -Encodi
     ConvertFrom-Json
 
 Assert-Equal -Expected "gsg-hwp" -Actual $plugin.name -Message "Plugin name mismatch"
-Assert-Equal -Expected "1.0.1" -Actual $plugin.version -Message "Plugin version mismatch"
+Assert-Equal -Expected "1.0.2" -Actual $plugin.version -Message "Plugin version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.author.name -Message "Plugin author mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.interface.developerName `
     -Message "Plugin developer metadata mismatch"
-Assert-Equal -Expected "1.0.1" -Actual $manifest.distribution -Message "Distribution version mismatch"
+Assert-Equal -Expected "1.0.2" -Actual $manifest.distribution -Message "Distribution version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $manifest.developer -Message "Manifest developer mismatch"
-Assert-Equal -Expected 36 -Actual $manifest.exposed_tool_count -Message "Exposed tool count mismatch"
+Assert-Equal -Expected "0.3.87" -Actual $manifest.mcp -Message "MCP version mismatch"
+Assert-Equal -Expected "0.5.55" -Actual $manifest.native_bridge `
+    -Message "Native bridge version mismatch"
+Assert-Equal -Expected 37 -Actual @($manifest.production_tools).Count `
+    -Message "Production tool count mismatch"
+Assert-True -Condition ($manifest.production_tools -contains "hwp_insert_layout") `
+    -Message "Mid-document layout tool is missing"
+Assert-True -Condition ($manifest.production_tools -contains "hwp_list_window_states") `
+    -Message "Window-state tool is missing"
+Assert-Equal -Expected 38 -Actual $manifest.exposed_tool_count -Message "Exposed tool count mismatch"
+Assert-Equal -Expected 55 -Actual $manifest.qa_tool_count -Message "QA tool count mismatch"
 Assert-Equal -Expected "hwp_reload" -Actual $manifest.runtime_tools[0] `
     -Message "Runtime reload tool mismatch"
 Assert-Equal -Expected 1452 -Actual $manifest.official_api_catalog_entries `
@@ -236,7 +246,7 @@ try {
         $automationKey.Dispose()
     }
 
-    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.0.1" `
+    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.0.2" `
         -ModulesKeyPath $modulesKey -AutomationModulesKeyPath $automationModulesKey
     Assert-True -Condition $installResult.Changed -Message "Native install did not report a change"
     Assert-True -Condition (Test-Path -LiteralPath $paths.ActiveState) `

@@ -57,7 +57,7 @@ class TextFormatSpec:
 
 @dataclass(frozen=True, slots=True)
 class TableFormatSpec:
-    cell: str
+    cell: str | None
     formatting: TableCell
     row_height_mm: float | None
     column_width_mm: float | None
@@ -76,7 +76,7 @@ class SplitSpec:
     rows: int
     distribute_height: bool
     merge: bool
-    mode2: bool
+    split_mode: Literal["equal", "existing_grid"]
 
 
 def _address(value: OperationInputValue | None) -> str | None:
@@ -194,8 +194,6 @@ def parse_table_format(
         return unknown
     cell = _address(parameters.get("cell"))
     format_parameters = {name: value for name, value in parameters.items() if name in _TEXT_KEYS}
-    if cell is None:
-        return InputFailure("needs_input", "서식을 적용할 셀 주소가 필요합니다", ("inputs.parameters.cell",))
     row_height = (
         None
         if "row_height_mm" not in parameters
@@ -278,7 +276,7 @@ def parse_merge(parameters: Mapping[str, OperationInputValue]) -> MergeSpec | In
 
 
 def parse_split(parameters: Mapping[str, OperationInputValue]) -> SplitSpec | InputFailure:
-    allowed = frozenset(("cell", "columns", "rows", "distribute_height", "merge", "mode2"))
+    allowed = frozenset(("cell", "columns", "rows", "distribute_height", "merge", "split_mode"))
     unknown = _unknown(parameters, allowed)
     if unknown is not None:
         return unknown
@@ -294,9 +292,15 @@ def parse_split(parameters: Mapping[str, OperationInputValue]) -> SplitSpec | In
     if columns == 1 and rows == 1:
         return InputFailure("schema_conflict", "셀 나누기는 칸 또는 줄 수가 2 이상이어야 합니다")
     flags: list[bool] = []
-    for name, default in (("distribute_height", False), ("merge", False), ("mode2", False)):
+    for name, default in (("distribute_height", False), ("merge", False)):
         parsed = default if name not in parameters else _boolean(parameters.get(name))
         if parsed is None:
             return InputFailure("schema_conflict", f"inputs.parameters.{name} 값은 boolean이어야 합니다")
         flags.append(parsed)
-    return SplitSpec(cell, columns, rows, flags[0], flags[1], flags[2])
+    split_mode = parameters.get("split_mode", "equal")
+    if split_mode not in ("equal", "existing_grid"):
+        return InputFailure(
+            "schema_conflict",
+            "inputs.parameters.split_mode 값은 equal 또는 existing_grid여야 합니다",
+        )
+    return SplitSpec(cell, columns, rows, flags[0], flags[1], split_mode)

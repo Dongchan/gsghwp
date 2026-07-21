@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+# noqa: E501  # noqa: SIZE_OK — native format state machine; splitting obscures mutation ordering
+
 from hwp_errors import HwpLiveError
+from hwp_live_api import HwpComApplication
 from hwp_live_native_action_models import (
     NativeActionRequest,
     NativeDetailedInspection,
@@ -15,6 +18,7 @@ from hwp_live_native_format_commands import (
     MergeCommandPlan,
     SplitCommandPlan,
     TableFormatCommandPlan,
+    TextFormatCommandPlan,
     build_native_format_commands,
 )
 from hwp_live_native_format_contract import (
@@ -23,10 +27,17 @@ from hwp_live_native_format_contract import (
     is_native_format_workflow,
 )
 from hwp_live_native_format_inputs import InputFailure
-from hwp_live_native_format_inputs import table_cell_coordinate
+from hwp_live_native_history import execute_native_history
 from hwp_live_native_format_prepare import (
     PreparationFailure,
     prepare_native_format_operation,
+)
+from hwp_live_native_table_topology import (
+    table_formula_selection_region,
+    table_topology,
+    verify_merge_transition,
+    verify_split_preflight,
+    verify_split_transition,
 )
 from hwp_live_native_format_target import TargetFailure
 from hwp_operation_certification import certified_recipe
@@ -79,6 +90,7 @@ def _verify_structural_plan(
     prepared: PreparedFormatOperation,
     window_handle: int,
     before_detail: NativeDetailedInspection | None,
+    after_page: int,
 ) -> None:
     plan = prepared.plan
     if isinstance(plan, TableFormatCommandPlan):
@@ -88,24 +100,19 @@ def _verify_structural_plan(
             and formatting.column_width_mm is None
         ):
             return
-        detail = inspect_native_structure(window_handle, plan.table.page)
+        detail = inspect_native_structure(window_handle, after_page)
         if detail is None:
             raise HwpLiveError(
                 "표 행·열 크기 변경 후 실제 셀 속성을 읽지 못했습니다"
             )
-        cell = next(
-            (
-                item
-                for item in detail.cells
-                if item.table_instance_id == plan.table.instance_id
-                and item.address == formatting.cell
-            ),
-            None,
+        cells = tuple(
+            item
+            for item in detail.cells
+            if item.table_instance_id == plan.table.instance_id
+            and item.address in plan.cells
         )
-        if cell is None:
-            raise HwpLiveError(
-                "표 행·열 크기 변경 후 대상 셀을 다시 찾지 못했습니다"
-            )
+        if len(cells) != len(plan.cells):
+            raise HwpLiveError("표 행·열 크기 변경 후 대상 셀을 다시 찾지 못했습니다")
         expected_width = (
             None
             if formatting.column_width_mm is None
@@ -116,22 +123,22 @@ def _verify_structural_plan(
             if formatting.row_height_mm is None
             else round(formatting.row_height_mm * 283.4645669)
         )
-        if (
-            expected_width is not None
-            and (
-                cell.width_hwpunit is None
-                or abs(cell.width_hwpunit - expected_width) > 1
-            )
+        if expected_width is not None and any(
+            cell.width_hwpunit is None
+            or abs(
+                cell.width_hwpunit - expected_width * cell.column_span
+            ) > cell.column_span
+            for cell in cells
         ):
             raise HwpLiveError(
                 "요청한 열 너비와 한컴의 실제 셀 너비가 일치하지 않습니다"
             )
-        if (
-            expected_height is not None
-            and (
-                cell.height_hwpunit is None
-                or abs(cell.height_hwpunit - expected_height) > 1
-            )
+        if expected_height is not None and any(
+            cell.height_hwpunit is None
+            or abs(
+                cell.height_hwpunit - expected_height * cell.row_span
+            ) > cell.row_span
+            for cell in cells
         ):
             raise HwpLiveError(
                 "요청한 행 높이와 한컴의 실제 셀 높이가 일치하지 않습니다"
@@ -139,69 +146,131 @@ def _verify_structural_plan(
         return
     if isinstance(plan, (MergeCommandPlan, SplitCommandPlan)):
         table = plan.table
-        detail = inspect_native_structure(window_handle, table.page)
-        if before_detail is None or detail is None or not any(
-            control.instance_id == table.instance_id for control in detail.controls
-        ):
-            raise HwpLiveError(
-                "표 구조 변경 후 대상 표를 네이티브 구조에서 확인하지 못했습니다"
-            )
-        before_cells = tuple(
-            cell
-            for cell in before_detail.cells
-            if cell.table_instance_id == table.instance_id
-        )
-        after_cells = tuple(
-            cell for cell in detail.cells if cell.table_instance_id == table.instance_id
-        )
-        if isinstance(plan, MergeCommandPlan):
-            start_row, start_column = table_cell_coordinate(plan.merge.start)
-            end_row, end_column = table_cell_coordinate(plan.merge.end)
-            merged_cells = tuple(
-                cell
-                for cell in before_cells
-                if start_row
-                <= table_cell_coordinate(cell.address)[0]
-                <= end_row
-                and start_column
-                <= table_cell_coordinate(cell.address)[1]
-                <= end_column
-            )
-            anchor = next(
-                (cell for cell in after_cells if cell.address == plan.merge.start),
-                None,
-            )
-            if (
-                len(merged_cells) < 2
-                or len(after_cells) != len(before_cells) - len(merged_cells) + 1
-                or anchor is None
-                or anchor.row_span != end_row - start_row + 1
-                or anchor.column_span != end_column - start_column + 1
+        if before_detail is None:
+            raise HwpLiveError("표 구조 변경 전 대상 표의 실제 셀 구조가 없습니다")
+        before_topology = table_topology(before_detail, table.instance_id)
+        try:
+            detail = inspect_native_structure(window_handle, after_page)
+            if detail is None or not any(
+                control.instance_id == table.instance_id for control in detail.controls
             ):
                 raise HwpLiveError(
-                    "요청한 셀 범위가 실제 한컴 표에서 병합되지 않았습니다"
+                    "표 구조 변경 후 대상 표를 네이티브 구조에서 확인하지 못했습니다"
                 )
-            return
-        expected_count = len(before_cells) + plan.split.columns * plan.split.rows - 1
-        before_cell = next(
-            (cell for cell in before_cells if cell.address == plan.split.cell),
-            None,
-        )
-        after_cell = next(
-            (cell for cell in after_cells if cell.address == plan.split.cell),
-            None,
-        )
-        if (
-            before_cell is None
-            or after_cell is None
-            or len(after_cells) != expected_count
-            or before_cell.text.strip() not in after_cell.text
-        ):
+            after_topology = table_topology(detail, table.instance_id)
+            if isinstance(plan, MergeCommandPlan):
+                verify_merge_transition(
+                    before_topology,
+                    after_topology,
+                    plan.merge.start,
+                    plan.merge.end,
+                )
+            else:
+                verify_split_transition(before_topology, after_topology, plan.split)
+        except HwpLiveError as verification_error:
+            try:
+                _ = execute_native_history(window_handle, "undo", 1)
+                restored = inspect_native_structure(window_handle, table.page)
+                if (
+                    restored is None
+                    or table_topology(restored, table.instance_id) != before_topology
+                ):
+                    raise HwpLiveError(
+                        "자동 Undo 후 작업 전 CellTopology가 복원되지 않았습니다"
+                    )
+            except HwpLiveError as rollback_error:
+                raise HwpLiveError(
+                    f"{verification_error}. 자동 Undo 복구 검증에도 실패했습니다: {rollback_error}"
+                ) from rollback_error
             raise HwpLiveError(
-                "요청한 셀 하나가 실제 한컴 표에서 지정한 칸·줄 수로 나뉘지 않았습니다"
-            )
+                f"{verification_error}. 자동 Undo로 작업 전 표 구조를 복구했습니다"
+            ) from verification_error
         return
     return
+
+
+def topology_preflight(
+    prepared: PreparedFormatOperation,
+    before_detail: NativeDetailedInspection,
+) -> InputFailure | None:
+    plan = prepared.plan
+    try:
+        match plan:  # noqa: E501  # noqa: MATCH_OK — closed union is fully enumerated
+            case MergeCommandPlan():
+                _ = table_topology(
+                    before_detail,
+                    plan.table.instance_id,
+                ).merge_region(plan.merge.start, plan.merge.end)
+            case SplitCommandPlan():
+                verify_split_preflight(
+                    table_topology(before_detail, plan.table.instance_id),
+                    plan.split,
+                )
+            case TableFormatCommandPlan() | TextFormatCommandPlan():
+                pass
+    except HwpLiveError as error:
+        return InputFailure("schema_conflict", str(error))
+    return None
+
+
+def _resolve_selected_table_cells(
+    prepared: PreparedFormatOperation,
+    before: NativeSnapshot,
+    detail: NativeDetailedInspection,
+    application: HwpComApplication | None = None,
+) -> PreparedFormatOperation | InputFailure:
+    plan = prepared.plan
+    if not isinstance(plan, TableFormatCommandPlan) or plan.cells:
+        return prepared
+    try:
+        topology = table_topology(detail, plan.table.instance_id)
+        selection_mode = before.selection.mode
+        if selection_mode == 0 and application is not None:
+            selection_mode = int(application.SelectionMode)
+        base_mode = selection_mode & 0x0F
+        strict_selection = bool(selection_mode & 0x10)
+        if base_mode == 3:
+            if before.selection.cell_addresses:
+                addresses = topology.selection_region_by_addresses(
+                    before.selection.cell_addresses
+                )
+            elif before.selection.cell_address_error:
+                raise HwpLiveError(before.selection.cell_address_error)
+            elif before.selection.selected:
+                addresses = topology.selection_region_by_list_ids(
+                    before.selection.start.list_id,
+                    before.selection.end.list_id,
+                )
+            elif strict_selection and application is not None:
+                addresses = table_formula_selection_region(application, topology)
+            else:
+                addresses = topology.selection_region_by_list_ids(
+                    before.selection.start.list_id,
+                    before.selection.end.list_id,
+                )
+        elif base_mode == 4 and before.control_type == "tbl":
+            addresses = tuple(cell.address for cell in topology.cells)
+        else:
+            return InputFailure(
+                "needs_input",
+                "현재 선택한 표 셀 범위를 확인하지 못했습니다",
+                ("inputs.parameters.cell",),
+            )
+    except HwpLiveError as error:
+        return InputFailure("schema_conflict", str(error))
+    if not addresses:
+        return InputFailure(
+            "needs_input",
+            "현재 선택한 표 셀이 없습니다",
+            ("inputs.parameters.cell",),
+        )
+    resolved_plan = TableFormatCommandPlan(plan.formatting, plan.table, addresses)
+    return PreparedFormatOperation(
+        resolved_plan,
+        prepared.target_id,
+        prepared.target_basis,
+        addresses,
+    )
 
 
 def _execute_prepared(
@@ -210,13 +279,64 @@ def _execute_prepared(
     prepared: PreparedFormatOperation,
 ) -> OperationResult:
     plan = prepared.plan
+    detail_page: int | None = None
+    match plan:  # noqa: E501  # noqa: MATCH_OK — closed union is fully enumerated
+        case TableFormatCommandPlan():
+            detail_page = plan.table.page if not plan.cells else None
+        case MergeCommandPlan() | SplitCommandPlan():
+            detail_page = plan.table.page
+        case TextFormatCommandPlan():
+            pass
     before_detail = (
-        inspect_native_structure(request.candidate.window_handle, plan.table.page)
-        if isinstance(plan, (MergeCommandPlan, SplitCommandPlan))
+        inspect_native_structure(request.candidate.window_handle, detail_page)
+        if detail_page is not None
         else None
     )
-    if isinstance(plan, (MergeCommandPlan, SplitCommandPlan)) and before_detail is None:
+    if detail_page is not None and before_detail is None:
         raise HwpLiveError("표 구조 변경 전 대상 표의 실제 셀 구조를 읽지 못했습니다")
+    if isinstance(plan, TableFormatCommandPlan) and not plan.cells:
+        assert before_detail is not None
+        selected = _resolve_selected_table_cells(
+            prepared,
+            before,
+            before_detail,
+            request.candidate.application,
+        )
+        if isinstance(selected, InputFailure):
+            return _failure_result(request, selected).model_copy(
+                update={
+                    "verified": False,
+                    "commands_executed": 0,
+                    "commands_completed": 0,
+                    "current_page": before.current_page,
+                    "page_count": before.page_count,
+                    "modified": before.modified,
+                    "partial_mutation": False,
+                    "retry_safe": True,
+                    "resolved_target_id": prepared.target_id,
+                    "target_resolution_basis": prepared.target_basis,
+                }
+            )
+        prepared = selected
+        plan = prepared.plan
+    if isinstance(plan, (MergeCommandPlan, SplitCommandPlan)):
+        assert before_detail is not None
+        preflight = topology_preflight(prepared, before_detail)
+        if preflight is not None:
+            return _failure_result(request, preflight).model_copy(
+                update={
+                    "verified": False,
+                    "commands_executed": 0,
+                    "commands_completed": 0,
+                    "current_page": before.current_page,
+                    "page_count": before.page_count,
+                    "modified": before.modified,
+                    "partial_mutation": False,
+                    "retry_safe": True,
+                    "resolved_target_id": prepared.target_id,
+                    "target_resolution_basis": prepared.target_basis,
+                }
+            )
     commands = build_native_format_commands(prepared.plan)
     native = execute_native_actions(
         request.candidate.window_handle,
@@ -245,6 +365,7 @@ def _execute_prepared(
         prepared,
         request.candidate.window_handle,
         before_detail,
+        after.current_page,
     )
     return _result(
         request,

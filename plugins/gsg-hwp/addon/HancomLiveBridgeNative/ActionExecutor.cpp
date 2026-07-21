@@ -3,6 +3,7 @@
 #include "DispatchInvoke.h"
 #include "OfficialApiState.h"
 #include "ParagraphFormatting.h"
+#include "TableInspection.h"
 
 #include <WinCrypt.h>
 #include <atlbase.h>
@@ -54,7 +55,7 @@ struct Context {
     CComPtr<IDispatch> table;
     std::wstring tableId;
     std::wstring currentCell;
-    std::map<std::wstring, LONG> cells;
+    hancom::inspection::CellTopology topology;
     hancom::formatting::ParagraphFormat copiedTableAnchorFormat;
     bool hasCopiedTableAnchorFormat = false;
     std::wstring copiedTableBlock;
@@ -1097,7 +1098,7 @@ bool CaptureCurrentTable(Context* const context) {
     }
     context->table = table;
     context->tableId = std::move(id);
-    context->cells.clear();
+    context->topology.Clear();
     return true;
 }
 
@@ -1138,7 +1139,7 @@ bool DeleteControl(Context* const context, const std::wstring& instanceId) {
     if (context->tableId == instanceId) {
         context->table.Release();
         context->tableId.clear();
-        context->cells.clear();
+        context->topology.Clear();
     }
     return true;
 }
@@ -1146,7 +1147,7 @@ bool DeleteControl(Context* const context, const std::wstring& instanceId) {
 bool CopyControl(Context* const context, const std::wstring& instanceId) {
     context->table.Release();
     context->tableId.clear();
-    context->cells.clear();
+    context->topology.Clear();
     context->copiedTableBlock.clear();
     context->hasCopiedTableBlock = false;
     context->hasCopiedTableAnchorFormat = false;
@@ -1382,31 +1383,6 @@ bool GetParentControlId(
         GetControlInstanceId(parent, id, result);
 }
 
-LONG ExtendTableListEnd(Context* const context, const LONG navigationEnd) {
-    LONG extendedEnd = navigationEnd;
-    for (long long candidate = static_cast<long long>(navigationEnd) + 1;
-         candidate <= (std::numeric_limits<LONG>::max)() &&
-         candidate - navigationEnd <= 200'000;
-         ++candidate) {
-        ExecutionResult local;
-        if (!SetPosition(
-                context->hwp,
-                Position{static_cast<LONG>(candidate), 0, 0},
-                &local,
-                L"table cell range")) {
-            break;
-        }
-        std::wstring parent;
-        local = ExecutionResult{};
-        if (!GetParentControlId(context->hwp, &parent, &local) ||
-            parent != context->tableId) {
-            break;
-        }
-        extendedEnd = static_cast<LONG>(candidate);
-    }
-    return extendedEnd;
-}
-
 std::wstring GetCellAddress(IDispatch* const hwp) {
     LONG sectionCount = 0;
     LONG sectionNumber = 0;
@@ -1477,101 +1453,21 @@ std::wstring GetCellAddress(IDispatch* const hwp) {
     return address;
 }
 
-bool EnterCapturedTable(Context* const context) {
-    std::wstring parent;
-    ExecutionResult local;
-    if (GetParentControlId(context->hwp, &parent, &local) &&
-        parent == context->tableId) {
-        return true;
-    }
-    if (!SelectControl(context, context->tableId) ||
-        !RunAndCountAction(
-            context,
-            L"ShapeObjTextBoxEdit",
-            context->tableId)) {
+bool BuildCellTopology(Context* const context) {
+    if (context->table == nullptr && !CaptureCurrentTable(context)) {
         return false;
     }
-    parent.clear();
-    local = ExecutionResult{};
-    if (!GetParentControlId(context->hwp, &parent, &local) ||
-        parent != context->tableId) {
+    std::wstring error;
+    if (!hancom::inspection::InspectTableTopology(
+            context->hwp,
+            context->tableId,
+            &context->topology,
+            &error)) {
         return SetError(
             context->result,
-            L"TABLE_CONTEXT",
+            L"TABLE_TOPOLOGY",
             context->tableId,
-            L"selected table did not enter its editable cell context");
-    }
-    return true;
-}
-
-bool BuildCellMap(Context* const context) {
-    if ((context->table == nullptr && !CaptureCurrentTable(context)) ||
-        !EnterCapturedTable(context)) {
-        return false;
-    }
-    if (!RunVerifiedNavigationAction(
-            context->action,
-            L"TableColEnd",
-            context->result,
-            L"table cell range") ||
-        !RunVerifiedNavigationAction(
-            context->action,
-            L"TableColPageDown",
-            context->result,
-            L"table cell range")) {
-        return false;
-    }
-    Position end;
-    if (!GetPosition(context->hwp, &end, context->result) ||
-        !RunVerifiedNavigationAction(
-            context->action,
-            L"TableColBegin",
-            context->result,
-            L"table cell range") ||
-        !RunVerifiedNavigationAction(
-            context->action,
-            L"TableColPageUp",
-            context->result,
-            L"table cell range")) {
-        return false;
-    }
-    Position first;
-    if (!GetPosition(context->hwp, &first, context->result)) {
-        return false;
-    }
-    const LONG lastList = ExtendTableListEnd(context, end.list);
-    if (lastList < first.list || lastList - first.list > 200'000) {
-        return SetError(context->result, L"TABLE_RANGE", L"", L"table cell list range is invalid");
-    }
-    context->cells.clear();
-    for (LONG list = first.list; list <= lastList; ++list) {
-        bool positioned = false;
-        ExecutionResult local;
-        if (!CallBooleanMethod(
-                context->hwp,
-                L"SetPos",
-                {CComVariant(list), CComVariant(0L), CComVariant(0L)},
-                &positioned,
-                &local) ||
-            !positioned) {
-            continue;
-        }
-        std::wstring parent;
-        local = ExecutionResult{};
-        if (!GetParentControlId(context->hwp, &parent, &local) || parent != context->tableId) {
-            continue;
-        }
-        CComVariant shape;
-        if (FAILED(PropertyGet(context->hwp, L"CellShape", &shape))) {
-            continue;
-        }
-        const std::wstring address = GetCellAddress(context->hwp);
-        if (!address.empty()) {
-            context->cells.emplace(address, list);
-        }
-    }
-    if (context->cells.empty()) {
-        return SetError(context->result, L"TABLE_RANGE", L"", L"table has no addressable cells");
+            error.empty() ? L"table topology inspection failed" : error);
     }
     return true;
 }
@@ -1583,17 +1479,22 @@ std::wstring NormalizeAddress(std::wstring address) {
 
 bool GoToCell(Context* const context, const std::wstring& requested) {
     const std::wstring address = NormalizeAddress(requested);
-    if ((context->cells.empty() && !BuildCellMap(context)) ||
-        context->cells.find(address) == context->cells.end()) {
-        if (!context->cells.empty()) {
+    if ((context->topology.Empty() && !BuildCellTopology(context)) ||
+        context->topology.Find(address) == nullptr) {
+        if (!context->topology.Empty()) {
             return SetError(context->result, L"CELL_NOT_FOUND", address, L"cell is not present in the current table");
         }
         return false;
     }
     const auto enter = [&](ExecutionResult* const result) {
+        const hancom::inspection::CellTopologyCell* const cell =
+            context->topology.Find(address);
+        if (cell == nullptr) {
+            return false;
+        }
         if (!SetPosition(
                 context->hwp,
-                Position{context->cells.at(address), 0, 0},
+                Position{cell->listId, 0, 0},
                 result,
                 address)) {
             return false;
@@ -1608,11 +1509,11 @@ bool GoToCell(Context* const context, const std::wstring& requested) {
         context->currentCell = address;
         return true;
     }
-    context->cells.clear();
-    if (!BuildCellMap(context)) {
+    context->topology.Clear();
+    if (!BuildCellTopology(context)) {
         return false;
     }
-    if (context->cells.find(address) == context->cells.end()) {
+    if (context->topology.Find(address) == nullptr) {
         return SetError(context->result, L"CELL_NOT_FOUND", address, L"cell is not present after refreshing the table map");
     }
     if (!enter(context->result)) {
@@ -1622,85 +1523,46 @@ bool GoToCell(Context* const context, const std::wstring& requested) {
     return true;
 }
 
-bool ParseAddress(const std::wstring& raw, LONG* const row, LONG* const column) {
-    const std::wstring address = NormalizeAddress(raw);
-    size_t index = 0;
-    long long parsedColumn = 0;
-    while (index < address.size() && address[index] >= L'A' && address[index] <= L'Z') {
-        parsedColumn = parsedColumn * 26 + address[index] - L'A' + 1;
-        ++index;
-    }
-    if (index == 0 || index >= address.size()) {
-        return false;
-    }
-    wchar_t* end = nullptr;
-    const long parsedRow = wcstol(address.c_str() + index, &end, 10);
-    if (end == nullptr || *end != L'\0' || parsedRow < 1 || parsedColumn < 1 ||
-        parsedColumn > (std::numeric_limits<LONG>::max)()) {
-        return false;
-    }
-    *row = parsedRow - 1;
-    *column = static_cast<LONG>(parsedColumn - 1);
-    return true;
-}
-
-std::wstring FormatAddress(const LONG row, LONG column) {
-    std::wstring letters;
-    ++column;
-    while (column > 0) {
-        const LONG remainder = (column - 1) % 26;
-        letters.insert(letters.begin(), static_cast<wchar_t>(L'A' + remainder));
-        column = (column - 1) / 26;
-    }
-    return letters + std::to_wstring(row + 1);
-}
-
 bool MergeCells(Context* const context, const std::wstring& first, const std::wstring& second) {
-    LONG startRow = 0;
-    LONG startColumn = 0;
-    LONG endRow = 0;
-    LONG endColumn = 0;
-    if (!ParseAddress(first, &startRow, &startColumn) ||
-        !ParseAddress(second, &endRow, &endColumn) ||
-        endRow < startRow || endColumn < startColumn ||
-        (endRow == startRow && endColumn == startColumn)) {
-        return SetError(context->result, L"MERGE_RANGE", first, L"merge range is invalid");
+    if (context->topology.Empty() && !BuildCellTopology(context)) {
+        return false;
+    }
+    std::vector<hancom::inspection::CellTopologyStep> path;
+    std::vector<std::wstring> region;
+    std::wstring error;
+    if (!context->topology.PlanRectangularMerge(first, second, &path, &region, &error)) {
+        return SetError(
+            context->result,
+            L"MERGE_RANGE",
+            first + L":" + second,
+            error.empty() ? L"merge range is not a complete cell rectangle" : error);
     }
     if (!GoToCell(context, first) ||
         !RunAction(context->action, L"TableCellBlock", context->result, first) ||
         !RunAction(context->action, L"TableCellBlockExtend", context->result, first)) {
         return false;
     }
-    for (LONG column = startColumn; column < endColumn; ++column) {
-        if (!RunAction(context->action, L"TableRightCell", context->result, second)) {
+    for (const hancom::inspection::CellTopologyStep& step : path) {
+        const wchar_t* const action =
+            step.direction == hancom::inspection::CellDirection::Right
+            ? L"TableRightCell"
+            : L"TableLowerCell";
+        if (!RunAction(context->action, action, context->result, step.destination)) {
             return false;
         }
-    }
-    for (LONG row = startRow; row < endRow; ++row) {
-        if (!RunAction(context->action, L"TableLowerCell", context->result, second)) {
-            return false;
+        if (GetCellAddress(context->hwp) != step.destination) {
+            return SetError(
+                context->result,
+                L"MERGE_PATH",
+                step.destination,
+                L"actual cell neighbour did not match the inspected topology");
         }
-    }
-    if (GetCellAddress(context->hwp) != NormalizeAddress(second)) {
-        return SetError(context->result, L"MERGE_RANGE", second, L"merge endpoint was not reached");
     }
     if (!RunAction(context->action, L"TableMergeCell", context->result, first)) {
         return false;
     }
-    Position anchor;
-    if (!GetPosition(context->hwp, &anchor, context->result)) {
-        return false;
-    }
-    const std::wstring normalizedFirst = NormalizeAddress(first);
-    context->cells[normalizedFirst] = anchor.list;
-    for (LONG row = startRow; row <= endRow; ++row) {
-        for (LONG column = startColumn; column <= endColumn; ++column) {
-            const std::wstring address = FormatAddress(row, column);
-            if (address != normalizedFirst) {
-                context->cells.erase(address);
-            }
-        }
-    }
+    context->topology.Clear();
+    context->currentCell = NormalizeAddress(first);
     return true;
 }
 
@@ -2219,7 +2081,7 @@ bool LeaveTable(Context* const context) {
     }
     context->table.Release();
     context->tableId.clear();
-    context->cells.clear();
+    context->topology.Clear();
     return true;
 }
 
@@ -2445,7 +2307,7 @@ bool ExecuteCommand(Context* const context, const Command& command) {
         }
         ++context->result->actionsExecuted;
         if (command.name == L"TableAppendRow") {
-            context->cells.clear();
+            context->topology.Clear();
         }
         return true;
     case CommandKind::Action:
@@ -2457,6 +2319,8 @@ bool ExecuteCommand(Context* const context, const Command& command) {
                 return false;
             }
             context->result->createdControlIds.push_back(context->tableId);
+        } else if (command.name == L"TableSplitCell") {
+            context->topology.Clear();
         }
         return true;
     case CommandKind::Call:

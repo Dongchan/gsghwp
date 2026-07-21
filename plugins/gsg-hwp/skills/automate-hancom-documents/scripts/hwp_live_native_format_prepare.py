@@ -93,7 +93,29 @@ def _prepare_table_format(
     parsed = parse_table_format(request.parameters)
     if isinstance(parsed, InputFailure):
         return parsed
-    if parsed.row_height_mm is not None or parsed.column_width_mm is not None:
+    cells: tuple[str, ...]
+    if parsed.cell is not None:
+        cells = (parsed.cell,)
+    elif before.selection.base_mode in {3, 4}:
+        if before.control_type != "tbl" or not before.control_instance_id:
+            return InputFailure(
+                "needs_input",
+                "현재 선택이 표 또는 표 셀 선택이 아닙니다",
+                ("inputs.parameters.cell",),
+            )
+        cells = ()
+    elif before.control_type == "tbl" and before.cell_address:
+        cells = (before.cell_address,)
+    else:
+        return InputFailure(
+            "needs_input",
+            "현재 커서가 표 셀 안에 있지 않고 선택한 표나 셀도 없습니다",
+            ("inputs.parameters.cell",),
+        )
+    if (
+        parsed.cell is not None
+        and (parsed.row_height_mm is not None or parsed.column_width_mm is not None)
+    ):
         row, column = table_cell_coordinate(parsed.cell)
         if resolved.rows is None or resolved.columns is None:
             return InputFailure(
@@ -106,10 +128,10 @@ def _prepare_table_format(
                 f"{parsed.cell} 셀이 대상 표의 {resolved.rows}행 {resolved.columns}열 범위를 벗어납니다",
             )
     return PreparedFormatOperation(
-        TableFormatCommandPlan(parsed, resolved),
+        TableFormatCommandPlan(parsed, resolved, cells),
         resolved.instance_id,
         resolved.basis,
-        (parsed.cell,),
+        cells,
     )
 
 

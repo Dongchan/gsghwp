@@ -22,6 +22,7 @@ from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
 ProductionHwpRequestedOperation = Literal[
     "document.inspect_structure",
     "document.append_layout",
+    "document.insert_layout",
     "document.save_reopen_verify",
     "text.format",
     "table.fill_existing",

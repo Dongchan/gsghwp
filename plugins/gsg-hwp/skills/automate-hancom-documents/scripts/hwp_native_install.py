@@ -1,31 +1,30 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from typing import Any, cast
 from winreg import (
+    CreateKeyEx,
     HKEY_CURRENT_USER,
     HKEYType,
     KEY_QUERY_VALUE,
-    OpenKey,
+    KEY_SET_VALUE,
     QueryValueEx,
     REG_DWORD,
     REG_SZ,
+    SetValueEx,
 )
-from typing import Protocol, cast
 
 from hwp_errors import HwpLiveError
 
 
-NATIVE_BRIDGE_VERSION = "0.5.51"
+NATIVE_BRIDGE_VERSION = "0.5.55"
 MODULE_NAME = "한컴브릿지"
 MODULES_KEY = r"Software\HNC\HwpUserAction\Modules"
 USES_KEY = rf"{MODULES_KEY}\Uses"
-
-
-class _RegistryValueQuery(Protocol):
-    def __call__(self, key: HKEYType, name: str, /) -> tuple[str | int, int]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,21 +56,29 @@ def _same_file_content(left: Path, right: Path) -> bool:
     return digest(left) == digest(right)
 
 
-def _read_registry_value(key_path: str) -> tuple[str | int, int] | None:
+def _set_registry_value_if_changed(
+    key: int | HKEYType,
+    name: str,
+    value: str | int,
+    value_type: int,
+) -> None:
     try:
-        with OpenKey(HKEY_CURRENT_USER, key_path, 0, KEY_QUERY_VALUE) as key:
-            return cast(_RegistryValueQuery, QueryValueEx)(key, MODULE_NAME)
+        current_value, current_type = QueryValueEx(key, name)
     except FileNotFoundError:
-        return None
+        current_value, current_type = None, None
+    if current_value != value or current_type != value_type:
+        SetValueEx(key, name, 0, value_type, cast(Any, value))
 
 
-def _registration_matches(path: Path) -> bool:
-    return _read_registry_value(MODULES_KEY) == (str(path), REG_SZ) and (
-        _read_registry_value(USES_KEY) == (1, REG_DWORD)
-    )
+def _register_native_bridge(path: Path) -> None:
+    access = KEY_QUERY_VALUE | KEY_SET_VALUE
+    with CreateKeyEx(HKEY_CURRENT_USER, MODULES_KEY, 0, access) as modules:
+        _set_registry_value_if_changed(modules, MODULE_NAME, str(path), REG_SZ)
+    with CreateKeyEx(HKEY_CURRENT_USER, USES_KEY, 0, access) as uses:
+        _set_registry_value_if_changed(uses, MODULE_NAME, 1, REG_DWORD)
 
 
-def require_native_bridge_registered(
+def ensure_native_bridge_registered(
     *,
     package_root: Path | None = None,
     local_app_data: Path | None = None,
@@ -99,9 +106,9 @@ def require_native_bridge_registered(
         / NATIVE_BRIDGE_VERSION
         / "HancomLiveBridge.dll"
     ).resolve()
-    if not _same_file_content(source, destination) or not _registration_matches(destination):
-        raise HwpLiveError(
-            "네이티브 한컴 브리지의 안전 설치가 완료되지 않았습니다. 저장소 루트에서 "
-            + "install.ps1 -AcceptChanges를 실행하세요."
-        )
-    return NativeBridgeRegistration(path=destination, copied=False)
+    copied = not _same_file_content(source, destination)
+    if copied:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _ = shutil.copy2(source, destination)
+    _register_native_bridge(destination)
+    return NativeBridgeRegistration(path=destination, copied=copied)

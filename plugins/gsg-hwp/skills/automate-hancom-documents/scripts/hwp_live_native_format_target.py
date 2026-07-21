@@ -104,6 +104,25 @@ def _resolved_table(
         ),
         None,
     )
+    if control is None:
+        for candidate_page_number in range(1, request.routing_page.page_count + 1):
+            if candidate_page_number == page_number:
+                continue
+            candidate_page = _page_for_target(request, candidate_page_number)
+            candidate_control = next(
+                (
+                    item
+                    for item in candidate_page.controls
+                    if item.control_type == "tbl"
+                    and item.instance_id == instance_id
+                ),
+                None,
+            )
+            if candidate_control is None:
+                continue
+            page_number = candidate_page_number
+            control = candidate_control
+            break
     if control is None or control.rows is None or control.columns is None:
         inspected = inspect_native_page(
             request.candidate.window_handle,

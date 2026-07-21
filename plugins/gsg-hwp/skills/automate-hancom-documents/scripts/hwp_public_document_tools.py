@@ -40,12 +40,36 @@ class HwpPublicDocumentTools:
             document=document_path,
             operation="document.append_layout",
             layout=layout.model_copy(
-                update={"target": "document_end", "replace_selection": False}
+                update={
+                    "target": "document_end",
+                    "page": None,
+                    "replace_selection": False,
+                }
             ),
             policy=HwpOperatePolicy(ambiguity="return_candidates"),
             postconditions=HwpOperatePostconditions(verify_structure=True),
         )
         result = await self._executor.execute(metadata.APPEND_LAYOUT_INTENT, inputs, None)
+        return to_public_action_result(result, (), DOCUMENT_INPUT_ALIASES)
+
+    async def hwp_insert_layout(
+        self,
+        *,
+        layout: LayoutPlan,
+        document_path: str | None = None,
+    ) -> PublicActionResult:
+        inputs = HwpOperateInputs(
+            request_id=new_public_request_id(),
+            document=document_path,
+            operation="document.insert_layout",
+            layout=layout,
+            policy=HwpOperatePolicy(
+                ambiguity="return_candidates",
+                atomic=False,
+            ),
+            postconditions=HwpOperatePostconditions(verify_structure=True),
+        )
+        result = await self._executor.execute(metadata.INSERT_LAYOUT_INTENT, inputs, None)
         return to_public_action_result(result, (), DOCUMENT_INPUT_ALIASES)
 
     async def hwp_append_report(

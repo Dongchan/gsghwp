@@ -10,7 +10,7 @@ Call the selected read tool directly. Production inspection auto-connects the si
 |---|---|
 | Page text, controls, table anchors, dimensions | `hwp_inspect_page_fast` |
 | The same plus cell addresses and values | `hwp_inspect_page_fast(include_cells=true)` |
-| Cursor, selection, current paragraph and character formatting | `hwp_inspect` |
+| Current-or-last HWP cursor, selected text/cells/table, current paragraph and character formatting | `hwp_inspect` |
 | Native style names and IDs | `hwp_list_styles` |
 | Table refs, merged cells, captions, page span, optimistic token | `hwp_inspect_structure` |
 | HWP page analysis or result verification | `hwp_render_page` (`CreatePageImage`) |
@@ -26,6 +26,8 @@ For an HWP document analysis or verification request, render the relevant page w
 
 ## State discipline
 
+- Moving focus from HWP to Codex stops the visual caret blink but does not invalidate HWP's last caret. Treat `active_target.basis=current_or_last_hwp_position` as the live edit anchor until an HWP state change is observed.
+- Use `active_target.kind`, `selection_mode_raw`, `control_instance_id`, and `cell_address` instead of inferring selection type from whether `selected_text` is empty. A cell block can have empty selected text, and a selected table is a control selection.
 - Page numbers are current results, not durable anchors. Prefer control identity and structure.
 - Pass exact cursor, selection, original text, `table_ref`, and `state_token` values back to writes.
 - If any expected value changes, discard the pending write and inspect again.

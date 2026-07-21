@@ -19,6 +19,7 @@ from hwp_operation_registry import operation_registry
 
 
 DOCUMENT_END_LAYOUT_RECIPE_ID = "recipe:document_end_layout"
+INSERT_LAYOUT_RECIPE_ID = "recipe:document.insert_layout.v1"
 _DOCUMENT_END_LAYOUT_ALIASES = frozenset(
     {
         DOCUMENT_END_LAYOUT_RECIPE_ID,
@@ -50,15 +51,26 @@ def _base_result(
     status: OperationStatus,
     message: str,
     lookup_microseconds: int,
+    plan: LayoutPlan | None,
 ) -> OperationResult:
+    target = "document_end" if plan is None else plan.target
+    if target == "document_end":
+        recipe_id = DOCUMENT_END_LAYOUT_RECIPE_ID
+        recipe_steps = ("MoveDocEnd", "ApplyLayout")
+    elif target == "after_page":
+        recipe_id = INSERT_LAYOUT_RECIPE_ID
+        recipe_steps = ("MovePage", "MovePageEnd", "BreakPage", "ApplyLayout")
+    else:
+        recipe_id = INSERT_LAYOUT_RECIPE_ID
+        recipe_steps = ("ApplyLayout",)
     return OperationResult(
         status=status,
         query=query,
         registry_entries=operation_registry().count,
         lookup_microseconds=lookup_microseconds,
         message=message,
-        recipe_id=DOCUMENT_END_LAYOUT_RECIPE_ID,
-        recipe_steps=("MoveDocEnd", "ApplyLayout"),
+        recipe_id=recipe_id,
+        recipe_steps=recipe_steps,
     )
 
 
@@ -96,10 +108,10 @@ def _native_style_plan(
         fallback_style_id=style_id,
         content_width_mm=content_width_mm,
     )
-    return resolved.model_copy(update={"target": "document_end"})
+    return resolved
 
 
-def operate_document_end_layout(
+def operate_layout(
     candidate: HwpDocumentCandidate,
     query: str,
     plan: LayoutPlan | None,
@@ -118,8 +130,9 @@ def operate_document_end_layout(
         return _base_result(
             query,
             "resolved",
-            "문서 끝 이동과 네이티브 레이아웃 적용 레시피를 확정했습니다",
+            "요청한 삽입 위치와 네이티브 레이아웃 적용 레시피를 확정했습니다",
             lookup_microseconds,
+            plan,
         )
     if not allow_document_change:
         return _base_result(
@@ -127,6 +140,7 @@ def operate_document_end_layout(
             "confirmation_required",
             "문서 변경 레시피입니다. 사용자 요청 범위와 일치할 때 allow_document_change=true로 다시 호출하세요",
             lookup_microseconds,
+            plan,
         )
     if plan is None:
         return _base_result(
@@ -134,18 +148,20 @@ def operate_document_end_layout(
             "needs_input",
             "추가할 표·문단·그림을 layout에 전달하세요",
             lookup_microseconds,
-        )
-    if plan.replace_selection:
-        return _base_result(
-            query,
-            "needs_input",
-            "문서 끝 레시피는 선택 영역 교체를 허용하지 않습니다",
-            lookup_microseconds,
+            plan,
         )
 
     before = read_native_snapshot(candidate.window_handle)
     if before is None:
         raise HwpLiveError("네이티브 레시피 실행 전 한컴 문서 상태를 읽지 못했습니다")
+    if plan.target == "current" and before.selection.selected and not plan.replace_selection:
+        return _base_result(
+            query,
+            "needs_input",
+            "현재 선택 영역이 있습니다. 삽입하려면 선택을 해제하고, 선택 내용을 교체하려면 replace_selection=true를 지정하세요",
+            lookup_microseconds,
+            plan,
+        )
 
     resolved_plan = _native_style_plan(
         candidate,
@@ -160,9 +176,13 @@ def operate_document_end_layout(
                 document_id=candidate.document.DocumentID,
                 full_name=candidate.document.FullName,
                 style_ids=(),
+                page_count=before.page_count,
                 expected_cursor=(
-                    None if expected_cursor is None else NativePosition(*expected_cursor)
+                    before.cursor
+                    if expected_cursor is None
+                    else NativePosition(*expected_cursor)
                 ),
+                expected_selection=(before.selection if plan.replace_selection else None),
             ),
             resolved_plan,
             assets,
@@ -181,17 +201,32 @@ def operate_document_end_layout(
     if after is None:
         raise HwpLiveError("네이티브 레시피 실행 후 한컴 문서 상태를 읽지 못했습니다")
 
-    base = _base_result(
-        query,
-        "executed",
-        "MoveDocEnd와 ApplyLayout을 한 번의 프로토콜 9 C++/ATL 네이티브 배치로 실행했습니다",
-        lookup_microseconds,
+    verified = (
+        native.commands_executed == len(request.commands)
+        and after.document_id == before.document_id
+        and after.modified
     )
+    if plan.target == "after_page":
+        verified = (
+            verified
+            and plan.page is not None
+            and after.page_count >= before.page_count + 1
+            and after.current_page >= plan.page + 1
+        )
+    status: OperationStatus = "executed" if verified else "partial_change"
+    message = (
+        "요청한 위치 이동과 ApplyLayout을 한 번의 프로토콜 9 C++/ATL 네이티브 배치로 실행하고 전후 상태를 검증했습니다"
+        if verified
+        else "네이티브 레이아웃 배치는 실행됐지만 삽입 위치 또는 문서 상태의 사후 검증이 일치하지 않았습니다"
+    )
+    base = _base_result(query, status, message, lookup_microseconds, plan)
     return base.model_copy(
         update={
+            "changed": True,
             "execution_mode": "native_in_process",
             "native_protocol": 9,
             "verification": "native_snapshot_before_after",
+            "verified": verified,
             "commands_executed": native.commands_executed,
             "native_elapsed_microseconds": native.elapsed_microseconds,
             "blocks_applied": len(resolved_plan.blocks),
@@ -199,5 +234,6 @@ def operate_document_end_layout(
             "current_page": after.current_page,
             "page_count": after.page_count,
             "modified": after.modified,
+            "retry_safe": verified,
         }
     )

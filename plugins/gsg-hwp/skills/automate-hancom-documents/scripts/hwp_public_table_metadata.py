@@ -35,19 +35,23 @@ HWP_FILL_TABLE_IMAGES_DESCRIPTION: Final = (
     "instance_id나 후보 ID는 target: {\"target_id\": \"...\"} 형식으로 받으며 대상 표가 여러 개면 실제 후보를 반환합니다."
 )
 HWP_FORMAT_TABLE_DESCRIPTION: Final = (
-    "기존 HWP 표의 지정 셀에 글자·문단·배경·테두리 서식을 적용하고, "
+    "기존 HWP 표의 셀에 글자·문단·배경·테두리 서식을 적용하고, "
     "row_height_mm은 그 셀이 속한 전체 행 높이, column_width_mm은 그 셀이 속한 전체 열 너비를 1~250mm로 변경합니다. "
-    "cell은 셀 주소 문자열 또는 address/label·occurrence·row_offset·column_offset 선택자를 받습니다. "
+    "불규칙 병합표에서도 F1 같은 가상 셀을 가정하지 않고 지정 셀과 교차하는 실제 물리 행·열을 선택합니다. "
+    "cell을 생략하면 현재 한컴 표 셀, 연속 선택 셀 블록, 또는 선택한 표 전체를 사용합니다. 명시할 때는 셀 주소 문자열 또는 address/label·occurrence·row_offset·column_offset 선택자를 받습니다. "
     "instance_id나 후보 ID는 target: {\"target_id\": \"...\"} 형식으로 받습니다. "
     "일반 선택 글자 서식은 hwp_format_text를 사용하며 대상 표가 여러 개면 실제 후보를 반환합니다."
 )
 HWP_MERGE_TABLE_CELLS_DESCRIPTION: Final = (
     "기존 HWP 표의 직사각형 셀 범위를 병합합니다. "
+    "실제 셀 span과 오른쪽·아래 이웃을 검사해 빈틈 없는 직사각형일 때만 실행합니다. "
     "start_cell과 end_cell은 셀 주소 문자열 또는 address/label·occurrence·row_offset·column_offset 선택자를 받습니다. "
     "instance_id나 후보 ID는 target: {\"target_id\": \"...\"} 형식으로 받으며 대상 표가 여러 개면 실제 후보를 반환합니다."
 )
 HWP_SPLIT_TABLE_CELL_DESCRIPTION: Final = (
     "기존 HWP 표의 셀 하나를 지정한 칸과 줄로 나눕니다. "
+    "split_mode='equal'은 병합되지 않은 셀을 균등 분할하고, 'existing_grid'는 대상 셀의 row_span·column_span과 정확히 일치하는 기존 격자선만 복원합니다. "
+    "격자선 불일치, 예상 밖 행·열 수 증가, 표 전체 크기 급증은 구조 검증에서 거절합니다. "
     "cell은 셀 주소 문자열 또는 address/label·occurrence·row_offset·column_offset 선택자를 받습니다. "
     "instance_id나 후보 ID는 target: {\"target_id\": \"...\"} 형식으로 받으며 대상 표가 여러 개면 실제 후보를 반환합니다."
 )

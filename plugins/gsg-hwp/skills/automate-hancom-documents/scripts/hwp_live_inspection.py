@@ -7,6 +7,8 @@ from xml.etree import ElementTree
 from hwp_errors import HwpLiveError
 from hwp_live_api import LiveHwpApplication, SelectionRange, ShapeValue
 from hwp_live_contract import (
+    ActiveHwpTarget,
+    ActiveTargetKind,
     CharacterStyle,
     CursorPosition,
     DocumentStyle,
@@ -16,6 +18,7 @@ from hwp_live_contract import (
     PageSetup,
     ParagraphStyle,
     SelectionPosition,
+    SelectionModeName,
 )
 from hwp_live_safety import LIVE_OPERATION_ERRORS
 
@@ -56,6 +59,69 @@ def _selection(
     )
 
 
+def _active_target(
+    hwp: LiveHwpApplication,
+    selection: SelectionRange,
+    guard: Callable[[], None],
+) -> ActiveHwpTarget:
+    guard()
+    raw_mode = int(hwp.SelectionMode)
+    guard()
+    base_mode = raw_mode & 0x0F
+    mode_names: dict[int, SelectionModeName] = {
+        0: "none",
+        1: "text",
+        2: "column",
+        3: "cells",
+        4: "control",
+    }
+    mode = mode_names.get(base_mode, "unknown")
+    in_cell = False
+    if base_mode != 4:
+        in_cell = bool(hwp.is_cell())
+        guard()
+    cell_address = hwp.get_cell_addr().strip().upper() if in_cell else None
+    guard()
+    control_type: str | None = None
+    control_instance_id: str | None = None
+    if base_mode == 4 or in_cell:
+        control = hwp.CurSelectedCtrl if base_mode == 4 else hwp.ParentCtrl
+        guard()
+        control_type = str(control.CtrlID).strip() or None
+        guard()
+        control_instance_id = str(control.GetCtrlInstID()).strip() or None
+        guard()
+    strict_selection = bool(raw_mode & 0x10)
+    multiple_cells = base_mode == 3 and (
+        strict_selection or selection[1:4] != selection[4:7]
+    )
+    kind: ActiveTargetKind
+    if base_mode == 4:
+        kind = "selected_table" if control_type == "tbl" else "selected_control"
+    elif base_mode == 3:
+        kind = "selected_cells"
+    elif base_mode == 2:
+        kind = "column_selection"
+    elif base_mode == 1:
+        kind = "selected_text"
+    elif base_mode == 0 and in_cell:
+        kind = "table_cell"
+    elif base_mode == 0:
+        kind = "caret"
+    else:
+        kind = "unknown"
+    return ActiveHwpTarget(
+        kind=kind,
+        selection_mode_raw=raw_mode,
+        selection_mode=mode,
+        strict_selection=strict_selection,
+        multiple_cells=multiple_cells,
+        control_type=control_type,
+        control_instance_id=control_instance_id,
+        cell_address=cell_address,
+    )
+
+
 def inspect_context(
     hwp: LiveHwpApplication,
     document: OpenDocument,
@@ -66,6 +132,7 @@ def inspect_context(
     guard()
     selected_range = hwp.get_selected_pos()
     guard()
+    active_target = _active_target(hwp, selected_range, guard)
     selected_text = ""
     if selected_range[0]:
         selected_text = hwp.get_text_file(
@@ -96,6 +163,7 @@ def inspect_context(
             character=cursor[2],
         ),
         selection=_selection(selected_range),
+        active_target=active_target,
         selected_text=selected_text[:100_000],
         page_text=page_text,
         character_style=CharacterStyle(
