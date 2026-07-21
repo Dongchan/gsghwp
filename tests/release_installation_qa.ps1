@@ -81,11 +81,11 @@ $mcp = Get-Content -LiteralPath (Join-Path $pluginRoot ".mcp.json") -Raw -Encodi
     ConvertFrom-Json
 
 Assert-Equal -Expected "gsg-hwp" -Actual $plugin.name -Message "Plugin name mismatch"
-Assert-Equal -Expected "1.0.0" -Actual $plugin.version -Message "Plugin version mismatch"
+Assert-Equal -Expected "1.0.1" -Actual $plugin.version -Message "Plugin version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.author.name -Message "Plugin author mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.interface.developerName `
     -Message "Plugin developer metadata mismatch"
-Assert-Equal -Expected "1.0.0" -Actual $manifest.distribution -Message "Distribution version mismatch"
+Assert-Equal -Expected "1.0.1" -Actual $manifest.distribution -Message "Distribution version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $manifest.developer -Message "Manifest developer mismatch"
 Assert-Equal -Expected 36 -Actual $manifest.exposed_tool_count -Message "Exposed tool count mismatch"
 Assert-Equal -Expected "hwp_reload" -Actual $manifest.runtime_tools[0] `
@@ -96,6 +96,12 @@ Assert-Equal -Expected 1448 -Actual $manifest.official_api_enabled_routes `
     -Message "Official API enabled route count mismatch"
 Assert-Equal -Expected 4 -Actual @($manifest.official_api_disabled_case_ids).Count `
     -Message "Disabled official API count mismatch"
+Assert-Equal -Expected "FilePathCheckerModule" -Actual $manifest.file_path_checker_module `
+    -Message "Security module name mismatch"
+Assert-Equal -Expected "pyhwpx==1.6.6" -Actual $manifest.file_path_checker_source `
+    -Message "Security module source mismatch"
+Assert-Equal -Expected "9ac5b97c47ac8aed1e8bca27a3eef39411361d8f68c262509f0c40a8f9d21bb6" `
+    -Actual $manifest.file_path_checker_sha256 -Message "Security module checksum mismatch"
 $expectedDisabledApi = @(
     "action:0067:CharShapeTextColorGreen",
     "action:0068:CharShapeTextColorRed",
@@ -192,9 +198,11 @@ Import-Module -Name $modulePath -Force
 $testId = [Guid]::NewGuid().ToString("N")
 $registryRoot = "Software\GSG_HWP_ReleaseQa_$testId"
 $modulesKey = "$registryRoot\Modules"
+$automationModulesKey = "$registryRoot\AutomationModules"
 $localAppData = Join-Path ([System.IO.Path]::GetTempPath()) "GsgHwpReleaseQa-$testId"
 $paths = Get-GsgHwpPaths -PackageRoot $pluginRoot -LocalAppData $localAppData
 $originalDll = [byte[]](10, 20, 30, 40)
+$originalSecurityDll = [byte[]](50, 60, 70, 80)
 
 try {
     New-Item -ItemType Directory -Path $paths.RuntimeVersionRoot -Force | Out-Null
@@ -202,6 +210,12 @@ try {
         -Value "isolated" -Encoding ASCII
     New-Item -ItemType Directory -Path (Split-Path -Parent $paths.NativeDll) -Force | Out-Null
     [System.IO.File]::WriteAllBytes($paths.NativeDll, $originalDll)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $paths.SecuritySourceDll) -Force |
+        Out-Null
+    New-Item -ItemType Directory -Path (Split-Path -Parent $paths.SecurityDll) -Force |
+        Out-Null
+    [System.IO.File]::WriteAllBytes($paths.SecuritySourceDll, [byte[]](91, 92, 93, 94))
+    [System.IO.File]::WriteAllBytes($paths.SecurityDll, $originalSecurityDll)
 
     $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($modulesKey)
     try {
@@ -210,34 +224,59 @@ try {
     finally {
         $key.Dispose()
     }
+    $automationKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($automationModulesKey)
+    try {
+        $automationKey.SetValue(
+            "FilePathCheckerModule",
+            "original-security.dll",
+            [Microsoft.Win32.RegistryValueKind]::String
+        )
+    }
+    finally {
+        $automationKey.Dispose()
+    }
 
-    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.0.0" `
-        -ModulesKeyPath $modulesKey
+    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.0.1" `
+        -ModulesKeyPath $modulesKey -AutomationModulesKeyPath $automationModulesKey
     Assert-True -Condition $installResult.Changed -Message "Native install did not report a change"
     Assert-True -Condition (Test-Path -LiteralPath $paths.ActiveState) `
         -Message "Active installation state was not written"
 
     $installedKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($modulesKey)
     $installedUsesKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("$modulesKey\Uses")
+    $installedAutomationKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+        $automationModulesKey
+    )
     try {
         Assert-Equal -Expected $paths.NativeDll -Actual $installedKey.GetValue("한컴브릿지") `
             -Message "Native registry path was not installed"
         Assert-Equal -Expected 1 -Actual $installedUsesKey.GetValue("한컴브릿지") `
             -Message "Native registry enable flag was not installed"
+        Assert-Equal -Expected $paths.SecurityDll `
+            -Actual $installedAutomationKey.GetValue("FilePathCheckerModule") `
+            -Message "Security registry path was not installed"
     }
     finally {
         $installedKey.Dispose()
         $installedUsesKey.Dispose()
+        $installedAutomationKey.Dispose()
     }
 
-    $restoreResult = Restore-GsgHwpNative -Paths $paths -ModulesKeyPath $modulesKey
+    $restoreResult = Restore-GsgHwpNative -Paths $paths -ModulesKeyPath $modulesKey `
+        -AutomationModulesKeyPath $automationModulesKey
     Assert-True -Condition $restoreResult.Restored -Message "Native restore did not run"
     Assert-Equal -Expected ($originalDll -join ",") `
         -Actual (([System.IO.File]::ReadAllBytes($paths.NativeDll)) -join ",") `
         -Message "Original DLL was not restored"
+    Assert-Equal -Expected ($originalSecurityDll -join ",") `
+        -Actual (([System.IO.File]::ReadAllBytes($paths.SecurityDll)) -join ",") `
+        -Message "Original security DLL was not restored"
 
     $restoredKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($modulesKey)
     $restoredUsesKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("$modulesKey\Uses")
+    $restoredAutomationKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
+        $automationModulesKey
+    )
     try {
         Assert-Equal -Expected "original-bridge.dll" -Actual $restoredKey.GetValue("한컴브릿지") `
             -Message "Original registry value was not restored"
@@ -245,12 +284,16 @@ try {
             $null -eq $restoredUsesKey -or
             $restoredUsesKey.GetValueNames() -notcontains "한컴브릿지"
         ) -Message "Registry value that was originally absent was not removed"
+        Assert-Equal -Expected "original-security.dll" `
+            -Actual $restoredAutomationKey.GetValue("FilePathCheckerModule") `
+            -Message "Original security registry value was not restored"
     }
     finally {
         $restoredKey.Dispose()
         if ($null -ne $restoredUsesKey) {
             $restoredUsesKey.Dispose()
         }
+        $restoredAutomationKey.Dispose()
     }
 
     Assert-True -Condition (Test-Path -LiteralPath $restoreResult.BackupFile) `
@@ -271,4 +314,4 @@ finally {
     }
 }
 
-Write-Output "PASS: release structure, privacy scan, checksums, registry/DLL backup and restore, runtime cleanup"
+Write-Output "PASS: release structure, privacy scan, checksums, native/security registry and DLL restore, runtime cleanup"

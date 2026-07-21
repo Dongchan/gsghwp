@@ -16,9 +16,11 @@ $paths = Get-GsgHwpPaths -PackageRoot $pluginRoot
 $manifest = Test-GsgHwpPackage -Paths $paths
 
 Write-Host "GSG HWP v$($manifest.distribution) 설치 예정 변경사항"
-Write-Host "  DLL 복사: $($paths.NativeDll)"
+Write-Host "  네이티브 DLL 복사: $($paths.NativeDll)"
+Write-Host "  파일 경로 보안 DLL 복사: $($paths.SecurityDll)"
 Write-Host "  레지스트리: HKCU\Software\HNC\HwpUserAction\Modules -> 한컴브릿지"
 Write-Host "  레지스트리: HKCU\Software\HNC\HwpUserAction\Modules\Uses -> 한컴브릿지"
+Write-Host "  레지스트리: HKCU\Software\HNC\HwpAutomation\Modules -> FilePathCheckerModule"
 Write-Host "  원본 백업: $($paths.BackupsRoot)"
 Write-Host "  Python 환경: $($paths.RuntimeEnvironment)"
 Write-Host "관리자 권한과 HKLM 변경은 사용하지 않습니다."
@@ -54,8 +56,11 @@ finally {
     }
 }
 
+$null = Test-GsgHwpSecurityModule -Paths $paths `
+    -ExpectedSha256 $manifest.file_path_checker_sha256
 $result = Install-GsgHwpNative -Paths $paths -PackageVersion $manifest.distribution
 Write-Host "설치 완료"
 Write-Host "  복구 백업: $($result.BackupFile)"
-Write-Host "  설치 DLL: $($result.NativeDll)"
+Write-Host "  설치 네이티브 DLL: $($result.NativeDll)"
+Write-Host "  설치 파일 경로 보안 DLL: $($result.SecurityDll)"
 Write-Host "한/글과 Codex를 다시 시작한 뒤 새 작업에서 플러그인을 사용하세요."

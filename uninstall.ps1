@@ -17,8 +17,8 @@ $paths = Get-GsgHwpPaths -PackageRoot $pluginRoot
 $manifest = Get-Content -LiteralPath $paths.ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
 Write-Host "GSG HWP v$($manifest.distribution) 원상복구 예정 변경사항"
-Write-Host "  설치 전 HKCU 레지스트리 2개 값 복원"
-Write-Host "  설치 전 DLL 복원 또는 GSG HWP가 추가한 DLL 제거"
+Write-Host "  설치 전 HKCU 레지스트리 3개 값 복원"
+Write-Host "  설치 전 네이티브/파일 경로 보안 DLL 복원 또는 GSG HWP가 추가한 DLL 제거"
 if (-not $KeepRuntime) {
     Write-Host "  전용 Python 환경 제거: $($paths.RuntimeVersionRoot)"
 }

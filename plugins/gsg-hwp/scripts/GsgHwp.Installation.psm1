@@ -3,6 +3,8 @@ $ErrorActionPreference = "Stop"
 
 $script:ModuleName = "한컴브릿지"
 $script:DefaultModulesKey = "Software\HNC\HwpUserAction\Modules"
+$script:SecurityModuleName = "FilePathCheckerModule"
+$script:DefaultAutomationModulesKey = "Software\HNC\HwpAutomation\Modules"
 
 function Write-GsgHwpJson {
     param(
@@ -174,8 +176,10 @@ function Get-GsgHwpPaths {
     $dataRoot = Join-Path $LocalAppData "GSG_HWP"
     $runtimeRoot = Join-Path $dataRoot "runtime"
     $runtimeVersionRoot = Join-Path $runtimeRoot ([string]$manifest.distribution)
+    $runtimeEnvironment = Join-Path $runtimeVersionRoot ".venv"
     $nativeRoot = Join-Path $LocalAppData "HancomDocumentAutomation\native"
     $nativeVersionRoot = Join-Path $nativeRoot ([string]$manifest.native_bridge)
+    $securityRoot = Join-Path $dataRoot "security"
     $stateRoot = Join-Path $dataRoot "state"
     return [pscustomobject][ordered]@{
         PackageRoot = $root
@@ -187,7 +191,12 @@ function Get-GsgHwpPaths {
         NativeDll = Join-Path $nativeVersionRoot "HancomLiveBridge.dll"
         RuntimeRoot = $runtimeRoot
         RuntimeVersionRoot = $runtimeVersionRoot
-        RuntimeEnvironment = Join-Path $runtimeVersionRoot ".venv"
+        RuntimeEnvironment = $runtimeEnvironment
+        SecurityRoot = $securityRoot
+        SecuritySourceDll = Join-Path $runtimeEnvironment (
+            "Lib\site-packages\pyhwpx\FilePathCheckerModule.dll"
+        )
+        SecurityDll = Join-Path $securityRoot "FilePathCheckerModule.dll"
         StateRoot = $stateRoot
         ActiveState = Join-Path $stateRoot "active-install.json"
         BackupsRoot = Join-Path $dataRoot "backups"
@@ -233,6 +242,27 @@ function Test-GsgHwpPackage {
     return $manifest
 }
 
+function Test-GsgHwpSecurityModule {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Paths,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSha256
+    )
+
+    if (-not (Test-Path -LiteralPath $Paths.SecuritySourceDll -PathType Leaf)) {
+        throw "Required FilePathCheckerModule.dll is missing: $($Paths.SecuritySourceDll)"
+    }
+    $actualHash = (
+        Get-FileHash -LiteralPath $Paths.SecuritySourceDll -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($actualHash -ne $ExpectedSha256.ToLowerInvariant()) {
+        throw "FilePathCheckerModule.dll checksum verification failed"
+    }
+    return $Paths.SecuritySourceDll
+}
+
 function New-GsgHwpBackup {
     param(
         [Parameter(Mandatory = $true)]
@@ -240,7 +270,9 @@ function New-GsgHwpBackup {
         [Parameter(Mandatory = $true)]
         [string]$PackageVersion,
         [Parameter(Mandatory = $true)]
-        [string]$ModulesKeyPath
+        [string]$ModulesKeyPath,
+        [Parameter(Mandatory = $true)]
+        [string]$AutomationModulesKeyPath
     )
 
     $backupId = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ") + "-" +
@@ -252,23 +284,82 @@ function New-GsgHwpBackup {
     if ($dllExisted) {
         Copy-Item -LiteralPath $Paths.NativeDll -Destination $originalDll -Force
     }
+    $originalSecurityDll = Join-Path $backupDirectory "original-FilePathCheckerModule.dll"
+    $securityDllExisted = Test-Path -LiteralPath $Paths.SecurityDll -PathType Leaf
+    if ($securityDllExisted) {
+        Copy-Item -LiteralPath $Paths.SecurityDll -Destination $originalSecurityDll -Force
+    }
     $backup = [pscustomobject][ordered]@{
-        schema_version = 1
+        schema_version = 2
         created_utc = [DateTime]::UtcNow.ToString("o")
         package_version = $PackageVersion
         registry = @(
             Get-GsgHwpRegistrySnapshot -KeyPath $ModulesKeyPath -Name $script:ModuleName
             Get-GsgHwpRegistrySnapshot -KeyPath "$ModulesKeyPath\Uses" -Name $script:ModuleName
+            Get-GsgHwpRegistrySnapshot -KeyPath $AutomationModulesKeyPath `
+                -Name $script:SecurityModuleName
         )
         dll = [pscustomobject][ordered]@{
             destination = $Paths.NativeDll
             existed = $dllExisted
             backup_file = if ($dllExisted) { $originalDll } else { $null }
         }
+        security_dll = [pscustomobject][ordered]@{
+            destination = $Paths.SecurityDll
+            existed = $securityDllExisted
+            backup_file = if ($securityDllExisted) { $originalSecurityDll } else { $null }
+        }
     }
     $backupFile = Join-Path $backupDirectory "original-state.json"
     Write-GsgHwpJson -Value $backup -Path $backupFile
     return $backupFile
+}
+
+function Ensure-GsgHwpSecurityBackup {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Paths,
+        [Parameter(Mandatory = $true)]
+        [string]$BackupFile,
+        [Parameter(Mandatory = $true)]
+        [string]$AutomationModulesKeyPath
+    )
+
+    $backup = Get-Content -LiteralPath $BackupFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    $hasSecurityDll = $backup.PSObject.Properties.Name -contains "security_dll"
+    $hasSecurityRegistry = @(
+        @($backup.registry) | Where-Object {
+            [string]$_.name -ieq $script:SecurityModuleName -and
+            [string]$_.key_path -ieq $AutomationModulesKeyPath
+        }
+    ).Count -gt 0
+    if ($hasSecurityDll -and $hasSecurityRegistry -and [int]$backup.schema_version -ge 2) {
+        return
+    }
+
+    $backupDirectory = Split-Path -Parent $BackupFile
+    if (-not $hasSecurityDll) {
+        $originalSecurityDll = Join-Path $backupDirectory "original-FilePathCheckerModule.dll"
+        $securityDllExisted = Test-Path -LiteralPath $Paths.SecurityDll -PathType Leaf
+        if ($securityDllExisted) {
+            Copy-Item -LiteralPath $Paths.SecurityDll -Destination $originalSecurityDll -Force
+        }
+        $backup | Add-Member -MemberType NoteProperty -Name "security_dll" -Force -Value (
+            [pscustomobject][ordered]@{
+                destination = $Paths.SecurityDll
+                existed = $securityDllExisted
+                backup_file = if ($securityDllExisted) { $originalSecurityDll } else { $null }
+            }
+        )
+    }
+    if (-not $hasSecurityRegistry) {
+        $backup.registry = @($backup.registry) + @(
+            Get-GsgHwpRegistrySnapshot -KeyPath $AutomationModulesKeyPath `
+                -Name $script:SecurityModuleName
+        )
+    }
+    $backup.schema_version = 2
+    Write-GsgHwpJson -Value $backup -Path $BackupFile
 }
 
 function Restore-GsgHwpBackup {
@@ -295,6 +386,26 @@ function Restore-GsgHwpBackup {
     elseif (Test-Path -LiteralPath $destination -PathType Leaf) {
         Remove-Item -LiteralPath $destination -Force
     }
+
+    if ($backup.PSObject.Properties.Name -contains "security_dll") {
+        $securityDestination = [string]$backup.security_dll.destination
+        Assert-GsgHwpChildPath -Child $securityDestination -Parent $Paths.SecurityRoot
+        if ($backup.security_dll.existed) {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $securityDestination) -Force |
+                Out-Null
+            Copy-Item -LiteralPath ([string]$backup.security_dll.backup_file) `
+                -Destination $securityDestination -Force
+        }
+        elseif (Test-Path -LiteralPath $securityDestination -PathType Leaf) {
+            Remove-Item -LiteralPath $securityDestination -Force
+        }
+        if (
+            (Test-Path -LiteralPath $Paths.SecurityRoot -PathType Container) -and
+            @(Get-ChildItem -LiteralPath $Paths.SecurityRoot -Force).Count -eq 0
+        ) {
+            Remove-Item -LiteralPath $Paths.SecurityRoot -Force
+        }
+    }
 }
 
 function Install-GsgHwpNative {
@@ -304,13 +415,18 @@ function Install-GsgHwpNative {
         $Paths,
         [Parameter(Mandatory = $true)]
         [string]$PackageVersion,
-        [string]$ModulesKeyPath = $script:DefaultModulesKey
+        [string]$ModulesKeyPath = $script:DefaultModulesKey,
+        [string]$AutomationModulesKeyPath = $script:DefaultAutomationModulesKey
     )
 
+    if (-not (Test-Path -LiteralPath $Paths.SecuritySourceDll -PathType Leaf)) {
+        throw "Required FilePathCheckerModule.dll is missing: $($Paths.SecuritySourceDll)"
+    }
     $createdBackup = -not (Test-Path -LiteralPath $Paths.ActiveState -PathType Leaf)
     if ($createdBackup) {
         $backupFile = New-GsgHwpBackup -Paths $Paths -PackageVersion $PackageVersion `
-            -ModulesKeyPath $ModulesKeyPath
+            -ModulesKeyPath $ModulesKeyPath `
+            -AutomationModulesKeyPath $AutomationModulesKeyPath
     }
     else {
         $activeState = Get-Content -LiteralPath $Paths.ActiveState -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -318,13 +434,21 @@ function Install-GsgHwpNative {
         if (-not (Test-Path -LiteralPath $backupFile -PathType Leaf)) {
             throw "The active installation backup is missing: $backupFile"
         }
+        Ensure-GsgHwpSecurityBackup -Paths $Paths -BackupFile $backupFile `
+            -AutomationModulesKeyPath $AutomationModulesKeyPath
     }
 
     try {
         New-Item -ItemType Directory -Path (Split-Path -Parent $Paths.NativeDll) -Force | Out-Null
         Copy-Item -LiteralPath $Paths.SourceDll -Destination $Paths.NativeDll -Force
+        New-Item -ItemType Directory -Path (Split-Path -Parent $Paths.SecurityDll) -Force |
+            Out-Null
+        Copy-Item -LiteralPath $Paths.SecuritySourceDll -Destination $Paths.SecurityDll -Force
         $modulesKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($ModulesKeyPath)
         $usesKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("$ModulesKeyPath\Uses")
+        $automationModulesKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey(
+            $AutomationModulesKeyPath
+        )
         try {
             $modulesKey.SetValue(
                 $script:ModuleName,
@@ -336,17 +460,24 @@ function Install-GsgHwpNative {
                 1,
                 [Microsoft.Win32.RegistryValueKind]::DWord
             )
+            $automationModulesKey.SetValue(
+                $script:SecurityModuleName,
+                $Paths.SecurityDll,
+                [Microsoft.Win32.RegistryValueKind]::String
+            )
         }
         finally {
             $modulesKey.Dispose()
             $usesKey.Dispose()
+            $automationModulesKey.Dispose()
         }
         $state = [pscustomobject][ordered]@{
-            schema_version = 1
+            schema_version = 2
             package_version = $PackageVersion
             installed_utc = [DateTime]::UtcNow.ToString("o")
             backup_file = $backupFile
             native_dll = $Paths.NativeDll
+            security_dll = $Paths.SecurityDll
         }
         Write-GsgHwpJson -Value $state -Path $Paths.ActiveState
     }
@@ -361,6 +492,7 @@ function Install-GsgHwpNative {
         Changed = $true
         BackupFile = $backupFile
         NativeDll = $Paths.NativeDll
+        SecurityDll = $Paths.SecurityDll
     }
 }
 
@@ -369,10 +501,12 @@ function Restore-GsgHwpNative {
     param(
         [Parameter(Mandatory = $true)]
         $Paths,
-        [string]$ModulesKeyPath = $script:DefaultModulesKey
+        [string]$ModulesKeyPath = $script:DefaultModulesKey,
+        [string]$AutomationModulesKeyPath = $script:DefaultAutomationModulesKey
     )
 
     $null = $ModulesKeyPath
+    $null = $AutomationModulesKeyPath
     if (-not (Test-Path -LiteralPath $Paths.ActiveState -PathType Leaf)) {
         return [pscustomobject][ordered]@{ Restored = $false; BackupFile = $null }
     }
@@ -406,5 +540,6 @@ Export-ModuleMember -Function @(
     "Remove-GsgHwpRuntime",
     "Restore-GsgHwpNative",
     "Test-GsgHwpPackage",
+    "Test-GsgHwpSecurityModule",
     "Test-GsgHwpStopped"
 )

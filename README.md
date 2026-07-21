@@ -2,7 +2,7 @@
 
 GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서 현재 열려 있는 HWP 문서를 빠르게 조회하고 네이티브 방식으로 편집·검수하도록 연결하는 로컬 MCP**입니다.
 
-- 배포 버전: **v1.0.0**
+- 배포 버전: **v1.0.1**
 - MCP 런타임: `0.3.85`
 - C++ 네이티브 브리지: `0.5.51`
 - 네이티브 프로토콜: `9`
@@ -67,6 +67,7 @@ flowchart LR
 | Python MCP 프록시·워커 | 도구 스키마, 대상 선택, 상태 토큰, 작업 recipe, 결과 변환과 핫리로드를 담당합니다. |
 | `HancomEventBridge.exe` | 등록 없이 한컴 Automation 이벤트를 받아 문서 변경 시 조회 캐시를 무효화합니다. |
 | `HancomLiveBridge.dll` | 한/글 프로세스에 로드되는 Win32 UserAction DLL입니다. `IHwpObject`를 받아 ROT에 게시합니다. |
+| `FilePathCheckerModule.dll` | 한컴 Automation이 로컬 파일 경로 접근을 허용하도록 `RegisterModule`에서 사용하는 사용자별 파일 경로 보안 모듈입니다. |
 | ATL 배치 객체 | `Snapshot`, `InspectPageV3`, `InspectStructure`, `ExecuteActions` 등을 한/글 프로세스 안에서 실행합니다. |
 
 UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiveBridge.<PID>`로, ATL 배치 객체를 `!HancomLiveBatch.<PID>`로 ROT에 게시합니다. 문서를 새로 열거나 복사해서 조작하지 않고 사용자가 열어 둔 정확한 문서 인스턴스를 대상으로 합니다.
@@ -145,13 +146,21 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 - `uv` 패키지 관리자
 - Python 3.12 런타임은 설치 과정에서 사용자별 격리 환경으로 구성
 
-네이티브 UserAction DLL과 Event Bridge는 `Win32`, 런처는 `x64` Release 빌드입니다. 다른 한/글 주버전·비트 조합은 별도 검증 전까지 지원 대상으로 간주하지 않습니다.
+네이티브 UserAction DLL, 파일 경로 보안 모듈과 Event Bridge는 `Win32`, 런처는 `x64` Release 빌드입니다. 다른 한/글 주버전·비트 조합은 별도 검증 전까지 지원 대상으로 간주하지 않습니다.
+
+## 한컴 파일 경로 보안 모듈
+
+한컴 Automation은 문서를 읽거나 저장하기 전에 `RegisterModule("FilePathCheckDLL", "FilePathCheckerModule")`로 파일 경로 보안 모듈을 등록해야 합니다. 이 값이 없는 깨끗한 PC에서는 MCP 도구가 정상 로드되어도 문서 연결 단계에서 `한컴 파일 경로 보안 모듈 등록이 거부되었습니다` 오류가 발생합니다.
+
+v1.0.1 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePathCheckerModule.dll`의 SHA-256을 확인한 뒤 `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll`로 복사하고, 현재 사용자 레지스트리의 `HKCU\Software\HNC\HwpAutomation\Modules`에 같은 이름으로 등록합니다. 한컴 설치 폴더, HKLM, `regsvr32`와 관리자 권한은 사용하지 않습니다.
+
+기존 `FilePathCheckerModule` 값이나 같은 대상 DLL이 있으면 먼저 존재 여부·레지스트리 종류·값·원본 파일을 백업합니다. 제거할 때는 기존 항목을 정확히 복원하고, 원래 없었다면 GSG HWP가 추가한 항목만 제거합니다.
 
 ## 에이전트에게 GitHub 주소만 주고 설치하기
 
 ### Codex에 요청
 
-> https://github.com/innae1121-bit/gsghwp.git 를 설치해줘. 먼저 README.md와 AGENTS.md를 읽고, 변경되는 DLL·HKCU 레지스트리 2개 값·백업 위치·원상복구 방법을 나에게 안내해. install.ps1을 옵션 없이 실행해 미리보기를 보여준 뒤 설치를 진행하고, gsg-hwp 플러그인을 등록해서 새 작업에서 MCP 도구를 확인해줘.
+> https://github.com/innae1121-bit/gsghwp.git 를 설치해줘. 먼저 README.md와 AGENTS.md를 읽고, 변경되는 DLL 2개·HKCU 레지스트리 3개 값·백업 위치·원상복구 방법을 나에게 안내해. install.ps1을 옵션 없이 실행해 미리보기를 보여준 뒤 설치를 진행하고, gsg-hwp 플러그인을 등록해서 새 작업에서 MCP 도구를 확인해줘.
 
 ### Claude Code에 요청
 
@@ -168,18 +177,20 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 | 항목 | 변경 내용 |
 |---|---|
 | 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.51\HancomLiveBridge.dll` 복사 또는 교체 |
+| 파일 경로 보안 DLL | `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll` 복사 또는 교체 |
 | 레지스트리 1 | `HKCU\Software\HNC\HwpUserAction\Modules`의 `한컴브릿지` 값 |
 | 레지스트리 2 | `HKCU\Software\HNC\HwpUserAction\Modules\Uses`의 `한컴브릿지` 값 |
+| 레지스트리 3 | `HKCU\Software\HNC\HwpAutomation\Modules`의 `FilePathCheckerModule` 값 |
 | 원본 백업 | `%LOCALAPPDATA%\GSG_HWP\backups\<시각-식별자>` |
 | 활성 설치 기록 | `%LOCALAPPDATA%\GSG_HWP\state\active-install.json` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.0.0\.venv` |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.0.1\.venv` |
 
 백업에는 다음 정보가 저장됩니다.
 
 - 각 레지스트리 키가 원래 존재했는지
-- `한컴브릿지` 값이 원래 존재했는지
+- `한컴브릿지`와 `FilePathCheckerModule` 값이 원래 존재했는지
 - 원래 값의 종류(`String`, `DWord` 등)와 실제 값
-- 대상 경로에 DLL이 원래 있었는지와 기존 DLL 원본
+- 두 대상 경로에 DLL이 원래 있었는지와 기존 DLL 원본
 
 설치는 현재 사용자 영역인 HKCU만 사용합니다. HKLM, `regsvr32`, 관리자 권한은 사용하지 않습니다. MCP 서버 시작은 설치 상태를 **읽기 전용으로 확인**할 뿐 DLL 복사나 레지스트리 변경을 자동 실행하지 않습니다.
 
@@ -273,7 +284,7 @@ codex plugin marketplace remove gsg-hwp
 claude mcp remove gsg-hwp
 ```
 
-설치 전에 DLL이 있었다면 원본 DLL을 되돌리고, 없었다면 GSG HWP가 추가한 DLL을 제거합니다. 레지스트리도 설치 전의 존재 여부·종류·값으로 복원합니다. 복구에 사용한 백업은 감사와 추가 복구를 위해 보존합니다. Python 환경을 남기려면 `uninstall.ps1 -AcceptChanges -KeepRuntime`을 사용합니다.
+설치 전에 네이티브 또는 파일 경로 보안 DLL이 있었다면 각 원본 DLL을 되돌리고, 없었다면 GSG HWP가 추가한 DLL을 제거합니다. 레지스트리 3개 값도 설치 전의 존재 여부·종류·값으로 복원합니다. 복구에 사용한 백업은 감사와 추가 복구를 위해 보존합니다. Python 환경을 남기려면 `uninstall.ps1 -AcceptChanges -KeepRuntime`을 사용합니다.
 
 ## 사용 예시
 
