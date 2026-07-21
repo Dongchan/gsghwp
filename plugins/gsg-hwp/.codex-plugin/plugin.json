@@ -1,0 +1,38 @@
+{
+  "name": "gsg-hwp",
+  "version": "1.0.0",
+  "description": "열려 있는 한/글 문서를 에이전트에서 조회·편집·검수하는 Windows용 네이티브 MCP 플러그인",
+  "author": {
+    "name": "inodesign",
+    "url": "https://github.com/innae1121-bit"
+  },
+  "homepage": "https://github.com/innae1121-bit/gsghwp",
+  "repository": "https://github.com/innae1121-bit/gsghwp",
+  "keywords": [
+    "hancom",
+    "hwp",
+    "mcp",
+    "native-automation",
+    "korean"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "GSG HWP 한컴 자동화",
+    "shortDescription": "열린 HWP를 네이티브 방식으로 조회·편집·검수합니다.",
+    "longDescription": "Windows 한/글의 공식 Automation API와 C++/ATL UserAction 브리지를 연결해 현재 열린 문서의 표, 그림, 텍스트, 스타일과 구조를 빠르게 조회하고 안전하게 편집한 뒤 렌더 결과를 검수합니다.",
+    "developerName": "inodesign",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/innae1121-bit/gsghwp",
+    "defaultPrompt": [
+      "현재 열린 HWP의 구조와 표를 빠르게 확인해줘.",
+      "선택한 표에 데이터를 채우고 결과를 검수해줘.",
+      "현재 문서의 그림을 교체하고 배치를 확인해줘."
+    ]
+  }
+}

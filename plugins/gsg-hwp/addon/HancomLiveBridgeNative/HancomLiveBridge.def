@@ -1,0 +1,7 @@
+LIBRARY "HancomLiveBridge"
+
+EXPORTS
+    QueryUserActionInterface
+    IsAccessiblePath
+    GetBridgeLastHRESULT
+    ReleaseBridgePublication

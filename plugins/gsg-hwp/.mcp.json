@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "gsg-hwp": {
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "./scripts/start-mcp.ps1"
+      ],
+      "cwd": "."
+    }
+  }
+}

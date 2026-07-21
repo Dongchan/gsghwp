@@ -1,0 +1,6 @@
+interface:
+  display_name: "GSG HWP 한컴 자동화"
+  short_description: "열린 HWP 실시간 편집과 네이티브 레이아웃 구성"
+  default_prompt: "$automate-hancom-documents로 현재 열린 HWP에서 사용자 요청에 맞는 가장 구체적인 작업 도구를 즉시 실행하세요. 대상이 여러 개이거나 사용자가 제공해야 할 값이 없을 때만 질문하세요. 실패해도 computer-use나 UI 자동화로 우회하지 마세요."
+policy:
+  allow_implicit_invocation: true

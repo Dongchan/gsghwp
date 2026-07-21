@@ -1,0 +1,20 @@
+{
+  "name": "gsg-hwp",
+  "interface": {
+    "displayName": "GSG HWP"
+  },
+  "plugins": [
+    {
+      "name": "gsg-hwp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/gsg-hwp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

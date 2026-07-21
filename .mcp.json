@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "gsg-hwp": {
+      "type": "stdio",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${CLAUDE_PROJECT_DIR:-.}/plugins/gsg-hwp/scripts/start-mcp.ps1"
+      ]
+    }
+  }
+}

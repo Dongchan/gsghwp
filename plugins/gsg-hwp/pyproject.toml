@@ -1,0 +1,29 @@
+[project]
+name = "gsg-hwp"
+version = "0.3.85"
+description = "Hancom document automation plugin runtime"
+authors = [{ name = "inodesign" }]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "mcp==1.26.0",
+    "pdfplumber==0.11.9",
+    "pydantic==2.12.5",
+    "pyhwpx==1.6.6",
+    "pywin32==312",
+    "Pillow==12.2.0",
+    "typer==0.23.1",
+    "rich==14.3.2",
+    "reportlab==4.4.9",
+    "pypdf==6.10.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "basedpyright==1.39.8",
+    "pytest==8.4.2",
+    "ruff==0.15.22",
+]
+
+[tool.basedpyright]
+extraPaths = ["skills/automate-hancom-documents/scripts"]
+reportImplicitRelativeImport = false
