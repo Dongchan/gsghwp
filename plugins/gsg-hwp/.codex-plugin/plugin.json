@@ -1,6 +1,6 @@
 {
   "name": "gsg-hwp",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "열려 있는 한/글 문서를 에이전트에서 조회·편집·검수하는 Windows용 네이티브 MCP 플러그인",
   "author": {
     "name": "inodesign",

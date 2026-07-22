@@ -43,12 +43,16 @@ $requiredFiles = @(
     "AGENTS.md",
     "CLAUDE.md",
     "CHANGELOG.md",
+    "LICENSE",
     "README.md",
+    "THIRD_PARTY_NOTICES.md",
     "install.ps1",
     "uninstall.ps1",
     "plugins\gsg-hwp\.codex-plugin\plugin.json",
     "plugins\gsg-hwp\.mcp.json",
     "plugins\gsg-hwp\compatibility-manifest.json",
+    "plugins\gsg-hwp\LICENSE",
+    "plugins\gsg-hwp\THIRD_PARTY_NOTICES.md",
     "plugins\gsg-hwp\scripts\start-mcp.ps1"
 )
 
@@ -79,14 +83,37 @@ $manifest = Get-Content -LiteralPath (Join-Path $pluginRoot "compatibility-manif
     ConvertFrom-Json
 $mcp = Get-Content -LiteralPath (Join-Path $pluginRoot ".mcp.json") -Raw -Encoding UTF8 |
     ConvertFrom-Json
+$projectMetadata = Get-Content -LiteralPath (Join-Path $pluginRoot "pyproject.toml") -Raw -Encoding UTF8
 
 Assert-Equal -Expected "gsg-hwp" -Actual $plugin.name -Message "Plugin name mismatch"
-Assert-Equal -Expected "1.0.2" -Actual $plugin.version -Message "Plugin version mismatch"
+Assert-Equal -Expected "1.0.3" -Actual $plugin.version -Message "Plugin version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.author.name -Message "Plugin author mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.interface.developerName `
     -Message "Plugin developer metadata mismatch"
-Assert-Equal -Expected "1.0.2" -Actual $manifest.distribution -Message "Distribution version mismatch"
+Assert-Equal -Expected "1.0.3" -Actual $manifest.distribution -Message "Distribution version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $manifest.developer -Message "Manifest developer mismatch"
+Assert-Equal -Expected "MIT" -Actual $manifest.license -Message "Distribution license mismatch"
+Assert-Equal -Expected "LICENSE" -Actual $manifest.license_file -Message "License file metadata mismatch"
+Assert-Equal -Expected "THIRD_PARTY_NOTICES.md" -Actual $manifest.third_party_notices `
+    -Message "Third-party notices metadata mismatch"
+Assert-Equal -Expected "All-Rights-Reserved" -Actual $manifest.media_license `
+    -Message "Demo media license metadata mismatch"
+Assert-True -Condition $manifest.hancom_automation_commercial_approval_required `
+    -Message "Hancom commercial approval metadata mismatch"
+Assert-True -Condition ($projectMetadata -match '(?m)^license = "MIT"\s*$') `
+    -Message "Python project license metadata mismatch"
+$rootLicenseHash = (Get-FileHash -LiteralPath (Join-Path $repositoryRoot "LICENSE") `
+    -Algorithm SHA256).Hash
+$pluginLicenseHash = (Get-FileHash -LiteralPath (Join-Path $pluginRoot "LICENSE") `
+    -Algorithm SHA256).Hash
+Assert-Equal -Expected $rootLicenseHash -Actual $pluginLicenseHash `
+    -Message "Root and plugin license copies differ"
+$rootNoticesHash = (Get-FileHash -LiteralPath (Join-Path $repositoryRoot "THIRD_PARTY_NOTICES.md") `
+    -Algorithm SHA256).Hash
+$pluginNoticesHash = (Get-FileHash -LiteralPath (Join-Path $pluginRoot "THIRD_PARTY_NOTICES.md") `
+    -Algorithm SHA256).Hash
+Assert-Equal -Expected $rootNoticesHash -Actual $pluginNoticesHash `
+    -Message "Root and plugin notice copies differ"
 Assert-Equal -Expected "0.3.87" -Actual $manifest.mcp -Message "MCP version mismatch"
 Assert-Equal -Expected "0.5.55" -Actual $manifest.native_bridge `
     -Message "Native bridge version mismatch"
@@ -246,7 +273,7 @@ try {
         $automationKey.Dispose()
     }
 
-    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.0.2" `
+    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.0.3" `
         -ModulesKeyPath $modulesKey -AutomationModulesKeyPath $automationModulesKey
     Assert-True -Condition $installResult.Changed -Message "Native install did not report a change"
     Assert-True -Condition (Test-Path -LiteralPath $paths.ActiveState) `

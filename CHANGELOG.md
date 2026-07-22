@@ -2,6 +2,17 @@
 
 배포 버전은 Semantic Versioning 형식인 `주버전.부버전.수정버전`을 사용합니다.
 
+## [1.0.3] - 2026-07-22
+
+### 라이선스와 권리 범위 명확화
+
+- GSG HWP 자체 소스코드와 해당 소스에서 빌드한 실행 파일을 `Copyright (c) 2026 inodesign`의 MIT License로 공개
+- `LICENSE`와 `THIRD_PARTY_NOTICES.md`를 추가하고 Python 직접 의존성의 고정 버전·라이선스·프로젝트 출처를 기록
+- `pyhwpx.Hwp` 어댑터와 `pyhwpx==1.6.6`에서 가져오는 `FilePathCheckerModule.dll`을 제3자 구성요소로 명시
+- 한컴 Automation의 개인 비상업적 사용과 상업적 이용 시 별도 승인·라이선스 필요 조건을 한컴 공식 안내에 연결
+- `docs/media/` 원본 영상과 썸네일은 MIT 대상에서 제외하고 inodesign의 권리 유보 자료로 구분
+- MCP `0.3.87`, 네이티브 브리지 `0.5.55`, 공개 도구 38개와 설치 전 백업·원상복구 동작은 변경하지 않음
+
 ## [1.0.2] - 2026-07-22
 
 ### 2차 배포 기능 반영

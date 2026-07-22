@@ -2,7 +2,7 @@
 
 GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서 현재 열려 있는 HWP 문서를 빠르게 조회하고 네이티브 방식으로 편집·검수하도록 연결하는 로컬 MCP**입니다.
 
-- 배포 버전: **v1.0.2**
+- 배포 버전: **v1.0.3**
 - MCP 런타임: `0.3.87`
 - C++ 네이티브 브리지: `0.5.55`
 - 네이티브 프로토콜: `9`
@@ -12,12 +12,12 @@ GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서
 
 버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록합니다.
 
-### v1.0.2 주요 변경
+### v1.0.3 주요 변경
 
-- 병합·분할된 불규칙 표를 `CellTopology`로 먼저 해석하고, 표 서식 작업 전후의 외곽 크기와 셀 구조를 검증해 실패 시 되돌립니다.
-- 문서 끝뿐 아니라 현재 커서 또는 지정한 쪽 뒤에 편집 가능한 레이아웃을 넣는 `hwp_insert_layout`을 추가했습니다.
-- 열린 한/글 창의 문서·활성·가시 상태를 확인하는 `hwp_list_window_states`를 추가했습니다.
-- 선택 영역 대상 판별, 네이티브 스냅샷 호환, 참고 이미지 기반 레이아웃 재구성과 MCP 지침 리소스를 보강했습니다.
+- GSG HWP 자체 소스코드와 해당 소스에서 빌드한 실행 파일을 MIT License로 공개했습니다.
+- `pyhwpx`를 포함한 Python 직접 의존성과 한컴 Automation의 별도 권리 범위를 `THIRD_PARTY_NOTICES.md`에 정리했습니다.
+- 한컴 Automation의 상업적 이용에는 한글과컴퓨터의 별도 승인과 라이선스가 필요하다는 점을 명시했습니다.
+- v1.0.2의 MCP 38개, 네이티브 브리지와 설치 전 백업·원상복구 동작은 변경하지 않았습니다.
 
 ## 어떤 MCP인가요?
 
@@ -190,7 +190,7 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 | 레지스트리 3 | `HKCU\Software\HNC\HwpAutomation\Modules`의 `FilePathCheckerModule` 값 |
 | 원본 백업 | `%LOCALAPPDATA%\GSG_HWP\backups\<시각-식별자>` |
 | 활성 설치 기록 | `%LOCALAPPDATA%\GSG_HWP\state\active-install.json` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.0.2\.venv` |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.0.3\.venv` |
 
 백업에는 다음 정보가 저장됩니다.
 
@@ -325,6 +325,8 @@ gsghwp/
 ├─ CLAUDE.md                          # Claude Code 설치/복원 지침
 ├─ README.md                          # 한글 소개, 구조, 사용법
 ├─ CHANGELOG.md                       # 버전별 변경사항
+├─ LICENSE                            # GSG HWP 자체 코드의 MIT License
+├─ THIRD_PARTY_NOTICES.md             # 외부 구성요소·한컴·미디어 권리 고지
 ├─ install.ps1                        # 미리보기, 런타임 설치, DLL/레지스트리 백업·등록
 ├─ uninstall.ps1                      # DLL/레지스트리 원상복구
 └─ plugins/gsg-hwp/
@@ -340,6 +342,16 @@ gsghwp/
    ├─ skills/                         # HWP 작업 지침, Python MCP 구현, API 카탈로그
    └─ tests/                          # 런타임 회귀 테스트
 ```
+
+## 라이선스와 권리 범위
+
+- GSG HWP가 자체 작성한 소스코드와 해당 소스에서 빌드한 EXE/DLL은 [MIT License](LICENSE)로 배포됩니다. 저작권 표시는 `Copyright (c) 2026 inodesign`입니다.
+- `pyhwpx`, `pywin32` 등 설치되는 외부 패키지는 각 패키지의 원 라이선스를 따릅니다. 정확한 버전과 출처는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 기록했습니다.
+- `FilePathCheckerModule.dll`은 배포 저장소에 직접 포함하지 않고, 설치 시 고정된 `pyhwpx==1.6.6` 배포 파일에서 가져와 해시를 검증합니다. GSG HWP가 이 DLL의 소유권을 주장하거나 재라이선스하지 않습니다.
+- 한/글, HWP, HWPX, 한컴 Automation과 관련 상표·공식 문서의 권리는 각 권리자에게 있습니다. [한컴 공식 안내](https://developer.hancom.com/hwpautomation)에 따라 Automation을 상업적 솔루션에 이용하려면 한글과컴퓨터의 승인과 별도 라이선스가 필요합니다.
+- `docs/media/`의 원본 영상과 썸네일은 소개 페이지 열람용이며 MIT 대상이 아닙니다. 별도 허가 없는 복제·수정·재배포 권리는 유보됩니다.
+
+GSG HWP의 MIT License는 자체 코드의 사용·수정·재배포·상업적 이용을 허용하지만, 한컴 또는 다른 제3자의 권리까지 허가하지는 않습니다. 이 프로젝트는 한글과컴퓨터의 공식 제품이 아니며 보증 또는 승인을 받았음을 의미하지 않습니다.
 
 ## 개인정보와 배포 정리
 

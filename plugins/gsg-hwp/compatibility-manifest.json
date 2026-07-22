@@ -1,6 +1,11 @@
 {
-  "distribution": "1.0.2",
+  "distribution": "1.0.3",
   "developer": "inodesign",
+  "license": "MIT",
+  "license_file": "LICENSE",
+  "third_party_notices": "THIRD_PARTY_NOTICES.md",
+  "media_license": "All-Rights-Reserved",
+  "hancom_automation_commercial_approval_required": true,
   "mcp": "0.3.87",
   "launcher_sha256": "26caeefc3d301f06965e6e247f88e4ff53e9761cfec08e592f7a627d49418e88",
   "event_bridge_sha256": "03f0918b96b9270a4098642e9991e1e949c89e61aae3de7ca41fb1fc8077be6e",
