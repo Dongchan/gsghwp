@@ -10,7 +10,7 @@ Use `hwp_get_official_api_coverage` for a fast, mechanical split between native 
 
 Coverage is static catalog/protocol coverage. It does not prove that every Action exists in the installed HWP version or can execute in the current cursor, selection, control, or document state.
 
-The catalog keeps all 1,452 official cases searchable. Runtime batch execution routes 1,448 cases and intentionally excludes `action:0067:CharShapeTextColorGreen`, `action:0068:CharShapeTextColorRed`, `action:0365:MakeIndex`, and `action:0608:SaveHistoryItem`.
+The catalog keeps all 1,452 official cases searchable. Runtime batch execution routes 1,448 cases and intentionally excludes `action:0608:SaveHistoryItem`, `automation:0067:IHwpObject.ExportStyle`, `automation:0068:IHwpObject.ImportStyle`, and `automation:0365:IDHwpParameterArray.Clone`.
 
 Use `hwp_get_capabilities` separately to learn what the current plugin exposes and whether each tool is C++/ATL-required, native-preferred, COM, ROT, or hybrid. Catalog presence does not mean a public mutation tool exists.
 

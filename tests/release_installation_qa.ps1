@@ -86,11 +86,11 @@ $mcp = Get-Content -LiteralPath (Join-Path $pluginRoot ".mcp.json") -Raw -Encodi
 $projectMetadata = Get-Content -LiteralPath (Join-Path $pluginRoot "pyproject.toml") -Raw -Encoding UTF8
 
 Assert-Equal -Expected "gsg-hwp" -Actual $plugin.name -Message "Plugin name mismatch"
-Assert-Equal -Expected "1.0.3" -Actual $plugin.version -Message "Plugin version mismatch"
+Assert-Equal -Expected "1.0.4" -Actual $plugin.version -Message "Plugin version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.author.name -Message "Plugin author mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.interface.developerName `
     -Message "Plugin developer metadata mismatch"
-Assert-Equal -Expected "1.0.3" -Actual $manifest.distribution -Message "Distribution version mismatch"
+Assert-Equal -Expected "1.0.4" -Actual $manifest.distribution -Message "Distribution version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $manifest.developer -Message "Manifest developer mismatch"
 Assert-Equal -Expected "MIT" -Actual $manifest.license -Message "Distribution license mismatch"
 Assert-Equal -Expected "LICENSE" -Actual $manifest.license_file -Message "License file metadata mismatch"
@@ -140,10 +140,10 @@ Assert-Equal -Expected "pyhwpx==1.6.6" -Actual $manifest.file_path_checker_sourc
 Assert-Equal -Expected "9ac5b97c47ac8aed1e8bca27a3eef39411361d8f68c262509f0c40a8f9d21bb6" `
     -Actual $manifest.file_path_checker_sha256 -Message "Security module checksum mismatch"
 $expectedDisabledApi = @(
-    "action:0067:CharShapeTextColorGreen",
-    "action:0068:CharShapeTextColorRed",
-    "action:0365:MakeIndex",
-    "action:0608:SaveHistoryItem"
+    "action:0608:SaveHistoryItem",
+    "automation:0067:IHwpObject.ExportStyle",
+    "automation:0068:IHwpObject.ImportStyle",
+    "automation:0365:IDHwpParameterArray.Clone"
 ) | Sort-Object
 Assert-Equal -Expected ($expectedDisabledApi -join "|") `
     -Actual ((@($manifest.official_api_disabled_case_ids) | Sort-Object) -join "|") `
@@ -273,7 +273,7 @@ try {
         $automationKey.Dispose()
     }
 
-    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.0.3" `
+    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.0.4" `
         -ModulesKeyPath $modulesKey -AutomationModulesKeyPath $automationModulesKey
     Assert-True -Condition $installResult.Changed -Message "Native install did not report a change"
     Assert-True -Condition (Test-Path -LiteralPath $paths.ActiveState) `

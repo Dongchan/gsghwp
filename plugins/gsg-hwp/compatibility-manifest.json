@@ -1,5 +1,5 @@
 {
-  "distribution": "1.0.3",
+  "distribution": "1.0.4",
   "developer": "inodesign",
   "license": "MIT",
   "license_file": "LICENSE",
@@ -20,10 +20,10 @@
   "official_api_catalog_entries": 1452,
   "official_api_enabled_routes": 1448,
   "official_api_disabled_case_ids": [
-    "action:0067:CharShapeTextColorGreen",
-    "action:0068:CharShapeTextColorRed",
-    "action:0365:MakeIndex",
-    "action:0608:SaveHistoryItem"
+    "action:0608:SaveHistoryItem",
+    "automation:0067:IHwpObject.ExportStyle",
+    "automation:0068:IHwpObject.ImportStyle",
+    "automation:0365:IDHwpParameterArray.Clone"
   ],
   "production_sessionless_reads": [
     "hwp_inspect",

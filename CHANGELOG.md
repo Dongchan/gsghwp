@@ -2,6 +2,16 @@
 
 배포 버전은 Semantic Versioning 형식인 `주버전.부버전.수정버전`을 사용합니다.
 
+## [1.0.4] - 2026-07-23
+
+### 공식 API 라우팅 정정
+
+- 공식 API 사례 번호를 분류별 순번이 아닌 전체 목록의 전역 순번으로 해석하던 오류 수정
+- 실제 검증 실패 4개를 `action:0608:SaveHistoryItem`, `automation:0067:IHwpObject.ExportStyle`, `automation:0068:IHwpObject.ImportStyle`, `automation:0365:IDHwpParameterArray.Clone`으로 정정
+- 정상 Action인 `CharShapeTextColorGreen`, `CharShapeTextColorRed`, `MakeIndex`를 다시 라우팅하고 Action 933개, Automation 373개, ParameterSet 142개로 활성 경로 재구성
+- 런타임 정책, 호환성 매니페스트, 설치 QA, 회귀 테스트와 README의 제외 목록을 동일하게 맞춤
+- MCP `0.3.87`, 네이티브 브리지 `0.5.55`, DLL·레지스트리 설치와 백업·원상복구 동작은 변경하지 않음
+
 ## [1.0.3] - 2026-07-22
 
 ### 라이선스와 권리 범위 명확화
@@ -66,12 +76,12 @@
 - 공식 API 카탈로그 1,452개와 네이티브 활성 라우트 1,448개
 - Codex 저장소 마켓플레이스, Claude Code 프로젝트 `.mcp.json`, 범용 stdio 시작 스크립트
 
-### 현재 라우팅 제외 API
+### 라우팅 제외 API (v1.0.4 정정 반영)
 
-- `action:0067:CharShapeTextColorGreen`
-- `action:0068:CharShapeTextColorRed`
-- `action:0365:MakeIndex`
 - `action:0608:SaveHistoryItem`
+- `automation:0067:IHwpObject.ExportStyle`
+- `automation:0068:IHwpObject.ImportStyle`
+- `automation:0365:IDHwpParameterArray.Clone`
 
 ### 설치 안전성
 

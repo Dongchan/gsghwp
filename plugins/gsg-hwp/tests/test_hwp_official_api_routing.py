@@ -26,12 +26,11 @@ from hwp_official_api_requests import build_official_api_requests  # noqa: E402
 from hwp_official_api_runtime import build_runtime_cases  # noqa: E402
 
 
-_DISABLED_GLOBAL_POSITIONS: Final = (67, 68, 365, 608)
 _DISABLED_CASE_IDS: Final = frozenset(
     (
-        "action:0067:CharShapeTextColorGreen",
-        "action:0068:CharShapeTextColorRed",
-        "action:0365:MakeIndex",
+        "automation:0067:IHwpObject.ExportStyle",
+        "automation:0068:IHwpObject.ImportStyle",
+        "automation:0365:IDHwpParameterArray.Clone",
         "action:0608:SaveHistoryItem",
     )
 )
@@ -46,22 +45,29 @@ class _OfficialApiCompatibility(BaseModel):
 
 
 def test_mcp_routes_every_official_api_except_four_disabled_cases() -> None:
+    # Given
     catalog = load_official_api_catalog()
     runtime_cases = build_runtime_cases(catalog)
-    requests = enabled_official_api_requests(build_official_api_requests(catalog))
-    disabled_case_ids = frozenset(
-        runtime_cases[position - 1].case_id for position in _DISABLED_GLOBAL_POSITIONS
-    )
+    runtime_case_ids = frozenset(case.case_id for case in runtime_cases)
+    all_requests = build_official_api_requests(catalog)
 
+    # When
+    requests = enabled_official_api_requests(all_requests)
+
+    # Then
     assert len(runtime_cases) == 1_452
-    assert disabled_case_ids == _DISABLED_CASE_IDS
+    assert _DISABLED_CASE_IDS < runtime_case_ids
     assert DISABLED_OFFICIAL_API_CASE_IDS == _DISABLED_CASE_IDS
     assert len(requests) == 1_448
     assert frozenset(request.case_id for request in requests) == (
-        frozenset(case.case_id for case in runtime_cases) - disabled_case_ids
+        runtime_case_ids - _DISABLED_CASE_IDS
     )
 
+
+def test_live_action_batch_counts_only_one_disabled_action() -> None:
+    # Given
     with patch.object(hwp_official_api_live, "probe_official_api", return_value=None):
+        # When
         batch = hwp_official_api_live.run_official_api_live_batch(
             window_handle=1,
             category="action",
@@ -69,7 +75,8 @@ def test_mcp_routes_every_official_api_except_four_disabled_cases() -> None:
             limit=1,
         )
 
-    assert batch.total_in_category == 930
+    # Then
+    assert batch.total_in_category == 933
 
 
 def test_compatibility_manifest_declares_official_api_routing() -> None:

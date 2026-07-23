@@ -2,7 +2,7 @@
 
 GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서 현재 열려 있는 HWP 문서를 빠르게 조회하고 네이티브 방식으로 편집·검수하도록 연결하는 로컬 MCP**입니다.
 
-- 배포 버전: **v1.0.3**
+- 배포 버전: **v1.0.4**
 - MCP 런타임: `0.3.87`
 - C++ 네이티브 브리지: `0.5.55`
 - 네이티브 프로토콜: `9`
@@ -11,6 +11,13 @@ GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서
 - 공식 API 카탈로그: 1,452개 중 네이티브 라우팅 1,448개
 
 버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록합니다.
+
+### v1.0.4 주요 변경
+
+- 공식 API 사례 번호가 분류별로 부여되는데도 전역 순번으로 해석하던 오류를 수정했습니다.
+- 실제 검증 실패 4개를 `SaveHistoryItem`, `IHwpObject.ExportStyle`, `IHwpObject.ImportStyle`, `IDHwpParameterArray.Clone`으로 바로잡았습니다.
+- 정상 Action인 `CharShapeTextColorGreen`, `CharShapeTextColorRed`, `MakeIndex`를 다시 네이티브 라우팅에 포함했습니다.
+- MCP·네이티브 바이너리와 DLL·레지스트리 설치 및 원상복구 동작은 변경하지 않았습니다.
 
 ### v1.0.3 주요 변경
 
@@ -125,16 +132,16 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 
 작업 후 셀 주소·병합·크기·개체 ID는 구조 조회로 확인하고, 잘림·넘침·간격·이미지 왜곡 같은 시각 결과는 `CreatePageImage` 렌더로 확인합니다. 구조값을 스크린샷에서 추측하지 않습니다.
 
-## 공식 API 1,452개와 현재 비지원 4개
+## 공식 API 1,452개와 현재 라우팅 제외 4개
 
 배포본에는 2025-04 한컴 공식 자료에서 생성한 1,452개 API 사례 카탈로그가 포함되어 있습니다. 네이티브 런타임은 그중 **1,448개 사례를 라우팅**하며 아래 4개는 현재 제외합니다.
 
 | case ID | 공식 API | 기능 | 현재 상태 |
 |---|---|---|---|
-| `action:0067` | `CharShapeTextColorGreen` | 글자색을 초록으로 변경 | 라우팅 제외 |
-| `action:0068` | `CharShapeTextColorRed` | 글자색을 빨강으로 변경 | 라우팅 제외 |
-| `action:0365` | `MakeIndex` | 찾아보기 만들기 | 라우팅 제외 |
-| `action:0608` | `SaveHistoryItem` | 새 버전으로 저장 | 네이티브 실행 실패가 확인되어 제외 |
+| `action:0608` | `HAction.SaveHistoryItem` | 새 버전으로 저장 | 실제 수정 문서와 `VersionInfo` 입력 후에도 `Execute`/`Run` 네이티브 예외로 실패 |
+| `automation:0067` | `IHwpObject.ExportStyle` | 스타일 내보내기 | 공식 TLB 슬롯과 유효 `HStyleTemplate/HSet` 입력에서도 `0xD0000005`로 실패 |
+| `automation:0068` | `IHwpObject.ImportStyle` | 스타일 가져오기 | 공식 TLB 슬롯과 유효 `HStyleTemplate/HSet` 입력에서도 `0xD0000005`로 실패 |
+| `automation:0365` | `IDHwpParameterArray.Clone` | ParameterArray 복제 | 런타임 객체가 공식 인터페이스를 제공하지 않아 `E_NOINTERFACE`로 실패 |
 
 `1,448개 라우팅`은 `1,448개의 MCP 도구가 화면에 노출된다`는 뜻이 아닙니다. 실제 운영 표면은 작업 중심 도구 37개와 재로드 도구 1개로 제한합니다. 모든 API를 각각 도구로 노출하면 도구 스키마가 지나치게 커지고, AI가 비슷한 도구 사이에서 헤매며, 선택·전송·추론 병목이 생길 수 있기 때문입니다.
 
@@ -190,7 +197,7 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 | 레지스트리 3 | `HKCU\Software\HNC\HwpAutomation\Modules`의 `FilePathCheckerModule` 값 |
 | 원본 백업 | `%LOCALAPPDATA%\GSG_HWP\backups\<시각-식별자>` |
 | 활성 설치 기록 | `%LOCALAPPDATA%\GSG_HWP\state\active-install.json` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.0.3\.venv` |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.0.4\.venv` |
 
 백업에는 다음 정보가 저장됩니다.
 

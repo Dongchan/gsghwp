@@ -7,10 +7,10 @@ from hwp_official_api_requests import OfficialApiNativeRequest
 
 DISABLED_OFFICIAL_API_CASE_IDS: Final[frozenset[str]] = frozenset(
     (
-        "action:0067:CharShapeTextColorGreen",
-        "action:0068:CharShapeTextColorRed",
-        "action:0365:MakeIndex",
         "action:0608:SaveHistoryItem",
+        "automation:0067:IHwpObject.ExportStyle",
+        "automation:0068:IHwpObject.ImportStyle",
+        "automation:0365:IDHwpParameterArray.Clone",
     )
 )
 
