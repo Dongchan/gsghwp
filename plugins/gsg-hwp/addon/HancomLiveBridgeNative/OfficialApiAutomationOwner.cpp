@@ -1,6 +1,7 @@
 #include "OfficialApiAutomationOwner.h"
 
 #include "DispatchInvoke.h"
+#include "OfficialApiParameterArray.h"
 
 #include <atlbase.h>
 #include <atlcomcli.h>
@@ -14,67 +15,6 @@ namespace {
 using hancom::dispatch::AsDispatch;
 using hancom::dispatch::Invoke;
 using hancom::dispatch::PropertyGet;
-
-constexpr IID kParameterSetIid = {
-    0x599CBB08,
-    0x7780,
-    0x4F3B,
-    {0x8A, 0xDA, 0x7F, 0x2E, 0xCF, 0xB5, 0x71, 0x81},
-};
-constexpr IID kParameterArrayIid = {
-    0xCAE59B55,
-    0x0F90,
-    0x4E9B,
-    {0x9F, 0x9E, 0x91, 0xCC, 0x67, 0x1B, 0x7A, 0x49},
-};
-
-HRESULT ExceptionStatus(const DWORD code) noexcept {
-    return static_cast<HRESULT>(code | FACILITY_NT_BIT);
-}
-
-HRESULT GuardedQueryInterface(
-    IDispatch* const target,
-    REFIID iid,
-    IUnknown** const result) noexcept {
-    __try {
-        return target->QueryInterface(iid, reinterpret_cast<void**>(result));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return ExceptionStatus(GetExceptionCode());
-    }
-}
-
-template<typename Function>
-Function VtableFunction(IUnknown* const object, const size_t slot) noexcept {
-    void** const table = *reinterpret_cast<void***>(object);
-    return reinterpret_cast<Function>(table[slot]);
-}
-
-HRESULT GuardedCreateParameterArray(
-    IUnknown* const object,
-    BSTR const name,
-    const LONG count,
-    IDispatch** const result) noexcept {
-    using CreateItemArray = HRESULT(STDMETHODCALLTYPE*)(
-        IUnknown*, BSTR, LONG, IDispatch**);
-    __try {
-        return VtableFunction<CreateItemArray>(object, 11U)(
-            object, name, count, result);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return ExceptionStatus(GetExceptionCode());
-    }
-}
-
-HRESULT GuardedArraySetItem(
-    IUnknown* const object,
-    const LONG index,
-    const VARIANT value) noexcept {
-    using SetItem = HRESULT(STDMETHODCALLTYPE*)(IUnknown*, LONG, VARIANT);
-    __try {
-        return VtableFunction<SetItem>(object, 13U)(object, index, value);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return ExceptionStatus(GetExceptionCode());
-    }
-}
 
 HRESULT ObjectProperty(
     IDispatch* const source,
@@ -200,39 +140,20 @@ HRESULT ParameterOwner(
             status = ObjectProperty(
                 parameterSets, L"HStyleTemplate", styleTemplate);
         }
-        CComPtr<IDispatch> set;
+        CComPtr<IDispatch> array;
         if (SUCCEEDED(status)) {
-            status = ObjectProperty(styleTemplate, L"HSet", set);
-        }
-        IUnknown* rawSetInterface = nullptr;
-        if (SUCCEEDED(status)) {
-            status = GuardedQueryInterface(
-                set, kParameterSetIid, &rawSetInterface);
-        }
-        CComPtr<IUnknown> setInterface;
-        IDispatch* rawArray = nullptr;
-        if (SUCCEEDED(status)) {
-            setInterface.Attach(rawSetInterface);
-            CComBSTR itemName(L"NameLocals");
-            status = GuardedCreateParameterArray(
-                setInterface, itemName, 1L, &rawArray);
-        }
-        if (SUCCEEDED(status)) {
-            result.Attach(rawArray);
-        }
-        IUnknown* rawArrayInterface = nullptr;
-        if (SUCCEEDED(status)) {
-            status = GuardedQueryInterface(
-                result, kParameterArrayIid, &rawArrayInterface);
-        }
-        CComPtr<IUnknown> arrayInterface;
-        if (SUCCEEDED(status)) {
-            arrayInterface.Attach(rawArrayInterface);
-            const CComVariant localName(L"바탕글");
-            status = GuardedArraySetItem(
-                arrayInterface,
+            status = CreateParameterArray(
+                styleTemplate,
+                L"NameLocals",
                 1L,
-                static_cast<const VARIANT&>(localName));
+                array);
+        }
+        if (SUCCEEDED(status)) {
+            const CComVariant localName(L"바탕글");
+            status = SetParameterArrayItem(array, 1L, localName);
+        }
+        if (SUCCEEDED(status)) {
+            result = array;
         }
         if (FAILED(status)) {
             result.Release();

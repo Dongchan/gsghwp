@@ -39,12 +39,14 @@ $pluginRoot = Join-Path $repositoryRoot "plugins\gsg-hwp"
 $modulePath = Join-Path $pluginRoot "scripts\GsgHwp.Installation.psm1"
 $requiredFiles = @(
     ".agents\plugins\marketplace.json",
+    ".github\workflows\publish-release.yml",
     ".mcp.json",
     "AGENTS.md",
     "CLAUDE.md",
     "CHANGELOG.md",
     "LICENSE",
     "README.md",
+    "restore-update.ps1",
     "THIRD_PARTY_NOTICES.md",
     "install.ps1",
     "uninstall.ps1",
@@ -53,7 +55,9 @@ $requiredFiles = @(
     "plugins\gsg-hwp\compatibility-manifest.json",
     "plugins\gsg-hwp\LICENSE",
     "plugins\gsg-hwp\THIRD_PARTY_NOTICES.md",
-    "plugins\gsg-hwp\scripts\start-mcp.ps1"
+    "plugins\gsg-hwp\scripts\start-mcp.ps1",
+    "plugins\gsg-hwp\scripts\GsgHwp.Update.psm1",
+    "plugins\gsg-hwp\update-policy.json"
 )
 
 foreach ($relativePath in $requiredFiles) {
@@ -86,11 +90,13 @@ $mcp = Get-Content -LiteralPath (Join-Path $pluginRoot ".mcp.json") -Raw -Encodi
 $projectMetadata = Get-Content -LiteralPath (Join-Path $pluginRoot "pyproject.toml") -Raw -Encoding UTF8
 
 Assert-Equal -Expected "gsg-hwp" -Actual $plugin.name -Message "Plugin name mismatch"
-Assert-Equal -Expected "1.0.4" -Actual $plugin.version -Message "Plugin version mismatch"
+Assert-Equal -Expected "1.1.0" -Actual $plugin.version -Message "Plugin version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.author.name -Message "Plugin author mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.interface.developerName `
     -Message "Plugin developer metadata mismatch"
-Assert-Equal -Expected "1.0.4" -Actual $manifest.distribution -Message "Distribution version mismatch"
+Assert-Equal -Expected "1.1.0" -Actual $manifest.distribution -Message "Distribution version mismatch"
+Assert-Equal -Expected "0.5.73-dev.1" -Actual $manifest.source_version `
+    -Message "Source version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $manifest.developer -Message "Manifest developer mismatch"
 Assert-Equal -Expected "MIT" -Actual $manifest.license -Message "Distribution license mismatch"
 Assert-Equal -Expected "LICENSE" -Actual $manifest.license_file -Message "License file metadata mismatch"
@@ -114,17 +120,17 @@ $pluginNoticesHash = (Get-FileHash -LiteralPath (Join-Path $pluginRoot "THIRD_PA
     -Algorithm SHA256).Hash
 Assert-Equal -Expected $rootNoticesHash -Actual $pluginNoticesHash `
     -Message "Root and plugin notice copies differ"
-Assert-Equal -Expected "0.3.87" -Actual $manifest.mcp -Message "MCP version mismatch"
-Assert-Equal -Expected "0.5.55" -Actual $manifest.native_bridge `
+Assert-Equal -Expected "0.3.89" -Actual $manifest.mcp -Message "MCP version mismatch"
+Assert-Equal -Expected "0.5.121" -Actual $manifest.native_bridge `
     -Message "Native bridge version mismatch"
-Assert-Equal -Expected 37 -Actual @($manifest.production_tools).Count `
+Assert-Equal -Expected 44 -Actual @($manifest.production_tools).Count `
     -Message "Production tool count mismatch"
 Assert-True -Condition ($manifest.production_tools -contains "hwp_insert_layout") `
     -Message "Mid-document layout tool is missing"
 Assert-True -Condition ($manifest.production_tools -contains "hwp_list_window_states") `
     -Message "Window-state tool is missing"
-Assert-Equal -Expected 38 -Actual $manifest.exposed_tool_count -Message "Exposed tool count mismatch"
-Assert-Equal -Expected 55 -Actual $manifest.qa_tool_count -Message "QA tool count mismatch"
+Assert-Equal -Expected 45 -Actual $manifest.exposed_tool_count -Message "Exposed tool count mismatch"
+Assert-Equal -Expected 62 -Actual $manifest.qa_tool_count -Message "QA tool count mismatch"
 Assert-Equal -Expected "hwp_reload" -Actual $manifest.runtime_tools[0] `
     -Message "Runtime reload tool mismatch"
 Assert-Equal -Expected 1452 -Actual $manifest.official_api_catalog_entries `
@@ -153,6 +159,21 @@ Assert-Equal -Expected "./plugins/gsg-hwp" -Actual $marketplace.plugins[0].sourc
     -Message "Marketplace source path mismatch"
 Assert-Equal -Expected "powershell.exe" -Actual $mcp.mcpServers."gsg-hwp".command `
     -Message "MCP must start through the portable PowerShell launcher"
+$installSource = Get-Content -LiteralPath (Join-Path $repositoryRoot "install.ps1") -Raw -Encoding UTF8
+$updaterSource = Get-Content -LiteralPath (
+    Join-Path $pluginRoot "scripts\GsgHwp.Update.psm1"
+) -Raw -Encoding UTF8
+$launcherSource = Get-Content -LiteralPath (
+    Join-Path $pluginRoot "scripts\start-mcp.ps1"
+) -Raw -Encoding UTF8
+Assert-True -Condition ($installSource -match "--managed-python") `
+    -Message "Installer must require an uv-managed Python"
+Assert-True -Condition ($updaterSource -match "--managed-python") `
+    -Message "Updater must require an uv-managed Python"
+Assert-True -Condition ($launcherSource -match "\.venv\\Scripts\\python\.exe") `
+    -Message "MCP launcher must use the versioned virtual environment"
+Assert-True -Condition ($launcherSource -notmatch "Get-Command\s+['`"]?python") `
+    -Message "MCP launcher must not fall back to a system Python"
 
 $launcher = Join-Path $pluginRoot "addon\HancomMcpLauncher\bin\Release\HancomMcpLauncher.exe"
 $eventBridge = Join-Path $pluginRoot "addon\HancomEventBridge\bin\Release\HancomEventBridge.exe"
@@ -238,6 +259,10 @@ $modulesKey = "$registryRoot\Modules"
 $automationModulesKey = "$registryRoot\AutomationModules"
 $localAppData = Join-Path ([System.IO.Path]::GetTempPath()) "GsgHwpReleaseQa-$testId"
 $paths = Get-GsgHwpPaths -PackageRoot $pluginRoot -LocalAppData $localAppData
+Assert-Equal -Expected (
+    Join-Path $localAppData "GSG_HWP\runtime\1.1.0\.venv"
+) -Actual $paths.RuntimeEnvironment `
+    -Message "Runtime must use a distribution-specific .venv"
 $originalDll = [byte[]](10, 20, 30, 40)
 $originalSecurityDll = [byte[]](50, 60, 70, 80)
 
@@ -273,7 +298,7 @@ try {
         $automationKey.Dispose()
     }
 
-    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.0.4" `
+    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.1.0" `
         -ModulesKeyPath $modulesKey -AutomationModulesKeyPath $automationModulesKey
     Assert-True -Condition $installResult.Changed -Message "Native install did not report a change"
     Assert-True -Condition (Test-Path -LiteralPath $paths.ActiveState) `
@@ -351,4 +376,4 @@ finally {
     }
 }
 
-Write-Output "PASS: release structure, privacy scan, checksums, native/security registry and DLL restore, runtime cleanup"
+Write-Output "PASS: release structure, privacy scan, checksums, isolated .venv, native/security registry and DLL restore, runtime cleanup"

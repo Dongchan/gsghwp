@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# noqa: E501  # noqa: SIZE_OK — this file is the exhaustive public capability contract matrix.
+
 import sys
 from base64 import b64encode
 from pathlib import Path
@@ -504,7 +506,10 @@ def test_fill_table_reports_its_direct_target_id_field() -> None:
     tools = HwpPublicTools(_AmbiguousExecutor())
 
     async def fill() -> tuple[str, ...]:
-        result = await tools.hwp_fill_table(records=[{"Name": "value"}])
+        result = await tools.hwp_fill_table(
+            operation_id="fill-direct-target",
+            records=[{"Name": "value"}],
+        )
         return result.required_inputs
 
     # When

@@ -6,8 +6,10 @@ REPLACE_IMAGE_INTENT: Final = "현재 선택 그림 교체"
 ADD_CAPTION_INTENT: Final = "현재 선택 표 또는 그림에 캡션 추가"
 APPLY_STYLE_INTENT: Final = "현재 선택 영역에 스타일 적용"
 FORMAT_TEXT_INTENT: Final = "현재 선택 영역 글자 서식"
+PATCH_TEXT_INTENT: Final = "본문 텍스트 원자적 패치"
 APPEND_LAYOUT_INTENT: Final = "문서 끝 레이아웃 추가"
 INSERT_LAYOUT_INTENT: Final = "현재 커서 또는 지정 쪽 다음 레이아웃 삽입"
+SAVE_INTENT: Final = "문서 일반 저장"
 SAVE_REOPEN_VERIFY_INTENT: Final = "문서 저장 재개방 검증"
 DELETE_PAGE_INTENT: Final = "지정한 한컴 쪽 삭제"
 DELETE_CONTROL_INTENT: Final = "지정한 기존 한컴 개체 삭제"
@@ -44,6 +46,12 @@ HWP_FORMAT_TEXT_DESCRIPTION: Final = (
     "현재 선택 영역에 지정한 글자·문단 서식을 적용합니다. "
     "표 셀 서식은 hwp_format_table을 사용합니다."
 )
+HWP_PATCH_TEXT_DESCRIPTION: Final = (
+    "선택 여부와 무관하게 현재 커서·현재 선택·명시 범위·문서 검색 결과·정확한 표 셀의 텍스트를 "
+    "한 작업으로 확인하고 교체합니다. 교체된 실제 범위를 다시 선택한 뒤 formatting을 적용하고 "
+    "본문과 글자 서식을 재검증합니다. 검색 결과가 여러 개이면 occurrence를 임의로 정하지 않고 "
+    "구체적인 위치 후보를 반환합니다."
+)
 HWP_REPLACE_SELECTED_TEXT_DESCRIPTION: Final = (
     "현재 사용자가 드래그한 선택 영역의 전체 텍스트를 지정한 문자열로 교체합니다. "
     "replacement에 빈 문자열을 전달하면 선택한 글을 삭제합니다. "
@@ -56,6 +64,10 @@ HWP_INSERT_LAYOUT_DESCRIPTION: Final = (
     "target=document_end도 지원하며 after_page는 내용을 앞뒤 쪽 나누기로 격리하므로 별도 page_break 블록을 넣지 않습니다. "
     "이미지를 편집 가능한 표로 재구성하기 전에는 MCP 리소스 "
     "gsg-hwp-beta://reference/native-layout을 읽고, 사진·지도·도면만 그림으로 유지합니다. "
+    "독립 문단·작은 일반 표·그림은 paragraph/table/image로 Protocol 9 ApplyLayout Bulk를 사용하고, "
+    "한 페이지를 지배하는 촘촘한 격자·부분 연결선·반복 스타일 양식은 reference_layout으로 "
+    "Protocol 10 ReferenceLayoutBulk를 사용합니다. reference_layout_patch는 기존 control ID의 "
+    "행·열·스타일·테두리만 갱신하며 새 표를 만들지 않습니다. "
     "표는 border_mode=explicit와 명시 행 높이를 사용해 원본에 없는 테두리와 자동 행 확장을 막습니다."
 )
 HWP_APPEND_LAYOUT_DESCRIPTION: Final = (
@@ -64,7 +76,9 @@ HWP_APPEND_LAYOUT_DESCRIPTION: Final = (
     "실제 1mm 표 셀은 해당 셀에 font_size_pt=1, line_spacing_percent=50, 0mm padding을 함께 지정합니다. "
     "이미지 속 양식을 재생성할 때 사진·지도·도면만 개별 그림으로 두고 나머지는 적응형 네이티브 표로 구성합니다. "
     "시각 격자는 border_mode=explicit로 지정해 빈 셀 테두리를 없애고, 연결선은 채운 셀이 아니라 실제 셀 경계로 선언합니다. "
-    "네모 표 안 그림은 image.container=table_cell로 지정합니다."
+    "네모 표 안 그림은 image.container=table_cell로 지정합니다. "
+    "독립 요소는 Protocol 9 일반 bulk, 페이지 전체의 적응형 공통 격자는 reference_layout "
+    "Protocol 10 bulk를 사용하며 기존 격자의 일부 수정은 reference_layout_patch를 사용합니다."
     " 본문 중간이나 특정 쪽 다음 삽입은 hwp_insert_layout을 사용합니다."
 )
 HWP_APPEND_REPORT_DESCRIPTION: Final = (
@@ -80,6 +94,10 @@ HWP_APPEND_EXCEL_TABLE_DESCRIPTION: Final = (
 HWP_SAVE_REOPEN_VERIFY_DESCRIPTION: Final = (
     "현재 문서를 저장하고 같은 경로로 다시 열어 구조를 검증합니다. "
     "명시적인 저장·재개방 검증 요청에만 사용합니다."
+)
+HWP_SAVE_DESCRIPTION: Final = (
+    "현재 문서를 닫거나 다시 열지 않고 저장합니다. "
+    "저장 전후 본문·표 내용·문자 서식을 포함한 문서 지문을 다시 읽어 성공 여부를 검증합니다."
 )
 HWP_DELETE_PAGE_DESCRIPTION: Final = (
     "현재 열린 HWP에서 지정한 실제 쪽 하나를 삭제하고 페이지 수가 하나 줄었는지 검증합니다. "

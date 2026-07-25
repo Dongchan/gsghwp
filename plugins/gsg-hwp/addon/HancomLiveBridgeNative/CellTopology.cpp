@@ -234,6 +234,29 @@ const std::vector<CellTopologyCell>& CellTopology::Cells() const noexcept {
     return cells_;
 }
 
+bool CellTopology::HasSamePhysicalShape(const CellTopology& other) const noexcept {
+    try {
+        if (rows_ != other.rows_ ||
+            columns_ != other.columns_ ||
+            cells_.size() != other.cells_.size()) {
+            return false;
+        }
+        for (const CellTopologyCell& cell : cells_) {
+            const CellTopologyCell* const candidate = other.Find(cell.address);
+            if (candidate == nullptr ||
+                cell.row != candidate->row ||
+                cell.column != candidate->column ||
+                cell.rowSpan != candidate->rowSpan ||
+                cell.columnSpan != candidate->columnSpan) {
+                return false;
+            }
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 std::vector<std::wstring> CellTopology::IntersectingColumn(const long physicalColumn) const {
     std::vector<const CellTopologyCell*> matches;
     for (const CellTopologyCell& cell : cells_) {

@@ -2,6 +2,30 @@
 
 배포 버전은 Semantic Versioning 형식인 `주버전.부버전.수정버전`을 사용합니다.
 
+## [1.1.0] - 2026-07-25
+
+### FULL 소스와 네이티브 런타임 교체
+
+- `GSG_HWP_BETA_현재버전_FULL_0.5.73-dev.1_native-0.5.121_20260725-171145.tar.gz`의 SHA-256 `43916be6b363e7a5bcda02104d2ab24c02b1d2bae9704c36560cffc5fae26eed`를 기준 소스로 사용
+- MCP 런타임 `0.3.89`, Win32 C++/ATL 네이티브 브리지 `0.5.121`, 프로토콜 `12`로 업데이트
+- 작업 중심 공개 도구 44개와 런타임 재로드 1개, 총 45개 및 QA 도구 62개 반영
+- 참고 이미지 분석, 편집 가능한 네이티브 레이아웃 생성·패치, 배치 사전 검사, 작업 상태 조회와 강화된 문서 세션 기능 포함
+- 공식 API 제외 목록은 검증된 4개 `SaveHistoryItem`, `IHwpObject.ExportStyle`, `IHwpObject.ImportStyle`, `IDHwpParameterArray.Clone`을 그대로 유지
+
+### 자동 업데이트와 격리 런타임
+
+- GitHub `main`에 새 배포 버전이 반영되면 안전 QA 후 태그 Release, 플러그인 ZIP과 `latest.json`을 생성하는 워크플로 추가
+- MCP 시작 시 6시간 간격으로 공식 GitHub Release를 확인하고, 태그 고정 URL·SHA-256·ZIP 경로·패키지 메타데이터·MCP import 검증을 통과한 버전만 활성화
+- 한/글 실행 중에는 DLL·레지스트리 변경을 보류하고, 네트워크 또는 검증 실패 시 현재 버전을 계속 실행
+- 최초 설치와 자동 업데이트 모두 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\<배포 버전>\.venv`를 만들고 해당 Python만 실행
+- 업데이트 직전 DLL·HKCU 레지스트리·설치 상태·활성 패키지 상태를 별도 백업
+- `restore-update.ps1`로 직전 자동 업데이트를 복원하고 `uninstall.ps1`로 최초 설치 전 상태를 복원하도록 분리
+
+### 배포 정리와 안내
+
+- 개발 `.venv`, 캐시·로그·중간 빌드 파일, 구버전 DLL, 개인 업무 스크립트·fixture·절대 경로를 제외
+- 배포 버전 `1.1.0`, 원본 소스 `0.5.73-dev.1`, 개발자 `inodesign` 메타데이터와 README·설치 에이전트 지침을 일치시킴
+
 ## [1.0.4] - 2026-07-23
 
 ### 공식 API 라우팅 정정

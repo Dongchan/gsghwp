@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from threading import Lock
-from typing import final
+from typing import Final, final
 
 from hwp_live_bridge_contract import BridgeSnapshot, BridgeState
-from hwp_live_structure_contract import (
-    DocumentStructure,
-    StructureTable,
-)
+from hwp_live_state_diff import changed_paths
+
+
+_STATE_CACHE_ENTRY_LIMIT: Final = 8
+_STATE_CACHE_BYTE_LIMIT: Final = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,118 +19,58 @@ class _CacheEntry:
     previous_revision: int
     changed_paths: tuple[str, ...]
     snapshot: BridgeSnapshot
-
-
-def _table_paths(before: StructureTable, after: StructureTable) -> tuple[str, ...]:
-    prefix = f"tables[{after.table_ref}]"
-    paths: list[str] = []
-    if (before.page_start, before.page_end) != (after.page_start, after.page_end):
-        paths.append(prefix + ".pages")
-    if (before.rows, before.columns, before.merges) != (
-        after.rows,
-        after.columns,
-        after.merges,
-    ):
-        paths.append(prefix + ".structure")
-    if before.caption != after.caption:
-        paths.append(prefix + ".caption")
-    old_cells = {cell.address: cell for cell in before.cells}
-    new_cells = {cell.address: cell for cell in after.cells}
-    for address in sorted(old_cells.keys() | new_cells.keys()):
-        if old_cells.get(address) != new_cells.get(address):
-            paths.append(prefix + f".cells[{address}]")
-    return tuple(paths)
-
-
-def _structure_paths(
-    before: DocumentStructure,
-    after: DocumentStructure,
-) -> tuple[str, ...]:
-    paths: list[str] = []
-    if before.page_count != after.page_count:
-        paths.append("page_count")
-    if before.page_text != after.page_text:
-        paths.append("page_text")
-    if before.paragraphs != after.paragraphs:
-        paths.append("paragraphs")
-    if before.controls != after.controls:
-        paths.append("controls")
-    old_tables = {table.table_ref: table for table in before.tables}
-    new_tables = {table.table_ref: table for table in after.tables}
-    for reference in sorted(old_tables.keys() | new_tables.keys()):
-        old = old_tables.get(reference)
-        new = new_tables.get(reference)
-        if old is None or new is None:
-            paths.append(f"tables[{reference}]")
-        else:
-            paths.extend(_table_paths(old, new))
-    return tuple(paths)
-
-
-def changed_paths(
-    before: BridgeSnapshot,
-    after: BridgeSnapshot,
-) -> tuple[str, ...]:
-    paths: list[str] = list(_structure_paths(before.structure, after.structure))
-    if before.context.document.modified != after.context.document.modified:
-        paths.append("context.document.modified")
-    if before.context.current_page != after.context.current_page:
-        paths.append("context.current_page")
-    if before.context.cursor != after.context.cursor:
-        paths.append("context.cursor")
-    if before.context.selection != after.context.selection:
-        paths.append("context.selection")
-    if before.context.active_target != after.context.active_target:
-        paths.append("context.active_target")
-    if before.context.selected_text != after.context.selected_text:
-        paths.append("context.selected_text")
-    if before.context.page_text != after.context.page_text:
-        paths.append("context.page_text")
-    if before.context.character_style != after.context.character_style:
-        paths.append("context.character_style")
-    if before.context.paragraph_style != after.context.paragraph_style:
-        paths.append("context.paragraph_style")
-    if before.context.page_setup != after.context.page_setup:
-        paths.append("context.page_setup")
-    if before.window.dialogs != after.window.dialogs:
-        paths.append("window.dialogs")
-    if (
-        before.window.exists,
-        before.window.visible,
-        before.window.enabled,
-        before.window.foreground,
-    ) != (
-        after.window.exists,
-        after.window.visible,
-        after.window.enabled,
-        after.window.foreground,
-    ):
-        paths.append("window.state")
-    if (before.window.title, before.window.class_name) != (
-        after.window.title,
-        after.window.class_name,
-    ):
-        paths.append("window.identity")
-    return ("snapshot",) if len(paths) > 500 else tuple(paths)
+    size_bytes: int
 
 
 @final
 class HancomStateCache:
-    __slots__ = ("_entries", "_lock", "_revision")
+    __slots__ = (
+        "_entries",
+        "_lock",
+        "_max_bytes",
+        "_max_entries",
+        "_revision",
+        "_total_bytes",
+    )
 
-    _entries: dict[int, _CacheEntry]
+    _entries: OrderedDict[int, _CacheEntry]
     _lock: Lock
+    _max_bytes: int
+    _max_entries: int
     _revision: int
+    _total_bytes: int
 
-    def __init__(self) -> None:
-        self._entries = {}
+    def __init__(
+        self,
+        *,
+        max_entries: int = _STATE_CACHE_ENTRY_LIMIT,
+        max_bytes: int = _STATE_CACHE_BYTE_LIMIT,
+    ) -> None:
+        self._entries = OrderedDict()
         self._lock = Lock()
+        self._max_entries = max_entries
+        self._max_bytes = max_bytes
         self._revision = 0
+        self._total_bytes = 0
 
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
             self._revision = 0
+            self._total_bytes = 0
+
+    def _retain(self, page: int, entry: _CacheEntry) -> None:
+        previous = self._entries.pop(page, None)
+        if previous is not None:
+            self._total_bytes -= previous.size_bytes
+        self._entries[page] = entry
+        self._total_bytes += entry.size_bytes
+        while (
+            len(self._entries) > self._max_entries
+            or self._total_bytes > self._max_bytes
+        ):
+            _, evicted = self._entries.popitem(last=False)
+            self._total_bytes -= evicted.size_bytes
 
     def refresh(
         self,
@@ -145,8 +87,9 @@ class HancomStateCache:
                         previous_revision=after_revision,
                         changed_paths=("snapshot",),
                         snapshot=snapshot,
+                        size_bytes=previous.size_bytes,
                     )
-                    self._entries[snapshot.structure.page] = rebased
+                    self._retain(snapshot.structure.page, rebased)
                     return BridgeState(
                         revision=rebased.revision,
                         previous_revision=rebased.previous_revision,
@@ -154,6 +97,7 @@ class HancomStateCache:
                         changed_paths=("snapshot",),
                         snapshot=snapshot,
                     )
+                self._entries.move_to_end(snapshot.structure.page)
                 full = (
                     after_revision == 0
                     or after_revision not in {previous.revision, previous.previous_revision}
@@ -178,8 +122,9 @@ class HancomStateCache:
                 previous_revision=prior_revision,
                 changed_paths=paths,
                 snapshot=snapshot,
+                size_bytes=len(snapshot.model_dump_json().encode("utf-8")),
             )
-            self._entries[snapshot.structure.page] = entry
+            self._retain(snapshot.structure.page, entry)
             full = (
                 previous is None
                 or after_revision != prior_revision

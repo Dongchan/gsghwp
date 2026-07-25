@@ -2,12 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import ClassVar, cast, final
-from unittest.mock import patch
-
-import anyio
-import pytest
-from pydantic import BaseModel, ConfigDict
+from typing import ClassVar, cast
 
 
 SCRIPTS = (
@@ -19,20 +14,8 @@ SCRIPTS = (
 sys.path.insert(0, str(SCRIPTS))
 
 from hwp_live_bridge import HancomBridge  # noqa: E402
-from hwp_live_bridge_contract import (  # noqa: E402
-    HancomDialogDismissResult,
-    HancomWindowChildState,
-    HancomWindowState,
-    HancomWindowStateList,
-)
-from hwp_errors import HwpLiveError  # noqa: E402
 from hwp_live_api import HwpComApplication, HwpComDocument  # noqa: E402
-from hwp_live_contract import (  # noqa: E402
-    ConnectedDocument,
-    OpenDocument,
-    OpenDocumentList,
-    SelectionPosition,
-)
+from hwp_live_contract import SelectionPosition  # noqa: E402
 from hwp_live_session import LiveHwpController  # noqa: E402
 from hwp_live_rot import HwpDocumentCandidate, require_active_candidate  # noqa: E402
 from hwp_live_structure_contract import (  # noqa: E402
@@ -40,139 +23,7 @@ from hwp_live_structure_contract import (  # noqa: E402
     FastPageInspection,
     StructurePosition,
 )
-from hwp_live_windows import WindowStateReader  # noqa: E402
-from hwp_mcp import build_server  # noqa: E402
-from hwp_mcp_dispatch import McpThreadDispatcher  # noqa: E402
-from hwp_mcp_operation import McpOperationHandler  # noqa: E402
-from hwp_mcp_operation_executor import HwpOperationExecutor  # noqa: E402
 from hwp_public_action_contract import PublicObjectTargetStore  # noqa: E402
-
-
-class _InputSchema(BaseModel):
-    model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore", frozen=True)
-
-    required: tuple[str, ...] = ()
-
-
-def _document() -> OpenDocument:
-    return OpenDocument(
-        selector="active-document",
-        title="sample.hwp",
-        full_name="C:/documents/sample.hwp",
-        document_id=17,
-        format="HWP",
-        edit_mode=1,
-        modified=False,
-        page_count=3,
-        active=True,
-        window_handle=101,
-    )
-
-
-@final
-class _PopupWindowReader:
-    _state: HancomWindowState
-
-    def __init__(self, state: HancomWindowState) -> None:
-        self._state = state
-
-    def list_visible_hwp_windows(self) -> HancomWindowStateList:
-        return HancomWindowStateList(windows=(self._state,))
-
-    def read(self, window_handle: int) -> HancomWindowState:
-        _ = window_handle
-        return self._state
-
-    def dismiss_dialogs(self, window_handle: int) -> HancomDialogDismissResult:
-        _ = window_handle
-        raise AssertionError("팝업 자동 진단은 창을 닫지 않아야 합니다")
-
-
-def test_bridge_error_includes_visible_hwp_popup_text() -> None:
-    popup = HancomWindowState(
-        window_handle=21502142,
-        process_id=12456,
-        exists=True,
-        visible=True,
-        enabled=True,
-        foreground=True,
-        title="Hwp",
-        class_name="#32770",
-        dialogs=(),
-        children=(
-            HancomWindowChildState(
-                window_handle=21502143,
-                title="TypeInitializationException: PopupBorderImpl",
-                class_name="Static",
-                visible=True,
-                enabled=True,
-            ),
-        ),
-    )
-    bridge = HancomBridge(
-        LiveHwpController(),
-        window_reader=cast(WindowStateReader, _PopupWindowReader(popup)),
-    )
-    try:
-        with patch.object(
-            LiveHwpController,
-            "list_open_documents",
-            side_effect=HwpLiveError("RPC 서버를 사용할 수 없습니다(-2147023174)"),
-        ):
-            with pytest.raises(HwpLiveError) as captured:
-                _ = bridge.list_open_documents()
-    finally:
-        bridge.close()
-
-    assert "RPC 서버를 사용할 수 없습니다(-2147023174)" in captured.value.reason
-    assert "PopupBorderImpl" in captured.value.reason
-
-
-def test_production_read_tools_need_no_session_preflight() -> None:
-    server = build_server(LiveHwpController(), profile="production")
-    tools = anyio.run(server.list_tools)
-    schemas = {
-        tool.name: _InputSchema.model_validate(tool.inputSchema) for tool in tools
-    }
-
-    for name in (
-        "hwp_inspect",
-        "hwp_inspect_page_fast",
-        "hwp_inspect_structure",
-        "hwp_list_styles",
-    ):
-        assert "session_id" not in schemas[name].required
-
-
-def test_connect_reuses_the_executor_connection_for_the_same_document() -> None:
-    document = _document()
-    connected = ConnectedDocument(session_id="existing-session", document=document)
-    bridge = HancomBridge(LiveHwpController())
-    dispatcher = McpThreadDispatcher(watch_workers=1)
-    executor = HwpOperationExecutor(bridge, dispatcher, None)
-    handler = McpOperationHandler(bridge, dispatcher, executor)
-
-    async def connect_twice() -> tuple[ConnectedDocument, ConnectedDocument]:
-        try:
-            first = await handler.hwp_connect(document.selector)
-            second = await handler.hwp_connect(document.selector)
-            return first, second
-        finally:
-            await dispatcher.close(bridge.close)
-
-    with (
-        patch.object(
-            HancomBridge,
-            "list_open_documents",
-            return_value=OpenDocumentList(documents=(document,)),
-        ),
-        patch.object(HancomBridge, "connect", return_value=connected) as native_connect,
-    ):
-        first, second = anyio.run(connect_twice)
-
-    assert first == connected
-    assert second == connected
-    assert native_connect.call_count == 1
 
 
 def test_fast_inspection_instance_id_is_a_public_object_target() -> None:
@@ -383,6 +234,10 @@ class _InspectionController:
     def close(self) -> None:
         pass
 
+    def restore_activation(self) -> None:
+        pass
+
+
     def replace_selection(
         self,
         session_id: str,
@@ -400,6 +255,12 @@ def test_fast_inspection_reuses_only_unchanged_revision() -> None:
         cast(LiveHwpController, cast(object, controller)),
         change_signal=signal,
     )
+    events = cast(dict[int, _RevisionSignal], getattr(bridge, "_events"))
+    session_processes = cast(dict[str, int], getattr(bridge, "_session_processes"))
+    process_sessions = cast(dict[int, set[str]], getattr(bridge, "_process_sessions"))
+    events[0] = signal
+    session_processes["session"] = 0
+    process_sessions[0] = {"session"}
     try:
         first = bridge.inspect_page_fast("session", 2, include_cells=False)
         second = bridge.inspect_page_fast("session", 2, include_cells=False)

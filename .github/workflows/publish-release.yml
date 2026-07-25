@@ -1,0 +1,121 @@
+name: Publish GSG HWP release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-release.yml"
+      - "plugins/gsg-hwp/**"
+      - "install.ps1"
+      - "uninstall.ps1"
+      - "restore-update.ps1"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "LICENSE"
+      - "THIRD_PARTY_NOTICES.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gsg-hwp-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read and validate version
+        id: version
+        shell: pwsh
+        run: |
+          $plugin = Get-Content -LiteralPath "plugins/gsg-hwp/.codex-plugin/plugin.json" -Raw |
+            ConvertFrom-Json
+          $manifest = Get-Content -LiteralPath "plugins/gsg-hwp/compatibility-manifest.json" -Raw |
+            ConvertFrom-Json
+          if ([string]$plugin.version -notmatch "^\d+\.\d+\.\d+$") {
+            throw "Public plugin version must use major.minor.patch."
+          }
+          if ([string]$plugin.version -ne [string]$manifest.distribution) {
+            throw "Plugin and compatibility manifest versions differ."
+          }
+          "version=$($plugin.version)" >> $env:GITHUB_OUTPUT
+          "source_version=$($manifest.source_version)" >> $env:GITHUB_OUTPUT
+          "native_bridge=$($manifest.native_bridge)" >> $env:GITHUB_OUTPUT
+
+      - name: Check whether the version is already published
+        id: existing
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v${{ steps.version.outputs.version }}"
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            "exists=true" >> $env:GITHUB_OUTPUT
+          }
+          else {
+            "exists=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Run release safety QA
+        if: steps.existing.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          & ./tests/auto_update_qa.ps1
+          & ./tests/security_module_installation_qa.ps1
+          & ./tests/release_installation_qa.ps1
+
+      - name: Build signed-by-hash update assets
+        if: steps.existing.outputs.exists == 'false'
+        id: assets
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $releaseRoot = Join-Path $env:RUNNER_TEMP "gsg-hwp-release-$version"
+          $packageStage = Join-Path $releaseRoot "package"
+          $packageRoot = Join-Path $packageStage "gsg-hwp"
+          New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+          Copy-Item -Path "plugins/gsg-hwp/*" -Destination $packageRoot -Recurse -Force
+          Get-ChildItem -LiteralPath "plugins/gsg-hwp" -Force |
+            Where-Object { $_.Name.StartsWith(".") } |
+            Copy-Item -Destination $packageRoot -Recurse -Force
+
+          $archive = Join-Path $releaseRoot "gsg-hwp-plugin-v$version.zip"
+          Compress-Archive -LiteralPath $packageRoot -DestinationPath $archive -CompressionLevel Optimal
+          $sha256 = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest = [ordered]@{
+            schema_version = 1
+            distribution = $version
+            source_version = "${{ steps.version.outputs.source_version }}"
+            package_url = "https://github.com/${{ github.repository }}/releases/download/v$version/gsg-hwp-plugin-v$version.zip"
+            package_sha256 = $sha256
+            package_root = "gsg-hwp"
+            native_bridge = "${{ steps.version.outputs.native_bridge }}"
+            published_utc = [DateTimeOffset]::UtcNow.ToString("o")
+          }
+          $latest = Join-Path $releaseRoot "latest.json"
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $latest -Encoding UTF8
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+          "latest=$latest" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub Release
+        if: steps.existing.outputs.exists == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          gh release create "v$version" `
+            "${{ steps.assets.outputs.archive }}" `
+            "${{ steps.assets.outputs.latest }}" `
+            --repo "${{ github.repository }}" `
+            --title "GSG HWP v$version" `
+            --generate-notes `
+            --latest

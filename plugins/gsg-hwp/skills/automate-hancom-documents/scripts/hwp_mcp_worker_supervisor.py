@@ -2,100 +2,40 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from pathlib import Path
-from typing import assert_never, final
+from dataclasses import replace
+from typing import final
 
 import anyio
-from anyio.streams.memory import MemoryObjectSendStream
-from mcp.client.session import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.types import CallToolResult, Tool
 from pydantic import JsonValue
 
-from hwp_runtime_identity import (
-    RuntimeStatus,
-    refresh_runtime_source_state,
-    runtime_source_state,
+from hwp_mcp_worker_concurrency import WorkerActivity, runs_concurrently
+from hwp_mcp_worker_deadline import (
+    DEFAULT_CALL_TIMEOUT_SECONDS,
+    call_worker_before_deadline,
+    positive_call_timeout,
 )
-
-
-class HwpWorkerProtocolError(RuntimeError):
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class HwpWorkerLaunch:
-    python_executable: Path
-    worker_script: Path
-    watch_paths: tuple[Path, ...]
-    worker_arguments: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerToolList:
-    tools: tuple[Tool, ...]
-    reloaded: bool
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerToolResult:
-    result: CallToolResult
-    reloaded: bool
-
-
-@dataclass(frozen=True, slots=True)
-class WorkerStatus:
-    runtime: RuntimeStatus
-    tools: tuple[Tool, ...]
-    generation: int
-    source_hash: str
-    loaded_source_hash: str
-    reloaded: bool
-
-
-@dataclass(frozen=True, slots=True)
-class _ListTools:
-    reply: MemoryObjectSendStream[WorkerToolList]
-
-
-@dataclass(frozen=True, slots=True)
-class _CallTool:
-    name: str
-    arguments: dict[str, JsonValue]
-    reply: MemoryObjectSendStream[WorkerToolResult]
-
-
-@dataclass(frozen=True, slots=True)
-class _ReadStatus:
-    reply: MemoryObjectSendStream[WorkerStatus]
-
-
-@dataclass(frozen=True, slots=True)
-class _Reload:
-    reply: MemoryObjectSendStream[WorkerStatus]
-
-
-type _WorkerRequest = _ListTools | _CallTool | _ReadStatus | _Reload
-
-
-@dataclass(frozen=True, slots=True)
-class _WorkerCycle:
-    session: ClientSession
-    generation: int
-    source_hash: str
-    loaded_source_hash: str
-    reloaded: bool
-
-
-def _forces_reload(request: _WorkerRequest) -> bool:
-    match request:
-        case _Reload():
-            return True
-        case _ListTools() | _CallTool() | _ReadStatus():
-            return False
-        case unreachable:
-            assert_never(unreachable)
+from hwp_mcp_worker_protocol import (
+    HwpWorkerCallTimeout,
+    HwpWorkerProtocolError,
+    WorkerCallTool,
+    WorkerCycle,
+    WorkerQuiesced,
+    WorkerRequest,
+    WorkerStatus,
+    WorkerToolList,
+    WorkerToolResult,
+    forces_reload,
+)
+from hwp_mcp_worker_session import (
+    HwpWorkerLaunch,
+    open_worker_session,
+    read_worker_status,
+    request_worker_reload,
+    respond_to_worker_request,
+)
+from hwp_mcp_worker_status import supervisor_status
+from hwp_mcp_worker_tool_policy import worker_tool_may_mutate
+from hwp_runtime_identity import refresh_runtime_source_state, runtime_source_state
 
 
 @final
@@ -104,18 +44,32 @@ class HwpWorkerSupervisor:
         "_launch",
         "_ready",
         "_receive",
+        "_reload_requested",
+        "_restarting",
         "_send",
+        "_source_state",
+        "_status_snapshot",
+        "_activity",
+        "_call_timeout_seconds",
+        "_cycle_scope",
     )
 
-    def __init__(self, launch: HwpWorkerLaunch) -> None:
-        self._launch = HwpWorkerLaunch(
-            python_executable=launch.python_executable.resolve(),
-            worker_script=launch.worker_script.resolve(),
-            watch_paths=tuple(path.resolve() for path in launch.watch_paths),
-            worker_arguments=launch.worker_arguments,
-        )
-        self._send, self._receive = anyio.create_memory_object_stream[_WorkerRequest](0)
+    def __init__(
+        self,
+        launch: HwpWorkerLaunch,
+        *,
+        call_timeout_seconds: float = DEFAULT_CALL_TIMEOUT_SECONDS,
+    ) -> None:
+        self._launch = launch.resolved()
+        self._send, self._receive = anyio.create_memory_object_stream[WorkerRequest](1)
+        self._activity = WorkerActivity(self._send)
+        self._call_timeout_seconds = positive_call_timeout(call_timeout_seconds)
         self._ready = anyio.Event()
+        self._source_state = runtime_source_state(self._launch.watch_paths)
+        self._status_snapshot: WorkerStatus | None = None
+        self._reload_requested = False
+        self._restarting = True
+        self._cycle_scope: anyio.CancelScope | None = None
 
     @asynccontextmanager
     async def running(self) -> AsyncGenerator[None]:
@@ -128,119 +82,163 @@ class HwpWorkerSupervisor:
                 await self._send.aclose()
 
     async def list_tools(self) -> WorkerToolList:
-        send, receive = anyio.create_memory_object_stream[WorkerToolList](1)
-        async with send, receive:
-            await self._send.send(_ListTools(send))
-            return await receive.receive()
+        status = await self.status()
+        return WorkerToolList(status.tools, status.reloaded)
 
-    async def call_tool(
-        self,
-        name: str,
-        arguments: dict[str, JsonValue],
-    ) -> WorkerToolResult:
-        send, receive = anyio.create_memory_object_stream[WorkerToolResult](1)
-        async with send, receive:
-            await self._send.send(_CallTool(name, arguments, send))
-            return await receive.receive()
+    async def call_tool(self, name: str, arguments: dict[str, JsonValue]) -> WorkerToolResult:
+        mutation = worker_tool_may_mutate(name, arguments)
+        try:
+            result = await call_worker_before_deadline(
+                self._send,
+                name,
+                arguments,
+                self._call_timeout_seconds,
+                mutation=mutation,
+            )
+        except HwpWorkerCallTimeout as error:
+            if error.started:
+                self._request_worker_isolation()
+            raise
+        if "worker_isolation_required=true" in result.result.model_dump_json():
+            self._request_worker_isolation()
+        return result
+
+    def _request_worker_isolation(self) -> None:
+        self._restarting = True
+        cycle_scope = self._cycle_scope
+        if cycle_scope is not None:
+            cycle_scope.cancel()
 
     async def status(self) -> WorkerStatus:
-        send, receive = anyio.create_memory_object_stream[WorkerStatus](1)
-        async with send, receive:
-            await self._send.send(_ReadStatus(send))
-            return await receive.receive()
+        snapshot = self._status_snapshot
+        if snapshot is None:
+            raise HwpWorkerProtocolError("HWP worker status is not available")
+        self._source_state = refresh_runtime_source_state(
+            self._source_state,
+            self._launch.watch_paths,
+        )
+        return supervisor_status(
+            snapshot, self._source_state.content_hash,
+            restarting=self._restarting, busy=self._activity.busy,
+            reload_requested=self._reload_requested,
+        )
 
     async def reload(self) -> WorkerStatus:
-        send, receive = anyio.create_memory_object_stream[WorkerStatus](1)
-        async with send, receive:
-            await self._send.send(_Reload(send))
-            return await receive.receive()
+        status = await self.status()
+        if status.worker_state == "busy":
+            self._reload_requested = True
+            return replace(status, reload_state="deferred")
+        if status.worker_state == "unknown":
+            return replace(status, reload_state="unknown")
+        result = await request_worker_reload(self._send)
+        if result is not None:
+            return result
+        self._reload_requested = True
+        return replace(
+            await self.status(),
+            worker_state="busy",
+            reload_state="deferred",
+        )
 
     async def _serve(self) -> None:
-        pending: _WorkerRequest | None = None
+        pending: WorkerRequest | None = None
         pending_reloaded = False
         generation = 0
         async with self._receive:
             while True:
-                source_state = runtime_source_state(self._launch.watch_paths)
-                loaded_source_hash = source_state.content_hash
-                parameters = StdioServerParameters(
-                    command=str(self._launch.python_executable),
-                    args=[
-                        "-B",
-                        str(self._launch.worker_script),
-                        *self._launch.worker_arguments,
-                    ],
-                    cwd=self._launch.worker_script.parent,
+                source_state = refresh_runtime_source_state(
+                    self._source_state,
+                    self._launch.watch_paths,
                 )
-                async with stdio_client(parameters) as streams:
-                    async with ClientSession(*streams) as session:
-                        _ = await session.initialize()
-                        generation += 1
-                        self._ready.set()
-                        while True:
-                            if pending is None:
-                                try:
-                                    request = await self._receive.receive()
-                                except anyio.EndOfStream:
-                                    return
-                                reloaded = False
-                            else:
-                                request, pending = pending, None
-                                reloaded, pending_reloaded = pending_reloaded, False
-                            current_source_state = refresh_runtime_source_state(
-                                source_state,
-                                self._launch.watch_paths,
-                            )
-                            current_source_hash = current_source_state.content_hash
-                            if not reloaded and (
-                                _forces_reload(request)
-                                or current_source_hash != loaded_source_hash
-                            ):
-                                pending = request
-                                pending_reloaded = True
-                                break
-                            source_state = current_source_state
-                            await self._respond(
-                                request,
-                                _WorkerCycle(
+                self._source_state = source_state
+                loaded_source_hash = source_state.content_hash
+                async with open_worker_session(self._launch) as session:
+                    generation += 1
+                    cycle = WorkerCycle(
+                        session=session,
+                        generation=generation,
+                        source_hash=source_state.content_hash,
+                        loaded_source_hash=loaded_source_hash,
+                        reloaded=pending_reloaded,
+                    )
+                    self._status_snapshot = await read_worker_status(cycle)
+                    self._restarting = False
+                    self._ready.set()
+                    async with anyio.create_task_group() as responses:
+                        self._cycle_scope = responses.cancel_scope
+                        try:
+                            while True:
+                                if pending is None:
+                                    try:
+                                        request = await self._receive.receive()
+                                    except anyio.EndOfStream:
+                                        return
+                                    reloaded, pending_reloaded = pending_reloaded, False
+                                else:
+                                    request, pending = pending, None
+                                    reloaded, pending_reloaded = pending_reloaded, False
+                                if (
+                                    isinstance(request, WorkerCallTool)
+                                    and request.state.cancelled.is_set()
+                                ):
+                                    continue
+                                current_source_state = refresh_runtime_source_state(
+                                    source_state,
+                                    self._launch.watch_paths,
+                                )
+                                self._source_state = current_source_state
+                                current_source_hash = current_source_state.content_hash
+                                if isinstance(request, WorkerQuiesced):
+                                    if self._activity.busy:
+                                        continue
+                                    if (
+                                        self._reload_requested
+                                        or current_source_hash != loaded_source_hash
+                                    ):
+                                        self._reload_requested = False
+                                        pending_reloaded = True
+                                        self._restarting = True
+                                        break
+                                    continue
+                                if not reloaded and (
+                                    forces_reload(request)
+                                    or current_source_hash != loaded_source_hash
+                                    or (
+                                        self._reload_requested
+                                        and not self._activity.busy
+                                    )
+                                ):
+                                    pending = request
+                                    self._reload_requested = False
+                                    pending_reloaded = True
+                                    self._restarting = True
+                                    break
+                                source_state = current_source_state
+                                cycle_request = WorkerCycle(
                                     session=session,
                                     generation=generation,
                                     source_hash=current_source_hash,
                                     loaded_source_hash=loaded_source_hash,
                                     reloaded=reloaded,
-                                ),
-                            )
-
-    async def _status(self, cycle: _WorkerCycle) -> WorkerStatus:
-        tools = tuple((await cycle.session.list_tools()).tools)
-        result = await cycle.session.call_tool("hwp_runtime_info", {})
-        if result.isError or result.structuredContent is None:
-            raise HwpWorkerProtocolError(
-                "HWP worker did not return structured runtime identity"
-            )
-        runtime = RuntimeStatus.model_validate(result.structuredContent)
-        return WorkerStatus(
-            runtime=runtime,
-            tools=tools,
-            generation=cycle.generation,
-            source_hash=cycle.source_hash,
-            loaded_source_hash=cycle.loaded_source_hash,
-            reloaded=cycle.reloaded,
-        )
-
-    async def _respond(
-        self,
-        request: _WorkerRequest,
-        cycle: _WorkerCycle,
-    ) -> None:
-        match request:
-            case _ListTools(reply=reply):
-                tools = tuple((await cycle.session.list_tools()).tools)
-                await reply.send(WorkerToolList(tools, cycle.reloaded))
-            case _CallTool(name=name, arguments=arguments, reply=reply):
-                result = await cycle.session.call_tool(name, arguments)
-                await reply.send(WorkerToolResult(result, cycle.reloaded))
-            case _ReadStatus(reply=reply) | _Reload(reply=reply):
-                await reply.send(await self._status(cycle))
-            case unreachable:
-                assert_never(unreachable)
+                                )
+                                if isinstance(request, WorkerCallTool):
+                                    request.state.started.set()
+                                self._activity.start()
+                                if runs_concurrently(request):
+                                    _ = responses.start_soon(
+                                        self._activity.respond,
+                                        request,
+                                        cycle_request,
+                                    )
+                                    continue
+                                try:
+                                    await respond_to_worker_request(request, cycle_request)
+                                finally:
+                                    self._activity.finish()
+                                if self._reload_requested and not self._activity.busy:
+                                    self._reload_requested = False
+                                    pending_reloaded = True
+                                    self._restarting = True
+                                    break
+                        finally:
+                            self._cycle_scope = None

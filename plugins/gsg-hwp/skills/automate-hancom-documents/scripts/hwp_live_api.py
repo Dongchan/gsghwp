@@ -60,6 +60,13 @@ class HwpComDocument(Protocol):
 
     def SetActive_XHwpDocument(self) -> None: ...
 
+    def Open(
+        self,
+        path: str,
+        format: str | None,
+        arguments: str | None,
+    ) -> bool: ...
+
 class HwpDocuments(Protocol):
     @property
     def Count(self) -> int: ...
@@ -70,6 +77,8 @@ class HwpDocuments(Protocol):
     def Item(self, index: int) -> HwpComDocument: ...
 
     def FindItem(self, document_id: int) -> HwpComDocument | None: ...
+
+    def Add(self, new_tab: bool) -> HwpComDocument: ...
 
 
 class HwpWindow(Protocol):

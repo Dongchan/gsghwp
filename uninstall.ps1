@@ -34,9 +34,7 @@ if (-not (Test-GsgHwpStopped)) {
 }
 
 $result = Restore-GsgHwpNative -Paths $paths
-if (-not $KeepRuntime) {
-    Remove-GsgHwpRuntime -Paths $paths
-}
+Remove-GsgHwpManagedUpdates -Paths $paths -KeepRuntime:$KeepRuntime
 
 if ($result.Restored) {
     Write-Host "원상복구 완료"

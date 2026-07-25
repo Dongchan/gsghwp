@@ -1,0 +1,462 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Final, Literal
+
+from hwp_operation_route_contract import HwpWorkflowId
+
+
+OperationVerificationMode = Literal[
+    "native_action_result",
+    "native_routing_context",
+    "native_snapshot_before_after",
+    "native_detailed_structure_before_after",
+    "native_structure_no_change",
+    "native_operation_specific_readback",
+    "native_save_result",
+    "native_save_reopen_result",
+]
+DescriptorExecution = Literal["recipe", "official", "catalog_only"]
+DescriptorAtomicity = Literal["native_batch", "transactional"]
+
+
+@dataclass(frozen=True, slots=True)
+class OperationRecipeDescriptor:
+    recipe_id: str
+    version: int
+    steps: tuple[str, ...]
+    atomicity: DescriptorAtomicity
+
+
+@dataclass(frozen=True, slots=True)
+class OperationDescriptor:
+    workflow_id: HwpWorkflowId
+    execution: DescriptorExecution
+    routing_steps: tuple[str, ...]
+    input_schema: tuple[str, ...]
+    target_kinds: frozenset[str] = frozenset()
+    recipe: OperationRecipeDescriptor | None = None
+    public_tools: tuple[str, ...] = ()
+    verification_modes: tuple[OperationVerificationMode, ...] = ()
+    mutation: bool = True
+
+
+def _recipe(
+    recipe_id: str,
+    steps: tuple[str, ...],
+    atomicity: DescriptorAtomicity = "native_batch",
+) -> OperationRecipeDescriptor:
+    return OperationRecipeDescriptor(recipe_id, 1, steps, atomicity)
+
+
+_DESCRIPTORS: Final = (
+    OperationDescriptor(
+        "document.inspect_structure",
+        "recipe",
+        ("InspectStructure",),
+        (),
+        public_tools=("hwp_inspect_structure",),
+        verification_modes=("native_routing_context",),
+        mutation=False,
+    ),
+    OperationDescriptor(
+        "document.delete_page",
+        "recipe",
+        ("ResolvePage", "DeletePage", "VerifyStructure"),
+        ("inputs.target",),
+        frozenset(("page",)),
+        _recipe(
+            "document.delete_page.v1",
+            ("ResolvePage", "DeletePage", "VerifyStructure"),
+        ),
+        ("hwp_delete_page",),
+        ("native_snapshot_before_after",),
+    ),
+    OperationDescriptor(
+        "document.undo",
+        "recipe",
+        ("ResolveHistory", "Undo", "VerifySnapshot"),
+        (),
+        recipe=_recipe(
+            "document.undo.v1",
+            ("ResolveHistory", "Undo", "VerifySnapshot"),
+        ),
+        public_tools=("hwp_undo",),
+        verification_modes=("native_snapshot_before_after",),
+    ),
+    OperationDescriptor(
+        "document.redo",
+        "recipe",
+        ("ResolveHistory", "Redo", "VerifySnapshot"),
+        (),
+        recipe=_recipe(
+            "document.redo.v1",
+            ("ResolveHistory", "Redo", "VerifySnapshot"),
+        ),
+        public_tools=("hwp_redo",),
+        verification_modes=("native_snapshot_before_after",),
+    ),
+    OperationDescriptor(
+        "control.delete",
+        "recipe",
+        ("ResolveControl", "DeleteControl", "VerifyStructure"),
+        ("inputs.target",),
+        frozenset(("control",)),
+        _recipe(
+            "control.delete.v1",
+            ("ResolveControl", "DeleteControl", "VerifyStructure"),
+        ),
+        ("hwp_delete_control",),
+        ("native_snapshot_before_after",),
+    ),
+    OperationDescriptor(
+        "document.append_layout",
+        "recipe",
+        ("MoveDocEnd", "ApplyLayout"),
+        ("inputs.layout",),
+        recipe=_recipe(
+            "page.append_from_template.v1",
+            ("MoveDocEnd", "ApplyLayout"),
+            "transactional",
+        ),
+        public_tools=("hwp_append_layout",),
+        verification_modes=("native_snapshot_before_after",),
+    ),
+    OperationDescriptor(
+        "document.insert_layout",
+        "recipe",
+        ("ApplyLayout",),
+        ("inputs.layout",),
+        recipe=_recipe("document.insert_layout.v1", ("ApplyLayout",)),
+        public_tools=("hwp_insert_layout",),
+        verification_modes=("native_snapshot_before_after",),
+    ),
+    OperationDescriptor(
+        "document.replace_selection",
+        "recipe",
+        ("ResolveTextPatch", "PatchText", "VerifyTextPatch"),
+        ("inputs.target", "inputs.data"),
+        frozenset(("selection",)),
+        _recipe(
+            "document.replace_selection.v1",
+            ("ResolveTextPatch", "PatchText", "VerifyTextPatch"),
+        ),
+        ("hwp_replace_selected_text",),
+        ("native_operation_specific_readback",),
+    ),
+    OperationDescriptor(
+        "text.replace",
+        "recipe",
+        ("ResolveTextPatch", "PatchText", "VerifyTextPatch"),
+        ("inputs.target", "inputs.data"),
+        frozenset(("selection", "range", "find", "table_cell")),
+        _recipe(
+            "text.replace.v1",
+            ("ResolveTextPatch", "PatchText", "VerifyTextPatch"),
+        ),
+        ("hwp_patch_text",),
+        ("native_operation_specific_readback",),
+    ),
+    OperationDescriptor(
+        "text.insert",
+        "recipe",
+        ("ResolveTextPatch", "PatchText", "VerifyTextPatch"),
+        ("inputs.data",),
+        frozenset(("cursor", "selection")),
+        _recipe(
+            "text.insert.v1",
+            ("ResolveTextPatch", "PatchText", "VerifyTextPatch"),
+        ),
+        ("hwp_patch_text",),
+        ("native_operation_specific_readback",),
+    ),
+    OperationDescriptor(
+        "text.format",
+        "recipe",
+        ("ResolveTextRange", "ApplyTextFormat"),
+        ("inputs.target", "inputs.parameters"),
+        frozenset(("selection",)),
+        _recipe(
+            "text.format.v1",
+            ("ResolveTextRange", "ApplyTextFormat"),
+        ),
+        ("hwp_format_text",),
+        ("native_operation_specific_readback",),
+    ),
+    OperationDescriptor(
+        "table.fill_existing",
+        "recipe",
+        ("ResolveTable", "MapRowsToCells", "FillCells", "VerifyStructure"),
+        ("inputs.target", "inputs.data"),
+        frozenset(("table",)),
+        _recipe(
+            "table.fill_existing.v1",
+            ("ResolveTable", "MapRowsToCells", "FillCells", "VerifyStructure"),
+        ),
+        ("hwp_fill_table",),
+        ("native_snapshot_before_after", "native_structure_no_change"),
+    ),
+    OperationDescriptor(
+        "table.expand_and_fill",
+        "recipe",
+        (
+            "ResolveTable",
+            "ExpandRows",
+            "MapRowsToCells",
+            "FillCells",
+            "VerifyStructure",
+        ),
+        ("inputs.target", "inputs.data"),
+        frozenset(("table",)),
+        _recipe(
+            "table.expand_and_fill.v1",
+            (
+                "ResolveTable",
+                "ExpandRows",
+                "MapRowsToCells",
+                "FillCells",
+                "VerifyStructure",
+            ),
+        ),
+        ("hwp_expand_and_fill_table",),
+        ("native_snapshot_before_after", "native_structure_no_change"),
+    ),
+    OperationDescriptor(
+        "table.repeat_template",
+        "recipe",
+        ("ResolveTable", "RepeatTemplate", "VerifyStructure"),
+        ("inputs.recipe",),
+        frozenset(("table",)),
+        _recipe(
+            "table.repeat_template.v1",
+            ("ResolveTable", "RepeatTemplate", "VerifyStructure"),
+        ),
+        ("hwp_repeat_table_template",),
+        ("native_snapshot_before_after",),
+    ),
+    OperationDescriptor(
+        "table.build_series",
+        "recipe",
+        (
+            "ResolveTable",
+            "RepeatTemplate",
+            "FillCells",
+            "InsertImages",
+            "VerifyStructure",
+        ),
+        ("inputs.recipe",),
+        frozenset(("table",)),
+        _recipe(
+            "table.build_series.v1",
+            (
+                "ResolveTable",
+                "RepeatTemplate",
+                "FillCells",
+                "InsertImages",
+                "VerifyStructure",
+            ),
+        ),
+        ("hwp_build_table_series", "hwp_sync_visibility_analysis_tables"),
+        ("native_snapshot_before_after",),
+    ),
+    OperationDescriptor(
+        "table.insert_images",
+        "recipe",
+        ("ResolveTable", "MapImagesToCells", "InsertImages", "VerifyStructure"),
+        ("inputs.target", "inputs.assets"),
+        frozenset(("table",)),
+        _recipe(
+            "table.fill_with_images.v1",
+            (
+                "ResolveTable",
+                "MapImagesToCells",
+                "InsertImages",
+                "VerifyStructure",
+            ),
+        ),
+        ("hwp_fill_table_images", "hwp_insert_table_images"),
+        ("native_snapshot_before_after", "native_structure_no_change"),
+    ),
+    OperationDescriptor(
+        "image.insert",
+        "recipe",
+        ("ResolvePosition", "InsertImages", "VerifyStructure"),
+        ("inputs.assets",),
+        recipe=_recipe(
+            "image.insert_or_replace.v1",
+            ("ResolvePosition", "InsertImages", "VerifyStructure"),
+        ),
+        public_tools=("hwp_insert_image",),
+        verification_modes=("native_snapshot_before_after",),
+    ),
+    OperationDescriptor(
+        "image.replace",
+        "recipe",
+        ("ResolvePicture", "PictureChange", "VerifyStructure"),
+        ("inputs.target", "inputs.assets"),
+        frozenset(("picture",)),
+        _recipe(
+            "image.insert_or_replace.v1",
+            ("ResolvePicture", "PictureChange", "VerifyStructure"),
+        ),
+        ("hwp_replace_image",),
+        ("native_snapshot_before_after",),
+    ),
+    OperationDescriptor(
+        "caption.add",
+        "recipe",
+        ("ResolveControl", "ApplyCaption", "VerifyStructure"),
+        ("inputs.target", "inputs.recipe"),
+        frozenset(("table", "control")),
+        _recipe(
+            "caption.add_or_update.v1",
+            ("ResolveControl", "ApplyCaption", "VerifyStructure"),
+        ),
+        ("hwp_add_caption",),
+        (
+            "native_snapshot_before_after",
+            "native_detailed_structure_before_after",
+        ),
+    ),
+    OperationDescriptor(
+        "style.copy",
+        "recipe",
+        ("ResolvePosition", "CopyAndApplyStyle", "VerifyStructure"),
+        ("inputs.recipe",),
+        recipe=_recipe(
+            "style.copy_and_apply.v1",
+            ("ResolvePosition", "CopyAndApplyStyle", "VerifyStructure"),
+        ),
+        public_tools=("hwp_copy_style",),
+        verification_modes=(
+            "native_snapshot_before_after",
+            "native_operation_specific_readback",
+        ),
+    ),
+    OperationDescriptor(
+        "style.apply",
+        "recipe",
+        ("ResolvePosition", "ApplyStyle", "VerifyStructure"),
+        ("inputs.recipe",),
+        recipe=_recipe(
+            "style.copy_and_apply.v1",
+            ("ResolvePosition", "ApplyStyle", "VerifyStructure"),
+        ),
+        public_tools=("hwp_apply_style",),
+        verification_modes=(
+            "native_snapshot_before_after",
+            "native_operation_specific_readback",
+        ),
+    ),
+    OperationDescriptor(
+        "table.format",
+        "recipe",
+        ("ResolveTable", "ApplyTableFormat", "VerifyStructure"),
+        ("inputs.target", "inputs.parameters"),
+        frozenset(("table",)),
+        _recipe(
+            "table.format.v1",
+            ("ResolveTable", "ApplyTableFormat", "VerifyStructure"),
+        ),
+        ("hwp_format_table",),
+        ("native_operation_specific_readback",),
+    ),
+    OperationDescriptor(
+        "table.merge_cells",
+        "recipe",
+        ("ResolveTable", "ResolveCells", "TableMergeCell", "VerifyStructure"),
+        ("inputs.target", "inputs.parameters"),
+        frozenset(("table",)),
+        _recipe(
+            "table.merge_cells.v1",
+            (
+                "ResolveTable",
+                "ResolveCells",
+                "TableMergeCell",
+                "VerifyStructure",
+            ),
+        ),
+        ("hwp_merge_table_cells",),
+        ("native_operation_specific_readback",),
+    ),
+    OperationDescriptor(
+        "table.split_cells",
+        "recipe",
+        ("ResolveTable", "ResolveCells", "TableSplitCell", "VerifyStructure"),
+        ("inputs.target", "inputs.parameters"),
+        frozenset(("table",)),
+        _recipe(
+            "table.split_cells.v1",
+            (
+                "ResolveTable",
+                "ResolveCells",
+                "TableSplitCell",
+                "VerifyStructure",
+            ),
+        ),
+        ("hwp_split_table_cell",),
+        ("native_operation_specific_readback",),
+    ),
+    OperationDescriptor(
+        "document.save",
+        "recipe",
+        ("SaveDocument", "VerifySavedDocument"),
+        (),
+        recipe=_recipe(
+            "document.save.v1",
+            ("SaveDocument", "VerifySavedDocument"),
+        ),
+        public_tools=("hwp_save",),
+        verification_modes=("native_save_result",),
+    ),
+    OperationDescriptor(
+        "document.save_reopen_verify",
+        "recipe",
+        ("SaveDocument", "ReopenDiagnostic", "VerifySavedDocument"),
+        (),
+        recipe=_recipe(
+            "document.save_reopen_verify.v1",
+            ("SaveDocument", "ReopenDiagnostic", "VerifySavedDocument"),
+        ),
+        public_tools=("hwp_save_reopen_verify",),
+        verification_modes=("native_save_reopen_result",),
+    ),
+)
+
+_BY_WORKFLOW: Final = MappingProxyType(
+    {descriptor.workflow_id: descriptor for descriptor in _DESCRIPTORS}
+)
+_BY_TOOL: Final = MappingProxyType(
+    {
+        tool: tuple(
+            descriptor
+            for descriptor in _DESCRIPTORS
+            if tool in descriptor.public_tools
+        )
+        for tool in {
+            tool
+            for descriptor in _DESCRIPTORS
+            for tool in descriptor.public_tools
+        }
+    }
+)
+
+
+def operation_descriptors() -> tuple[OperationDescriptor, ...]:
+    return _DESCRIPTORS
+
+
+def operation_descriptor(
+    workflow_id: HwpWorkflowId,
+) -> OperationDescriptor | None:
+    return _BY_WORKFLOW.get(workflow_id)
+
+
+def descriptor_workflows_for_tool(
+    tool_name: str,
+) -> tuple[HwpWorkflowId, ...]:
+    return tuple(
+        descriptor.workflow_id
+        for descriptor in _BY_TOOL.get(tool_name, ())
+    )

@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+from typing import Final
+
+import anyio
+from anyio.streams.memory import MemoryObjectSendStream
+from pydantic import JsonValue
+
+from hwp_mcp_worker_protocol import (
+    HwpWorkerCallTimeout,
+    HwpWorkerProtocolError,
+    WorkerCallState,
+    WorkerCallTool,
+    WorkerRequest,
+    WorkerToolResult,
+)
+
+
+DEFAULT_CALL_TIMEOUT_SECONDS: Final = 240.0
+
+
+def positive_call_timeout(timeout_seconds: float) -> float:
+    if timeout_seconds <= 0:
+        raise HwpWorkerProtocolError("worker call timeout must be positive")
+    return timeout_seconds
+
+
+async def call_worker_before_deadline(
+    requests: MemoryObjectSendStream[WorkerRequest],
+    name: str,
+    arguments: dict[str, JsonValue],
+    timeout_seconds: float,
+    *,
+    mutation: bool,
+) -> WorkerToolResult:
+    state = WorkerCallState()
+    dispatched = False
+    send, receive = anyio.create_memory_object_stream[WorkerToolResult](1)
+    async with send, receive:
+        try:
+            with anyio.move_on_after(timeout_seconds):
+                await requests.send(WorkerCallTool(name, arguments, send, state))
+                dispatched = True
+                return await receive.receive()
+        except BaseException:
+            if not state.started.is_set():
+                state.cancelled.set()
+            raise
+        state.cancelled.set()
+    raise HwpWorkerCallTimeout(
+        name,
+        timeout_seconds,
+        dispatched=dispatched,
+        started=state.started.is_set(),
+        mutation=mutation,
+    )

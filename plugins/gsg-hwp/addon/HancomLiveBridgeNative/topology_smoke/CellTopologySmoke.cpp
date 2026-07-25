@@ -39,7 +39,20 @@ int Fail(const char* const message) {
 
 }
 
+bool ReferenceLayoutSpecSmoke();
+bool ReferenceLayoutExecutorSmoke();
+bool ReferenceLayoutPatchSmoke();
+
 int wmain() {
+    if (!ReferenceLayoutSpecSmoke()) {
+        return Fail("compressed reference-layout payload did not parse");
+    }
+    if (!ReferenceLayoutExecutorSmoke()) {
+        return Fail("compressed reference-layout execution was not bulk");
+    }
+    if (!ReferenceLayoutPatchSmoke()) {
+        return Fail("reference-layout patch recreated or over-applied the table");
+    }
     std::vector<std::wstring> selectedAddresses;
     if (!ParseSelectedCellAddresses(
             L"= B2,C2,B3,C3;",
@@ -62,6 +75,40 @@ int wmain() {
             },
             &error)) {
         return Fail("irregular topology did not build");
+    }
+
+    CellTopology geometryOnlyChange;
+    if (!geometryOnlyChange.Build(
+            {
+                Cell(L"A1", 1, 2, L"", L""),
+                Cell(L"C1", 1, 2, L"", L""),
+                Cell(L"E1", 1, 1, L"", L""),
+                Cell(L"A2", 1, 1, L"", L""),
+                Cell(L"B2", 1, 2, L"", L""),
+                Cell(L"D2", 1, 2, L"", L""),
+            },
+            &error) ||
+        !topology.HasSamePhysicalShape(geometryOnlyChange)) {
+        return Fail("geometry-only changes did not preserve physical topology");
+    }
+
+    CellTopology splitShape;
+    if (!splitShape.Build(
+            {
+                Cell(L"A1", 1, 1, L"", L""),
+                Cell(L"B1", 1, 1, L"", L""),
+                Cell(L"C1", 1, 1, L"", L""),
+                Cell(L"D1", 1, 1, L"", L""),
+                Cell(L"E1", 1, 1, L"", L""),
+                Cell(L"A2", 1, 1, L"", L""),
+                Cell(L"B2", 1, 1, L"", L""),
+                Cell(L"C2", 1, 1, L"", L""),
+                Cell(L"D2", 1, 1, L"", L""),
+                Cell(L"E2", 1, 1, L"", L""),
+            },
+            &error) ||
+        topology.HasSamePhysicalShape(splitShape)) {
+        return Fail("changed merge topology was not detected");
     }
 
     const std::vector<std::wstring> column = topology.IntersectingColumn(3);

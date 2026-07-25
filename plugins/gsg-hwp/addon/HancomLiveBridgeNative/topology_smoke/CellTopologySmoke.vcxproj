@@ -48,7 +48,18 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="CellTopologySmoke.cpp" />
+    <ClCompile Include="ReferenceLayoutExecutorSmoke.cpp" />
+    <ClCompile Include="ReferenceLayoutPatchSmoke.cpp" />
+    <ClCompile Include="ReferenceLayoutSpecSmoke.cpp" />
     <ClCompile Include="..\CellTopology.cpp" />
+    <ClCompile Include="..\ReferenceLayoutCommands.cpp" />
+    <ClCompile Include="..\ReferenceLayoutExecutor.cpp" />
+    <ClCompile Include="..\ReferenceLayoutPayloadArrays.cpp" />
+    <ClCompile Include="..\ReferenceLayoutGapSpec.cpp" />
+    <ClCompile Include="..\ReferenceLayoutSpec.cpp" />
+    <ClCompile Include="..\ReferenceLayoutSpecSetters.cpp" />
+    <ClCompile Include="..\ReferenceLayoutStyleCommands.cpp" />
+    <ClCompile Include="..\ReferenceLayoutValidation.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

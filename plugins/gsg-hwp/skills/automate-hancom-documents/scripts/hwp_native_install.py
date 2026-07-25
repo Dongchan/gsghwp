@@ -5,7 +5,7 @@ import shutil
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, cast
+from typing import Final, cast
 from winreg import (
     CreateKeyEx,
     HKEY_CURRENT_USER,
@@ -21,16 +21,26 @@ from winreg import (
 from hwp_errors import HwpLiveError
 
 
-NATIVE_BRIDGE_VERSION = "0.5.55"
+NATIVE_BRIDGE_VERSION = "0.5.121"
 MODULE_NAME = "한컴브릿지"
 MODULES_KEY = r"Software\HNC\HwpUserAction\Modules"
 USES_KEY = rf"{MODULES_KEY}\Uses"
+ERROR_SHARING_VIOLATION: Final = 32
+CONTENT_HASH_PREFIX_LENGTH: Final = 16
 
 
 @dataclass(frozen=True, slots=True)
 class NativeBridgeRegistration:
     path: Path
     copied: bool
+
+
+def _file_digest(path: Path) -> bytes:
+    checksum = sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            checksum.update(chunk)
+    return checksum.digest()
 
 
 def _same_file_content(left: Path, right: Path) -> bool:
@@ -46,14 +56,7 @@ def _same_file_content(left: Path, right: Path) -> bool:
     if left_stat.st_size != right_stat.st_size:
         return False
 
-    def digest(path: Path) -> bytes:
-        checksum = sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                checksum.update(chunk)
-        return checksum.digest()
-
-    return digest(left) == digest(right)
+    return _file_digest(left) == _file_digest(right)
 
 
 def _set_registry_value_if_changed(
@@ -63,11 +66,14 @@ def _set_registry_value_if_changed(
     value_type: int,
 ) -> None:
     try:
-        current_value, current_type = QueryValueEx(key, name)
+        current_value, current_type = cast(
+            tuple[str | int, int],
+            QueryValueEx(key, name),
+        )
     except FileNotFoundError:
         current_value, current_type = None, None
     if current_value != value or current_type != value_type:
-        SetValueEx(key, name, 0, value_type, cast(Any, value))
+        SetValueEx(key, name, 0, value_type, value)
 
 
 def _register_native_bridge(path: Path) -> None:
@@ -109,6 +115,15 @@ def ensure_native_bridge_registered(
     copied = not _same_file_content(source, destination)
     if copied:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        _ = shutil.copy2(source, destination)
+        try:
+            _ = shutil.copy2(source, destination)
+        except PermissionError as error:
+            if error.winerror != ERROR_SHARING_VIOLATION:
+                raise
+            digest_prefix = _file_digest(source).hex()[:CONTENT_HASH_PREFIX_LENGTH]
+            destination = destination.with_name(f"HancomLiveBridge-{digest_prefix}.dll")
+            copied = not _same_file_content(source, destination)
+            if copied:
+                _ = shutil.copy2(source, destination)
     _register_native_bridge(destination)
     return NativeBridgeRegistration(path=destination, copied=copied)

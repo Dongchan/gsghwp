@@ -6,10 +6,28 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$pluginRoot = Split-Path -Parent $PSScriptRoot
+$bootstrapRoot = Split-Path -Parent $PSScriptRoot
+$localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+$bootstrapUpdateModule = Join-Path $bootstrapRoot "scripts\GsgHwp.Update.psm1"
+if (-not (Test-Path -LiteralPath $bootstrapUpdateModule -PathType Leaf)) {
+    [Console]::Error.WriteLine("GSG HWP automatic update bootstrap is missing.")
+    exit 2
+}
+
+Import-Module -Name $bootstrapUpdateModule -Force
+$activeRoot = Get-GsgHwpActivePackageRoot -BootstrapRoot $bootstrapRoot `
+    -LocalAppData $localAppData
+$activeUpdateModule = Join-Path $activeRoot "scripts\GsgHwp.Update.psm1"
+if (
+    $activeRoot -ne $bootstrapRoot -and
+    (Test-Path -LiteralPath $activeUpdateModule -PathType Leaf)
+) {
+    Import-Module -Name $activeUpdateModule -Force
+}
+$pluginRoot = Resolve-GsgHwpPackageRoot -BootstrapRoot $bootstrapRoot `
+    -LocalAppData $localAppData
 $manifest = Get-Content -LiteralPath (Join-Path $pluginRoot "compatibility-manifest.json") -Raw -Encoding UTF8 |
     ConvertFrom-Json
-$localAppData = [Environment]::GetFolderPath("LocalApplicationData")
 $python = Join-Path $localAppData (
     "GSG_HWP\runtime\{0}\.venv\Scripts\python.exe" -f $manifest.distribution
 )

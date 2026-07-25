@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final, Literal
 
+from hwp_color_normalization import parse_rgb_color
 from hwp_live_table_contract import CellBorder, CellBorders, TableCell
 from hwp_live_values import Alignment, Rgb
 from hwp_operation_contract import OperationInputValue
@@ -103,24 +104,7 @@ def _millimeters(value: OperationInputValue | None) -> float | None:
 
 
 def _rgb(value: OperationInputValue | None) -> Rgb | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    if normalized.startswith("#") and len(normalized) == 7:
-        try:
-            decoded = bytes.fromhex(normalized[1:])
-        except ValueError:
-            return None
-        return decoded[0], decoded[1], decoded[2]
-    pieces = normalized.split(",")
-    if len(pieces) != 3 or any(
-        not piece.strip().isdigit() for piece in pieces
-    ):
-        return None
-    red, green, blue = (int(piece.strip()) for piece in pieces)
-    if max(red, green, blue) > 255:
-        return None
-    return red, green, blue
+    return parse_rgb_color(value) if isinstance(value, str) else None
 
 
 def _boolean(value: OperationInputValue | None) -> bool | None:

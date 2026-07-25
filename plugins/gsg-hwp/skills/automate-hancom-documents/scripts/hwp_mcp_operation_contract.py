@@ -23,6 +23,7 @@ ProductionHwpRequestedOperation = Literal[
     "document.inspect_structure",
     "document.append_layout",
     "document.insert_layout",
+    "document.save",
     "document.save_reopen_verify",
     "text.format",
     "table.fill_existing",

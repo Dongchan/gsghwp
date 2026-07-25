@@ -1,8 +1,11 @@
 #include "ActionExecutor.h"
 
 #include "DispatchInvoke.h"
+#include "OfficialApiParameterArray.h"
 #include "OfficialApiState.h"
 #include "ParagraphFormatting.h"
+#include "ReferenceLayoutCommands.h"
+#include "ReferenceLayoutExecutor.h"
 #include "TableInspection.h"
 
 #include <WinCrypt.h>
@@ -16,9 +19,10 @@
 #include <cstring>
 #include <cwctype>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -45,9 +49,14 @@ struct Position {
 
 struct Selection {
     bool selected = false;
+    LONG mode = 0;
     Position start;
     Position end;
 };
+
+constexpr LONG kSelectionModeMask = 0x0F;
+constexpr LONG kSelectionNone = 0;
+constexpr LONG kSelectionText = 1;
 
 struct Context {
     CComPtr<IDispatch> hwp;
@@ -443,6 +452,18 @@ bool GetSelection(
     IDispatch* const hwp,
     Selection* const selection,
     ExecutionResult* const result) {
+    CComVariant mode;
+    HRESULT status = PropertyGet(hwp, L"SelectionMode", &mode);
+    if (SUCCEEDED(status)) {
+        status = AsLong(mode, &selection->mode);
+    }
+    if (FAILED(status)) {
+        return SetError(
+            result,
+            L"STATE_CAPTURE",
+            L"",
+            HResultText(L"SelectionMode", status));
+    }
     CComPtr<IDispatch> start;
     CComPtr<IDispatch> end;
     if (!CreateSet(hwp, L"ListParaPos", start, result) ||
@@ -450,7 +471,7 @@ bool GetSelection(
         return false;
     }
     CComVariant raw;
-    HRESULT status = Method(
+    status = Method(
         hwp,
         L"GetSelectedPosBySet",
         {CComVariant(start), CComVariant(end)},
@@ -467,6 +488,105 @@ bool GetSelection(
         ItemLong(end, L"List", &selection->end.list, result) &&
         ItemLong(end, L"Para", &selection->end.paragraph, result) &&
         ItemLong(end, L"Pos", &selection->end.character, result);
+}
+
+bool SamePosition(const Position& left, const Position& right) noexcept {
+    return left.list == right.list && left.paragraph == right.paragraph &&
+        left.character == right.character;
+}
+
+bool SameSelection(const Selection& left, const Selection& right) noexcept {
+    return left.selected == right.selected && left.mode == right.mode &&
+        SamePosition(left.start, right.start) && SamePosition(left.end, right.end);
+}
+
+bool SelectTextRange(
+    Context* const context,
+    const Position& start,
+    const Position& end,
+    const std::wstring& location) {
+    if (start.list != end.list || SamePosition(start, end)) {
+        return SetError(
+            context->result,
+            L"TEXT_RANGE",
+            location,
+            L"text range must be non-empty and stay within one HWP list");
+    }
+    if (!SetPosition(
+            context->hwp,
+            Position{start.list, 0, 0},
+            context->result,
+            location)) {
+        return false;
+    }
+    bool selected = false;
+    if (!CallBooleanMethod(
+            context->hwp,
+            L"SelectText",
+            {
+                CComVariant(start.paragraph),
+                CComVariant(start.character),
+                CComVariant(end.paragraph),
+                CComVariant(end.character),
+            },
+            &selected,
+            context->result,
+            location) ||
+        !selected) {
+        return selected
+            ? false
+            : SetError(
+                  context->result,
+                  L"TEXT_RANGE",
+                  location,
+                  L"SelectText returned false");
+    }
+    Selection actual;
+    if (!GetSelection(context->hwp, &actual, context->result)) {
+        return false;
+    }
+    if (!actual.selected || !SamePosition(actual.start, start) ||
+        !SamePosition(actual.end, end)) {
+        return SetError(
+            context->result,
+            L"TEXT_RANGE",
+            location,
+            L"selected text range does not match the requested endpoints");
+    }
+    return true;
+}
+
+bool RestoreTextPosition(
+    Context* const context,
+    const Selection& original,
+    const std::wstring& location) {
+    if (original.selected && !SamePosition(original.start, original.end)) {
+        return SelectTextRange(context, original.start, original.end, location);
+    }
+    return SetPosition(context->hwp, original.start, context->result, location);
+}
+
+bool ReadSelectedText(
+    Context* const context,
+    std::wstring* const selected,
+    const std::wstring& location) {
+    CComVariant raw;
+    HRESULT status = Method(
+        context->hwp,
+        L"GetTextFile",
+        {CComVariant(L"UNICODE"), CComVariant(L"saveblock:true")},
+        &raw);
+    if (SUCCEEDED(status)) {
+        status = AsString(raw, selected);
+    }
+    if (FAILED(status)) {
+        return SetError(
+            context->result,
+            L"SELECTION_TEXT",
+            location,
+            HResultText(L"GetTextFile", status));
+    }
+    return true;
 }
 
 bool ValidateDocumentIdentity(
@@ -798,7 +918,10 @@ bool VerifyAppliedCellFormat(
     return true;
 }
 
-bool ExecuteParameterAction(Context* const context, const Command& command) {
+bool ExecuteParameterAction(
+    Context* const context,
+    const Command& command,
+    const bool verifyCellFormat = true) {
     CComPtr<IDispatch> parameterSets;
     CComPtr<IDispatch> parameter;
     CComPtr<IDispatch> set;
@@ -830,14 +953,13 @@ bool ExecuteParameterAction(Context* const context, const Command& command) {
             command.name,
             HResultText(L"GetDefault", status));
     }
-    std::map<std::wstring, CComPtr<IDispatch>> arrays;
+    std::map<
+        std::wstring,
+        std::unique_ptr<hancom::official_api::ParameterArrayWriter>> arrays;
     for (const auto& [name, count] : command.arrays) {
-        CComVariant rawArray;
-        status = Method(
-            parameter,
-            L"CreateItemArray",
-            {CComVariant(name.c_str()), CComVariant(count)},
-            &rawArray);
+        CComPtr<IDispatch> array;
+        status = hancom::official_api::CreateParameterArray(
+            parameter, name, count, array);
         if (FAILED(status)) {
             return SetError(
                 context->result,
@@ -845,16 +967,17 @@ bool ExecuteParameterAction(Context* const context, const Command& command) {
                 name,
                 HResultText(L"CreateItemArray", status));
         }
-        CComPtr<IDispatch> array;
-        status = AsDispatch(rawArray, array);
+        auto writer =
+            std::make_unique<hancom::official_api::ParameterArrayWriter>();
+        status = writer->Bind(array);
         if (FAILED(status)) {
             return SetError(
                 context->result,
                 L"PARAMETER_ARRAY",
                 name,
-                HResultText(L"CreateItemArray result", status));
+                HResultText(L"bind SetItem", status));
         }
-        arrays.emplace(name, std::move(array));
+        arrays.emplace(name, std::move(writer));
     }
     for (const ArrayValue& arrayValue : command.arrayValues) {
         const auto array = arrays.find(arrayValue.name);
@@ -874,11 +997,7 @@ bool ExecuteParameterAction(Context* const context, const Command& command) {
                 arrayValue.name)) {
             return false;
         }
-        status = Method(
-            array->second,
-            L"SetItem",
-            {CComVariant(arrayValue.index), value},
-            &ignored);
+        status = array->second->SetItem(arrayValue.index, value);
         if (FAILED(status)) {
             return SetError(
                 context->result,
@@ -910,7 +1029,7 @@ bool ExecuteParameterAction(Context* const context, const Command& command) {
             command.name + L" returned false");
     }
     ++context->result->actionsExecuted;
-    if (!VerifyAppliedCellFormat(context, command, parameter, set)) {
+    if (verifyCellFormat && !VerifyAppliedCellFormat(context, command, parameter, set)) {
         context->result->partialMutation = true;
         return false;
     }
@@ -1342,7 +1461,7 @@ bool PasteTable(Context* const context) {
     return true;
 }
 
-bool SetTableTreatAsCharacter(Context* const context) {
+bool SetTableTreatAsCharacter(Context* const context, const bool treatAsCharacter = true) {
     if (context->table == nullptr) {
         return SetError(context->result, L"NO_TABLE", L"", L"created table control is unavailable");
     }
@@ -1359,7 +1478,7 @@ bool SetTableTreatAsCharacter(Context* const context) {
     HRESULT status = Method(
         properties,
         L"SetItem",
-        {CComVariant(L"TreatAsChar"), BooleanVariant(true)},
+        {CComVariant(L"TreatAsChar"), BooleanVariant(treatAsCharacter)},
         &ignored);
     if (SUCCEEDED(status)) {
         status = PropertyPut(context->table, L"Properties", CComVariant(properties));
@@ -1523,7 +1642,11 @@ bool GoToCell(Context* const context, const std::wstring& requested) {
     return true;
 }
 
-bool MergeCells(Context* const context, const std::wstring& first, const std::wstring& second) {
+bool MergeCellsUsingTopology(
+    Context* const context,
+    const std::wstring& first,
+    const std::wstring& second,
+    const bool clearTopology) {
     if (context->topology.Empty() && !BuildCellTopology(context)) {
         return false;
     }
@@ -1561,9 +1684,15 @@ bool MergeCells(Context* const context, const std::wstring& first, const std::ws
     if (!RunAction(context->action, L"TableMergeCell", context->result, first)) {
         return false;
     }
-    context->topology.Clear();
+    if (clearTopology) {
+        context->topology.Clear();
+    }
     context->currentCell = NormalizeAddress(first);
     return true;
+}
+
+bool MergeCells(Context* const context, const std::wstring& first, const std::wstring& second) {
+    return MergeCellsUsingTopology(context, first, second, true);
 }
 
 bool InsertText(Context* const context, const std::wstring& text, const std::wstring& location) {
@@ -1604,13 +1733,266 @@ bool InsertText(Context* const context, const std::wstring& text, const std::wst
     return true;
 }
 
+struct TextFormatFingerprint {
+    std::wstring faceName;
+    LONG height = 0;
+    bool bold = false;
+    LONG textColor = 0;
+    LONG alignment = 0;
+    LONG lineSpacing = 0;
+    LONG leftMargin = 0;
+    LONG rightMargin = 0;
+    LONG indentation = 0;
+    LONG previousSpacing = 0;
+    LONG nextSpacing = 0;
+};
+
+struct PreservedTextFormat {
+    CComPtr<IDispatch> characterSet;
+    CComPtr<IDispatch> paragraphSet;
+    TextFormatFingerprint fingerprint;
+};
+
+bool FormatLongProperty(
+    IDispatch* const object,
+    const wchar_t* const name,
+    LONG* const value) {
+    CComVariant raw;
+    return SUCCEEDED(PropertyGet(object, name, &raw)) &&
+        SUCCEEDED(AsLong(raw, value));
+}
+
+bool FormatBooleanProperty(
+    IDispatch* const object,
+    const wchar_t* const name,
+    bool* const value) {
+    CComVariant raw;
+    return SUCCEEDED(PropertyGet(object, name, &raw)) &&
+        SUCCEEDED(AsBool(raw, value));
+}
+
+bool FormatTextProperty(
+    IDispatch* const object,
+    const wchar_t* const name,
+    std::wstring* const value) {
+    CComVariant raw;
+    return SUCCEEDED(PropertyGet(object, name, &raw)) &&
+        SUCCEEDED(AsString(raw, value));
+}
+
+bool DefaultTextFormatParameter(
+    Context* const context,
+    const wchar_t* const actionName,
+    const wchar_t* const parameterName,
+    CComPtr<IDispatch>& parameter,
+    CComPtr<IDispatch>& set,
+    const std::wstring& location) {
+    CComPtr<IDispatch> parameterSets;
+    if (!GetDispatchProperty(
+            context->hwp,
+            L"HParameterSet",
+            parameterSets,
+            context->result,
+            location) ||
+        !GetDispatchProperty(
+            parameterSets,
+            parameterName,
+            parameter,
+            context->result,
+            location) ||
+        !GetDispatchProperty(parameter, L"HSet", set, context->result, location)) {
+        return false;
+    }
+    CComVariant ignored;
+    const HRESULT status = Method(
+        context->action,
+        L"GetDefault",
+        {CComVariant(actionName), CComVariant(set)},
+        &ignored);
+    return SUCCEEDED(status) ||
+        SetError(
+            context->result,
+            L"TEXT_FORMAT_READBACK",
+            location,
+            HResultText(actionName, status));
+}
+
+bool ReadTextFormatFingerprint(
+    IDispatch* const character,
+    IDispatch* const paragraph,
+    TextFormatFingerprint* const format) {
+    return
+        FormatTextProperty(character, L"FaceNameHangul", &format->faceName) &&
+        FormatLongProperty(character, L"Height", &format->height) &&
+        FormatBooleanProperty(character, L"Bold", &format->bold) &&
+        FormatLongProperty(character, L"TextColor", &format->textColor) &&
+        FormatLongProperty(paragraph, L"AlignType", &format->alignment) &&
+        FormatLongProperty(paragraph, L"LineSpacing", &format->lineSpacing) &&
+        FormatLongProperty(paragraph, L"LeftMargin", &format->leftMargin) &&
+        FormatLongProperty(paragraph, L"RightMargin", &format->rightMargin) &&
+        FormatLongProperty(paragraph, L"Indentation", &format->indentation) &&
+        FormatLongProperty(paragraph, L"PrevSpacing", &format->previousSpacing) &&
+        FormatLongProperty(paragraph, L"NextSpacing", &format->nextSpacing);
+}
+
+bool CaptureTextFormat(
+    Context* const context,
+    PreservedTextFormat* const preserved,
+    const std::wstring& location) {
+    CComPtr<IDispatch> character;
+    CComPtr<IDispatch> paragraph;
+    return
+        DefaultTextFormatParameter(
+            context,
+            L"CharShape",
+            L"HCharShape",
+            character,
+            preserved->characterSet,
+            location) &&
+        DefaultTextFormatParameter(
+            context,
+            L"ParagraphShape",
+            L"HParaShape",
+            paragraph,
+            preserved->paragraphSet,
+            location) &&
+        (ReadTextFormatFingerprint(character, paragraph, &preserved->fingerprint) ||
+         SetError(
+             context->result,
+             L"TEXT_FORMAT_READBACK",
+             location,
+             L"character or paragraph format could not be captured"));
+}
+
+bool ExecuteCapturedFormat(
+    Context* const context,
+    const wchar_t* const actionName,
+    IDispatch* const set,
+    const std::wstring& location) {
+    bool executed = false;
+    return
+        CallBooleanMethod(
+            context->action,
+            L"Execute",
+            {CComVariant(actionName), CComVariant(set)},
+            &executed,
+            context->result,
+            location) &&
+        (executed ||
+         SetError(
+             context->result,
+             L"TEXT_FORMAT_APPLY",
+             location,
+             std::wstring(actionName) + L" returned false"));
+}
+
+bool SameTextFormat(
+    const TextFormatFingerprint& left,
+    const TextFormatFingerprint& right) noexcept {
+    return left.faceName == right.faceName &&
+        left.height == right.height &&
+        left.bold == right.bold &&
+        left.textColor == right.textColor &&
+        left.alignment == right.alignment &&
+        left.lineSpacing == right.lineSpacing &&
+        left.leftMargin == right.leftMargin &&
+        left.rightMargin == right.rightMargin &&
+        left.indentation == right.indentation &&
+        left.previousSpacing == right.previousSpacing &&
+        left.nextSpacing == right.nextSpacing;
+}
+
+bool ApplyAndVerifyTextFormat(
+    Context* const context,
+    const PreservedTextFormat& preserved,
+    const std::wstring& location) {
+    if (!ExecuteCapturedFormat(
+            context,
+            L"CharShape",
+            preserved.characterSet,
+            location) ||
+        !ExecuteCapturedFormat(
+            context,
+            L"ParagraphShape",
+            preserved.paragraphSet,
+            location)) {
+        return false;
+    }
+    PreservedTextFormat after;
+    if (!CaptureTextFormat(context, &after, location)) {
+        return false;
+    }
+    return SameTextFormat(preserved.fingerprint, after.fingerprint) ||
+        SetError(
+            context->result,
+            L"TEXT_FORMAT_READBACK",
+            location,
+            L"character or paragraph format changed after text replacement");
+}
+
 bool SetCellText(Context* const context, const Command& command) {
     const std::wstring address = NormalizeAddress(command.first);
     if (!GoToCell(context, address) ||
         !RunAction(context->action, L"SelectAll", context->result, address)) {
         return false;
     }
-    return InsertText(context, command.second, address);
+    Selection before;
+    std::wstring current;
+    if (!GetSelection(context->hwp, &before, context->result) ||
+        !ReadSelectedText(context, &current, address)) {
+        return false;
+    }
+    if (command.hasExpectedText && current != command.expectedText) {
+        return SetError(
+            context->result,
+            L"STALE_CELL_TEXT",
+            address,
+            L"cell text changed before the style-preserving replacement");
+    }
+    PreservedTextFormat preserved;
+    if (command.preserveFormat &&
+        !CaptureTextFormat(context, &preserved, address)) {
+        return false;
+    }
+    const bool replaced = command.second.empty()
+        ? RunAction(context->action, L"Delete", context->result, address)
+        : InsertText(context, command.second, address);
+    if (!replaced) {
+        return false;
+    }
+    if (command.second.empty()) {
+        if (!GoToCell(context, address) ||
+            !RunAction(context->action, L"SelectAll", context->result, address)) {
+            return false;
+        }
+        std::wstring after;
+        return
+            ReadSelectedText(context, &after, address) &&
+            (after.empty() ||
+             SetError(
+                 context->result,
+                 L"TEXT_PATCH_READBACK",
+                 address,
+                 L"cell text is not empty after replacement"));
+    }
+    Position end;
+    if (!GetPosition(context->hwp, &end, context->result) ||
+        !SelectTextRange(context, before.start, end, address)) {
+        return false;
+    }
+    if (command.preserveFormat &&
+        !ApplyAndVerifyTextFormat(context, preserved, address)) {
+        return false;
+    }
+    std::wstring inserted;
+    return
+        ReadSelectedText(context, &inserted, address) &&
+        (inserted == command.second ||
+         SetError(
+             context->result,
+             L"TEXT_PATCH_READBACK",
+             address,
+             L"cell replacement readback does not match the requested text"));
 }
 
 bool ReplaceSelection(Context* const context, const Command& command) {
@@ -1676,6 +2058,585 @@ bool ReplaceSelection(Context* const context, const Command& command) {
             L"selection changed while its text was verified");
     }
     return InsertText(context, command.second, L"selection");
+}
+
+bool TextMatchesAt(
+    const std::wstring& actual,
+    const std::wstring& expected,
+    const size_t offset,
+    const bool matchCase) {
+    if (offset > actual.size() || expected.size() > actual.size() - offset) {
+        return false;
+    }
+    for (size_t index = 0; index < actual.size(); ++index) {
+        if (index == expected.size()) {
+            return true;
+        }
+        const wchar_t current = actual[offset + index];
+        if ((matchCase && current != expected[index]) ||
+            (!matchCase && towlower(current) != towlower(expected[index]))) {
+            return false;
+        }
+    }
+    return expected.size() == actual.size() - offset;
+}
+
+bool TextMatches(
+    const std::wstring& actual,
+    const std::wstring& expected,
+    const bool matchCase) {
+    return actual.size() == expected.size() &&
+        TextMatchesAt(actual, expected, 0, matchCase);
+}
+
+bool PatchSelectedText(
+    Context* const context,
+    const std::wstring& expected,
+    const bool requireExpected,
+    const bool matchCase,
+    const std::wstring& replacement,
+    const std::wstring& location,
+    const bool preserveFormat = false) {
+    Selection before;
+    if (!GetSelection(context->hwp, &before, context->result)) {
+        return false;
+    }
+    if ((before.mode & kSelectionModeMask) != kSelectionText) {
+        return SetError(
+            context->result,
+            L"NON_TEXT_SELECTION",
+            location,
+            L"text.patch cannot replace a non-text selection");
+    }
+    if (!before.selected || before.start.list != before.end.list) {
+        return SetError(
+            context->result,
+            before.selected ? L"CROSS_CONTROL_SELECTION" : L"NO_SELECTION",
+            location,
+            L"text.patch requires one active text range");
+    }
+    std::wstring selected;
+    if (!ReadSelectedText(context, &selected, location)) {
+        return false;
+    }
+    if (requireExpected && !TextMatches(selected, expected, matchCase)) {
+        return SetError(
+            context->result,
+            L"STALE_SELECTION_TEXT",
+            location,
+            L"selected text changed before text.patch");
+    }
+    Selection confirmed;
+    if (!GetSelection(context->hwp, &confirmed, context->result)) {
+        return false;
+    }
+    if (!SameSelection(before, confirmed)) {
+        return SetError(
+            context->result,
+            L"STALE_SELECTION",
+            location,
+            L"selection changed while text.patch verified its text");
+    }
+    PreservedTextFormat preserved;
+    if (preserveFormat &&
+        !CaptureTextFormat(context, &preserved, location)) {
+        return false;
+    }
+    const bool replaced = replacement.empty()
+        ? RunAction(context->action, L"Delete", context->result, location)
+        : InsertText(context, replacement, location);
+    if (!replaced) {
+        return false;
+    }
+    Position end;
+    if (!GetPosition(context->hwp, &end, context->result)) {
+        return false;
+    }
+    if (replacement.empty()) {
+        Selection afterDeletion;
+        if (!SamePosition(before.start, end) ||
+            !GetSelection(context->hwp, &afterDeletion, context->result) ||
+            afterDeletion.selected) {
+            return SetError(
+                context->result,
+                L"TEXT_PATCH_READBACK",
+                location,
+                L"deleted range did not collapse to its verified start");
+        }
+        return true;
+    }
+    if (!SelectTextRange(context, before.start, end, location)) {
+        return false;
+    }
+    if (preserveFormat &&
+        !ApplyAndVerifyTextFormat(context, preserved, location)) {
+        return false;
+    }
+    std::wstring inserted;
+    if (!ReadSelectedText(context, &inserted, location) || inserted != replacement) {
+        return SetError(
+            context->result,
+            L"TEXT_PATCH_READBACK",
+            location,
+            L"reselected text does not match the requested replacement");
+    }
+    return true;
+}
+
+bool PatchCurrentText(Context* const context, const Command& command) {
+    Selection before;
+    if (!GetSelection(context->hwp, &before, context->result)) {
+        return false;
+    }
+    if (before.selected) {
+        return PatchSelectedText(
+            context,
+            command.first,
+            command.hasExpectedText,
+            true,
+            command.second,
+            L"current",
+            command.preserveFormat);
+    }
+    if ((before.mode & kSelectionModeMask) != kSelectionNone) {
+        return SetError(
+            context->result,
+            L"NON_TEXT_SELECTION",
+            L"current",
+            L"text.patch cannot insert into a non-text selection");
+    }
+    if (command.hasExpectedText && !command.first.empty()) {
+        return SetError(
+            context->result,
+            L"NO_SELECTION",
+            L"current",
+            L"expected old text was supplied but the current cursor has no selection");
+    }
+    Position start;
+    if (!GetPosition(context->hwp, &start, context->result) ||
+        !InsertText(context, command.second, L"current")) {
+        return false;
+    }
+    Position end;
+    if (!GetPosition(context->hwp, &end, context->result)) {
+        return false;
+    }
+    if (command.second.empty()) {
+        return SamePosition(start, end)
+            ? true
+            : SetError(
+                  context->result,
+                  L"TEXT_PATCH_READBACK",
+                  L"current",
+                  L"empty insertion changed the current position");
+    }
+    if (!SelectTextRange(context, start, end, L"current")) {
+        return false;
+    }
+    std::wstring inserted;
+    if (!ReadSelectedText(context, &inserted, L"current") ||
+        inserted != command.second) {
+        return SetError(
+            context->result,
+            L"TEXT_PATCH_READBACK",
+            L"current",
+            L"reselected insertion does not match the requested text");
+    }
+    return true;
+}
+
+struct TextMatch {
+    Selection selection;
+};
+
+std::wstring TextMatchKey(const Selection& match) {
+    return std::to_wstring(match.start.list) + L":" +
+        std::to_wstring(match.start.paragraph) + L":" +
+        std::to_wstring(match.start.character) + L"-" +
+        std::to_wstring(match.end.list) + L":" +
+        std::to_wstring(match.end.paragraph) + L":" +
+        std::to_wstring(match.end.character);
+}
+
+std::wstring TextMatchCandidates(const std::vector<TextMatch>& matches) {
+    std::wostringstream encoded;
+    for (size_t index = 0; index < matches.size(); ++index) {
+        if (index != 0) {
+            encoded << L'|';
+        }
+        encoded << TextMatchKey(matches[index].selection);
+    }
+    return encoded.str();
+}
+
+Position TextPositionAtOffset(
+    const Position& start,
+    const std::wstring& text,
+    const size_t offset) {
+    Position position = start;
+    for (size_t index = 0; index < offset; ++index) {
+        if (text[index] == L'\r' &&
+            index + 1 < offset &&
+            text[index + 1] == L'\n') {
+            ++position.paragraph;
+            position.character = 0;
+            ++index;
+        } else if (text[index] == L'\r' || text[index] == L'\n') {
+            ++position.paragraph;
+            position.character = 0;
+        } else {
+            ++position.character;
+        }
+    }
+    return position;
+}
+
+bool SelectCellTextPatchMatch(
+    Context* const context,
+    const Command& command,
+    const Selection& original,
+    const std::wstring& location) {
+    constexpr size_t kMaximumCandidates = 24;
+    if (!RunAction(context->action, L"SelectAll", context->result, location)) {
+        return false;
+    }
+    Selection cellSelection;
+    std::wstring cellText;
+    if (!GetSelection(context->hwp, &cellSelection, context->result) ||
+        !cellSelection.selected ||
+        cellSelection.start.list != cellSelection.end.list ||
+        !ReadSelectedText(context, &cellText, location)) {
+        return SetError(
+            context->result,
+            L"TEXT_FIND_STATE",
+            location,
+            L"table cell did not expose one text selection");
+    }
+    std::vector<TextMatch> matches;
+    for (size_t offset = 0;
+         offset + command.first.size() <= cellText.size();) {
+        if (!TextMatchesAt(cellText, command.first, offset, command.matchCase)) {
+            ++offset;
+            continue;
+        }
+        const Position start =
+            TextPositionAtOffset(cellSelection.start, cellText, offset);
+        const Position end = TextPositionAtOffset(
+            cellSelection.start,
+            cellText,
+            offset + command.first.size());
+        matches.push_back(TextMatch{
+            Selection{true, kSelectionText, start, end},
+        });
+        if (command.occurrence > 0 &&
+            matches.size() == static_cast<size_t>(command.occurrence)) {
+            return SelectTextRange(context, start, end, location);
+        }
+        if (command.occurrence == 0 && matches.size() == kMaximumCandidates) {
+            break;
+        }
+        offset += command.first.size();
+    }
+    if (!RestoreTextPosition(context, original, location + L".restore")) {
+        return false;
+    }
+    if (matches.empty()) {
+        return SetError(
+            context->result,
+            command.occurrence > 0
+                ? L"TEXT_OCCURRENCE_NOT_FOUND"
+                : L"TEXT_NOT_FOUND",
+            location,
+            L"text.patch found no matching text in the target cell before mutation");
+    }
+    if (command.occurrence > 0) {
+        return SetError(
+            context->result,
+            L"TEXT_OCCURRENCE_NOT_FOUND",
+            location,
+            L"requested text occurrence was not found in the target cell before mutation");
+    }
+    if (matches.size() > 1) {
+        return SetError(
+            context->result,
+            L"AMBIGUOUS_TEXT_MATCH",
+            TextMatchCandidates(matches),
+            L"multiple text matches in the target cell require an explicit occurrence");
+    }
+    return SelectTextRange(
+        context,
+        matches.front().selection.start,
+        matches.front().selection.end,
+        location);
+}
+
+bool PrepareForwardFind(
+    Context* const context,
+    const std::wstring& expected,
+    const bool matchCase,
+    CComPtr<IDispatch>& set) {
+    CComPtr<IDispatch> parameterSets;
+    CComPtr<IDispatch> findReplace;
+    if (!GetDispatchProperty(
+            context->hwp,
+            L"HParameterSet",
+            parameterSets,
+            context->result,
+            L"text.find") ||
+        !GetDispatchProperty(
+            parameterSets,
+            L"HFindReplace",
+            findReplace,
+            context->result,
+            L"text.find") ||
+        !GetDispatchProperty(
+            findReplace,
+            L"HSet",
+            set,
+            context->result,
+            L"text.find")) {
+        return false;
+    }
+    CComVariant ignored;
+    const HRESULT status = Method(
+        context->action,
+        L"GetDefault",
+        {CComVariant(L"ForwardFind"), CComVariant(set)},
+        &ignored);
+    if (FAILED(status)) {
+        return SetError(
+            context->result,
+            L"ACTION_DEFAULT",
+            L"text.find",
+            HResultText(L"ForwardFind", status));
+    }
+    return PutItemOrProperty(
+               findReplace,
+               L"FindString",
+               CComVariant(expected.c_str()),
+               context->result,
+               L"text.find") &&
+        PutItemOrProperty(
+               findReplace,
+               L"Direction",
+               CComVariant(0L),
+               context->result,
+               L"text.find") &&
+        PutItemOrProperty(
+               findReplace,
+               L"MatchCase",
+               BooleanVariant(matchCase),
+               context->result,
+               L"text.find") &&
+        PutItemOrProperty(
+               findReplace,
+               L"IgnoreMessage",
+               BooleanVariant(true),
+               context->result,
+               L"text.find");
+}
+
+bool SelectTextPatchMatch(
+    Context* const context,
+    const Command& command,
+    const Selection& original,
+    const LONG listFilter) {
+    constexpr size_t kMaximumCandidates = 24;
+    constexpr size_t kMaximumSearches = 20'000;
+    CComPtr<IDispatch> findSet;
+    if (!PrepareForwardFind(context, command.first, command.matchCase, findSet)) {
+        return false;
+    }
+    const bool positioned = listFilter < 0
+        ? RunVerifiedNavigationAction(
+              context->action,
+              L"MoveDocBegin",
+              context->result,
+              L"text.find")
+        : SetPosition(
+              context->hwp,
+              Position{listFilter, 0, 0},
+              context->result,
+              L"text.find");
+    if (!positioned) {
+        return false;
+    }
+    std::set<std::wstring> seen;
+    std::vector<TextMatch> matches;
+    bool exhausted = false;
+    for (size_t search = 0; search < kMaximumSearches; ++search) {
+        bool found = false;
+        if (!CallBooleanMethod(
+                context->action,
+                L"Execute",
+                {CComVariant(L"ForwardFind"), CComVariant(findSet)},
+                &found,
+                context->result,
+                L"text.find")) {
+            return false;
+        }
+        if (!found) {
+            exhausted = true;
+            break;
+        }
+        Selection current;
+        if (!GetSelection(context->hwp, &current, context->result) ||
+            !current.selected || current.start.list != current.end.list) {
+            return SetError(
+                context->result,
+                L"TEXT_FIND_STATE",
+                L"text.find",
+                L"ForwardFind did not return one text selection");
+        }
+        const std::wstring key = TextMatchKey(current);
+        if (!seen.insert(key).second) {
+            exhausted = true;
+            break;
+        }
+        if (listFilter < 0 || current.start.list == listFilter) {
+            matches.push_back(TextMatch{current});
+            if (command.occurrence > 0 &&
+                matches.size() == static_cast<size_t>(command.occurrence)) {
+                return true;
+            }
+            if (command.occurrence == 0 && matches.size() == kMaximumCandidates) {
+                break;
+            }
+        }
+        if (!SetPosition(
+                context->hwp,
+                current.end,
+                context->result,
+                L"text.find")) {
+            return false;
+        }
+    }
+    if (command.occurrence > 0) {
+        if (!RestoreTextPosition(context, original, L"text.find.restore")) {
+            return false;
+        }
+        return SetError(
+            context->result,
+            exhausted ? L"TEXT_OCCURRENCE_NOT_FOUND" : L"TEXT_SEARCH_LIMIT",
+            L"text.find",
+            L"requested text occurrence was not found before mutation");
+    }
+    if (!exhausted && matches.size() < 2) {
+        if (!RestoreTextPosition(context, original, L"text.find.restore")) {
+            return false;
+        }
+        return SetError(
+            context->result,
+            L"TEXT_SEARCH_LIMIT",
+            L"text.find",
+            L"text search limit was reached before uniqueness could be proven");
+    }
+    if (matches.empty()) {
+        if (!RestoreTextPosition(context, original, L"text.find.restore")) {
+            return false;
+        }
+        return SetError(
+            context->result,
+            exhausted ? L"TEXT_NOT_FOUND" : L"TEXT_SEARCH_LIMIT",
+            L"text.find",
+            L"text.patch found no matching text before mutation");
+    }
+    if (matches.size() > 1) {
+        if (!RestoreTextPosition(context, original, L"text.find.restore")) {
+            return false;
+        }
+        return SetError(
+            context->result,
+            L"AMBIGUOUS_TEXT_MATCH",
+            TextMatchCandidates(matches),
+            L"multiple text matches require an explicit occurrence");
+    }
+    return SelectTextRange(
+        context,
+        matches.front().selection.start,
+        matches.front().selection.end,
+        L"text.find");
+}
+
+bool PatchSearchedText(
+    Context* const context,
+    const Command& command,
+    const LONG listFilter,
+    const Selection& original,
+    const std::wstring& location) {
+    if (command.occurrence < 0 || command.occurrence > 20'000) {
+        return SetError(
+            context->result,
+            L"TEXT_OCCURRENCE",
+            location,
+            L"text occurrence must be between 1 and 20000 when supplied");
+    }
+    return SelectTextPatchMatch(context, command, original, listFilter) &&
+        PatchSelectedText(
+            context,
+            command.first,
+            true,
+            command.matchCase,
+            command.second,
+            location,
+            command.preserveFormat);
+}
+
+bool PatchText(Context* const context, const Command& command) {
+    if (command.name == L"CURRENT") {
+        return PatchCurrentText(context, command);
+    }
+    if (command.name == L"RANGE") {
+        const Position start{command.list, command.paragraph, command.character};
+        const Position end{
+            command.endList,
+            command.endParagraph,
+            command.endCharacter};
+        return SelectTextRange(context, start, end, L"range") &&
+            PatchSelectedText(
+                context,
+                command.first,
+                true,
+                true,
+                command.second,
+                L"range",
+                command.preserveFormat);
+    }
+    Selection original;
+    if (!GetSelection(context->hwp, &original, context->result)) {
+        return false;
+    }
+    if (command.name == L"FIND") {
+        return PatchSearchedText(
+            context,
+            command,
+            -1,
+            original,
+            L"text.find");
+    }
+    if (command.name == L"CELL") {
+        if (!SelectControl(context, command.tableInstanceId) ||
+            !CaptureCurrentTable(context) ||
+            !GoToCell(context, command.cellAddress)) {
+            return false;
+        }
+        const std::wstring address = NormalizeAddress(command.cellAddress);
+        return
+            SelectCellTextPatchMatch(context, command, original, address) &&
+            PatchSelectedText(
+                context,
+                command.first,
+                true,
+                command.matchCase,
+                command.second,
+                address,
+                command.preserveFormat);
+    }
+    return SetError(
+        context->result,
+        L"TEXT_PATCH_TARGET",
+        command.name,
+        L"unsupported text.patch target");
 }
 
 bool ConfigureImageCell(Context* const context, const std::wstring& location) {
@@ -2047,7 +3008,7 @@ bool AnchorPosition(
         ItemLong(anchor, L"Pos", &position->character, result);
 }
 
-bool LeaveTable(Context* const context) {
+bool LeaveTable(Context* const context, const bool appendParagraph = true) {
     if (context->table == nullptr) {
         return SetError(context->result, L"NO_TABLE", L"", L"current table is unavailable");
     }
@@ -2075,7 +3036,10 @@ bool LeaveTable(Context* const context) {
             context->hwp,
             Position{anchor.list, anchor.paragraph, anchor.character + 1},
             context->result,
-            L"table") ||
+            L"table")) {
+        return false;
+    }
+    if (appendParagraph &&
         !RunAction(context->action, L"BreakPara", context->result, L"table")) {
         return false;
     }
@@ -2299,6 +3263,534 @@ bool SaveDocumentFile(Context* const context, const std::wstring& pathText) {
     return SaveEncodedBlockFile(context, pathText, documentBlock);
 }
 
+std::wstring ReferenceCellAddress(const LONG row, LONG column) {
+    std::wstring letters;
+    do {
+        letters.insert(letters.begin(), static_cast<wchar_t>(L'A' + column % 26));
+        column = column / 26 - 1;
+    } while (column >= 0);
+    return letters + std::to_wstring(row + 1);
+}
+
+bool RunReferenceAction(
+    Context* const context,
+    const wchar_t* const action,
+    const std::wstring& location) {
+    if (!RunAction(context->action, action, context->result, location)) {
+        return false;
+    }
+    ++context->result->actionsExecuted;
+    return true;
+}
+
+bool SelectReferenceRegion(
+    Context* const context,
+    const LONG top,
+    const LONG left,
+    const LONG bottom,
+    const LONG right) {
+    if (context->topology.Empty() && !BuildCellTopology(context)) {
+        return false;
+    }
+    const auto ownerAt = [&](const LONG row, const LONG column) {
+        for (const hancom::inspection::CellTopologyCell& cell :
+             context->topology.Cells()) {
+            const LONG cellTop = cell.row - 1;
+            const LONG cellLeft = cell.column - 1;
+            if (cellTop <= row && row < cellTop + cell.rowSpan &&
+                cellLeft <= column && column < cellLeft + cell.columnSpan) {
+                return cell.address;
+            }
+        }
+        return std::wstring{};
+    };
+    const std::wstring first = ownerAt(top, left);
+    const std::wstring last = ownerAt(bottom - 1, right - 1);
+    if (first.empty() || last.empty()) {
+        return SetError(
+            context->result,
+            L"REFERENCE_LAYOUT_REGION",
+            ReferenceCellAddress(top, left) + L":" +
+                ReferenceCellAddress(bottom - 1, right - 1),
+            L"selected region is not covered by the inspected table topology");
+    }
+    if (!GoToCell(context, first) ||
+        !RunReferenceAction(context, L"TableCellBlock", first) ||
+        !RunReferenceAction(context, L"TableCellBlockExtend", first)) {
+        return false;
+    }
+    if (first == last) {
+        return true;
+    }
+    std::vector<hancom::inspection::CellTopologyStep> path;
+    std::vector<std::wstring> region;
+    std::wstring error;
+    if (!context->topology.PlanRectangularMerge(first, last, &path, &region, &error)) {
+        return SetError(
+            context->result,
+            L"REFERENCE_LAYOUT_REGION",
+            first + L":" + last,
+            error.empty() ? L"style region is not a complete cell rectangle" : error);
+    }
+    for (const hancom::inspection::CellTopologyStep& step : path) {
+        const wchar_t* const action =
+            step.direction == hancom::inspection::CellDirection::Right
+            ? L"TableRightCell"
+            : L"TableLowerCell";
+        if (!RunReferenceAction(context, action, step.destination) ||
+            GetCellAddress(context->hwp) != step.destination) {
+            return SetError(
+                context->result,
+                L"REFERENCE_LAYOUT_REGION",
+                step.destination,
+                L"selected region did not follow the inspected cell topology");
+        }
+    }
+    context->currentCell = first;
+    return true;
+}
+
+bool InsertReferenceText(
+    Context* const context,
+    const hancom::reference_layout::Text& text) {
+    size_t start = 0;
+    size_t line = 0;
+    while (start <= text.value.size()) {
+        const size_t newline = text.value.find(L'\n', start);
+        const size_t end = newline == std::wstring::npos ? text.value.size() : newline;
+        std::wstring value = text.value.substr(start, end - start);
+        if (!value.empty() && value.back() == L'\r') {
+            value.pop_back();
+        }
+        if (line > 0 &&
+            !RunReferenceAction(
+                context,
+                hancom::reference_layout::TextBreakAction(text.breakMode),
+                L"reference text")) {
+            return false;
+        }
+        if (!value.empty() && !InsertText(context, value, L"reference text")) {
+            return false;
+        }
+        ++line;
+        if (newline == std::wstring::npos) {
+            break;
+        }
+        start = newline + 1;
+    }
+    return true;
+}
+
+bool VerifyReferenceTopology(
+    Context* const context,
+    const hancom::reference_layout::Spec& spec) {
+    context->topology.Clear();
+    if (!BuildCellTopology(context) ||
+        context->topology.Rows() != spec.rows ||
+        context->topology.Columns() != spec.columns) {
+        return SetError(
+            context->result,
+            L"REFERENCE_LAYOUT_VERIFY",
+            context->tableId,
+            L"final table dimensions do not match the compressed layout");
+    }
+    size_t expectedCells = static_cast<size_t>(spec.rows * spec.columns);
+    for (const hancom::reference_layout::Merge& merge : spec.merges) {
+        expectedCells -= static_cast<size_t>(
+            merge.rowSpan * merge.columnSpan - 1);
+        const std::wstring address = ReferenceCellAddress(merge.row, merge.column);
+        const hancom::inspection::CellTopologyCell* const cell =
+            context->topology.Find(address);
+        if (cell == nullptr ||
+            cell->rowSpan != merge.rowSpan ||
+            cell->columnSpan != merge.columnSpan) {
+            return SetError(
+                context->result,
+                L"REFERENCE_LAYOUT_VERIFY",
+                address,
+                L"final merged-cell topology does not match the request");
+        }
+    }
+    if (context->topology.Cells().size() != expectedCells) {
+        return SetError(
+            context->result,
+            L"REFERENCE_LAYOUT_VERIFY",
+            context->tableId,
+            L"final table has an unexpected physical cell count");
+    }
+    for (const hancom::inspection::CellTopologyCell& cell : context->topology.Cells()) {
+        if (cell.row < 1 || cell.column < 1 ||
+            cell.row + cell.rowSpan - 1 > spec.rows ||
+            cell.column + cell.columnSpan - 1 > spec.columns) {
+            return SetError(
+                context->result,
+                L"REFERENCE_LAYOUT_VERIFY",
+                cell.address,
+                L"final cell lies outside the requested grid");
+        }
+        LONG expectedWidth = 0;
+        for (LONG column = cell.column - 1;
+             column < cell.column - 1 + cell.columnSpan; ++column) {
+            expectedWidth += spec.columnWidths[static_cast<size_t>(column)];
+        }
+        LONG expectedHeight = 0;
+        for (LONG row = cell.row - 1;
+             row < cell.row - 1 + cell.rowSpan; ++row) {
+            expectedHeight += spec.rowHeights[static_cast<size_t>(row)];
+        }
+        if ((cell.width >= 0 && cell.width != expectedWidth) ||
+            (cell.height >= 0 && cell.height != expectedHeight)) {
+            return SetError(
+                context->result,
+                L"REFERENCE_LAYOUT_VERIFY",
+                cell.address,
+                L"final cell geometry does not match the breakpoint mapping");
+        }
+    }
+    return true;
+}
+
+const hancom::inspection::CellTopologyCell* ReferenceAxisAnchor(
+    const Context* const context,
+    const bool column,
+    const LONG index) {
+    for (const hancom::inspection::CellTopologyCell& cell :
+         context->topology.Cells()) {
+        const LONG cellIndex = column ? cell.column - 1 : cell.row - 1;
+        const LONG span = column ? cell.columnSpan : cell.rowSpan;
+        if (cellIndex == index && span == 1) {
+            return &cell;
+        }
+    }
+    return nullptr;
+}
+
+bool ResizeReferenceAxis(
+    Context* const context,
+    const bool column,
+    const LONG index,
+    const LONG size) {
+    if ((context->topology.Empty() && !BuildCellTopology(context))) {
+        return false;
+    }
+    const hancom::inspection::CellTopologyCell* const anchor =
+        ReferenceAxisAnchor(context, column, index);
+    const std::wstring location =
+        std::wstring(column ? L"column " : L"row ") + std::to_wstring(index);
+    if (anchor == nullptr) {
+        return SetError(
+            context->result,
+            L"REFERENCE_LAYOUT_PATCH_GEOMETRY",
+            location,
+            L"no single-span cell can resize the requested grid interval");
+    }
+    if (!GoToCell(context, anchor->address) ||
+        !RunReferenceAction(
+            context,
+            column ? L"TableCellBlockCol" : L"TableCellBlockRow",
+            location) ||
+        !ExecuteParameterAction(
+            context,
+            hancom::reference_layout::CellSizeCommand(column, size),
+            false)) {
+        return false;
+    }
+    return RunReferenceAction(context, L"Cancel", location);
+}
+
+bool ReconcileReferenceGeometry(
+    Context* const context,
+    const hancom::reference_layout::Spec& spec) {
+    const std::wstring tableId = context->tableId;
+    if (tableId.empty() ||
+        !LeaveTable(context, false) ||
+        !SelectControl(context, tableId) ||
+        !CaptureCurrentTable(context)) {
+        return false;
+    }
+    context->topology.Clear();
+    if (!BuildCellTopology(context) ||
+        context->topology.Rows() != spec.rows ||
+        context->topology.Columns() != spec.columns) {
+        return SetError(
+            context->result,
+            L"REFERENCE_LAYOUT_RECONCILE",
+            context->tableId,
+            L"final table dimensions cannot be reconciled to the compressed layout");
+    }
+    std::vector<LONG> columns;
+    std::vector<LONG> rows;
+    for (LONG column = 0; column < spec.columns; ++column) {
+        const hancom::inspection::CellTopologyCell* const anchor =
+            ReferenceAxisAnchor(context, true, column);
+        if (anchor == nullptr || anchor->width < 0) {
+            return SetError(
+                context->result,
+                L"REFERENCE_LAYOUT_RECONCILE",
+                L"column " + std::to_wstring(column),
+                L"no measurable single-span cell covers the requested column");
+        }
+        if (anchor->width != spec.columnWidths[static_cast<size_t>(column)]) {
+            columns.push_back(column);
+        }
+    }
+    for (LONG row = 0; row < spec.rows; ++row) {
+        const hancom::inspection::CellTopologyCell* const anchor =
+            ReferenceAxisAnchor(context, false, row);
+        if (anchor == nullptr || anchor->height < 0) {
+            return SetError(
+                context->result,
+                L"REFERENCE_LAYOUT_RECONCILE",
+                L"row " + std::to_wstring(row),
+                L"no measurable single-span cell covers the requested row");
+        }
+        if (anchor->height != spec.rowHeights[static_cast<size_t>(row)]) {
+            rows.push_back(row);
+        }
+    }
+    for (const LONG column : columns) {
+        if (!ResizeReferenceAxis(
+                context,
+                true,
+                column,
+                spec.columnWidths[static_cast<size_t>(column)])) {
+            return false;
+        }
+    }
+    for (const LONG row : rows) {
+        if (!ResizeReferenceAxis(
+                context,
+                false,
+                row,
+                spec.rowHeights[static_cast<size_t>(row)])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IntersectsPatchedAxis(
+    const LONG start,
+    const LONG span,
+    const std::vector<LONG>& patched) {
+    return std::any_of(
+        patched.begin(),
+        patched.end(),
+        [&](const LONG value) { return start <= value && value < start + span; });
+}
+
+bool VerifyPatchedReferenceTopology(
+    Context* const context,
+    const hancom::reference_layout::Spec& spec,
+    const hancom::inspection::CellTopology& originalTopology) {
+    context->topology.Clear();
+    if (!BuildCellTopology(context) ||
+        context->topology.Rows() != spec.rows ||
+        context->topology.Columns() != spec.columns) {
+        return SetError(
+            context->result,
+            L"REFERENCE_LAYOUT_PATCH_VERIFY",
+            context->tableId,
+            L"patched table dimensions do not match the compressed layout");
+    }
+    if (!originalTopology.HasSamePhysicalShape(context->topology)) {
+        return SetError(
+            context->result,
+            L"REFERENCE_LAYOUT_PATCH_VERIFY",
+            context->tableId,
+            L"patch changed the existing physical cell topology");
+    }
+    for (const hancom::reference_layout::Merge& merge : spec.merges) {
+        const hancom::inspection::CellTopologyCell* const cell =
+            context->topology.Find(
+                ReferenceCellAddress(merge.row, merge.column));
+        if (cell == nullptr ||
+            cell->rowSpan != merge.rowSpan ||
+            cell->columnSpan != merge.columnSpan) {
+            return SetError(
+                context->result,
+                L"REFERENCE_LAYOUT_PATCH_VERIFY",
+                context->tableId,
+                L"patch changed the expected merged-cell topology");
+        }
+    }
+    for (const hancom::inspection::CellTopologyCell& cell :
+         context->topology.Cells()) {
+        if (IntersectsPatchedAxis(
+                cell.column - 1,
+                cell.columnSpan,
+                spec.patchColumns)) {
+            LONG expected = 0;
+            for (LONG column = cell.column - 1;
+                 column < cell.column - 1 + cell.columnSpan;
+                 ++column) {
+                expected += spec.columnWidths[static_cast<size_t>(column)];
+            }
+            if (cell.width >= 0 && cell.width != expected) {
+                return SetError(
+                    context->result,
+                    L"REFERENCE_LAYOUT_PATCH_VERIFY",
+                    cell.address,
+                    L"patched column geometry does not match the requested boundary "
+                    L"(expected " + std::to_wstring(expected) +
+                    L", actual " + std::to_wstring(cell.width) + L")");
+            }
+        }
+        if (IntersectsPatchedAxis(
+                cell.row - 1,
+                cell.rowSpan,
+                spec.patchRows)) {
+            LONG expected = 0;
+            for (LONG row = cell.row - 1;
+                 row < cell.row - 1 + cell.rowSpan;
+                 ++row) {
+                expected += spec.rowHeights[static_cast<size_t>(row)];
+            }
+            if (cell.height >= 0 && cell.height != expected) {
+                return SetError(
+                    context->result,
+                    L"REFERENCE_LAYOUT_PATCH_VERIFY",
+                    cell.address,
+                    L"patched row geometry does not match the requested boundary "
+                    L"(expected " + std::to_wstring(expected) +
+                    L", actual " + std::to_wstring(cell.height) + L")");
+            }
+        }
+    }
+    return true;
+}
+
+class ReferenceLayoutHost final : public hancom::reference_layout::Host {
+public:
+    explicit ReferenceLayoutHost(Context* const context) : context_(context) {}
+
+    bool Fail(const Error& error) override {
+        return SetError(
+            context_->result,
+            error.code,
+            error.location,
+            error.message);
+    }
+
+    bool ExecuteParameter(const Command& command) override {
+        return ExecuteParameterAction(context_, command, false);
+    }
+
+    bool CaptureCreatedTable() override {
+        if (!CaptureCurrentTable(context_) || !SetTableTreatAsCharacter(context_)) {
+            return false;
+        }
+        context_->result->createdControlIds.push_back(context_->tableId);
+        return true;
+    }
+
+    bool CaptureExistingTable(const std::wstring& controlId) override {
+        if (!SelectControl(context_, controlId) || !CaptureCurrentTable(context_)) {
+            return false;
+        }
+        if (context_->tableId != controlId) {
+            return SetError(
+                context_->result,
+                L"WRONG_CONTROL",
+                controlId,
+                L"captured table identity does not match the patch target");
+        }
+        if (!BuildCellTopology(context_)) {
+            return false;
+        }
+        if (originalTopology_.Empty()) {
+            originalTopology_ = context_->topology;
+        }
+        return true;
+    }
+
+    bool ResizeColumn(const LONG column, const LONG width) override {
+        return ResizeReferenceAxis(context_, true, column, width);
+    }
+
+    bool ResizeRow(const LONG row, const LONG height) override {
+        return ResizeReferenceAxis(context_, false, row, height);
+    }
+
+    bool SelectRegion(
+        const LONG top,
+        const LONG left,
+        const LONG bottom,
+        const LONG right) override {
+        return SelectReferenceRegion(context_, top, left, bottom, right);
+    }
+
+    bool GoToCell(const LONG row, const LONG column) override {
+        return ::hancom::actions::GoToCell(
+            context_,
+            ReferenceCellAddress(row, column));
+    }
+
+    bool Run(
+        const wchar_t* const action,
+        const std::wstring& location) override {
+        return RunReferenceAction(context_, action, location);
+    }
+
+    bool InsertText(const hancom::reference_layout::Text& text) override {
+        return InsertReferenceText(context_, text);
+    }
+
+    bool MergeCells(const hancom::reference_layout::Merge& merge) override {
+        const auto ownerAt = [&](const LONG row, const LONG column) {
+            for (const hancom::inspection::CellTopologyCell& cell :
+                 context_->topology.Cells()) {
+                const LONG top = cell.row - 1;
+                const LONG left = cell.column - 1;
+                if (top <= row && row < top + cell.rowSpan &&
+                    left <= column && column < left + cell.columnSpan) {
+                    return cell.address;
+                }
+            }
+            return std::wstring{};
+        };
+        const std::wstring first = ownerAt(merge.row, merge.column);
+        const std::wstring last = ownerAt(
+            merge.row + merge.rowSpan - 1,
+            merge.column + merge.columnSpan - 1);
+        if (first.empty() || last.empty()) {
+            return SetError(
+                context_->result,
+                L"REFERENCE_LAYOUT_MERGE",
+                ReferenceCellAddress(merge.row, merge.column),
+                L"merge corner is not covered by the inspected table topology");
+        }
+        return MergeCellsUsingTopology(
+            context_,
+            first,
+            last,
+            false);
+    }
+
+    bool ReconcileFinalGeometry(
+        const hancom::reference_layout::Spec& spec) override {
+        return ReconcileReferenceGeometry(context_, spec);
+    }
+
+    bool VerifyFinalTopology(
+        const hancom::reference_layout::Spec& spec) override {
+        return VerifyReferenceTopology(context_, spec);
+    }
+
+    bool VerifyPatchedTopology(
+        const hancom::reference_layout::Spec& spec) override {
+        return VerifyPatchedReferenceTopology(context_, spec, originalTopology_);
+    }
+
+    bool LeaveTable(const bool appendParagraph = true) override {
+        return ::hancom::actions::LeaveTable(context_, appendParagraph);
+    }
+
+private:
+    Context* context_;
+    hancom::inspection::CellTopology originalTopology_;
+};
+
 bool ExecuteCommand(Context* const context, const Command& command) {
     switch (command.kind) {
     case CommandKind::Run:
@@ -2311,6 +3803,11 @@ bool ExecuteCommand(Context* const context, const Command& command) {
         }
         return true;
     case CommandKind::Action:
+        if (command.name == L"ReferenceLayoutBulk" ||
+            command.name == L"ReferenceLayoutPatch") {
+            ReferenceLayoutHost host(context);
+            return hancom::reference_layout::Execute(command, &host);
+        }
         if (!ExecuteParameterAction(context, command)) {
             return false;
         }
@@ -2355,6 +3852,8 @@ bool ExecuteCommand(Context* const context, const Command& command) {
         return InsertText(context, command.first, L"text");
     case CommandKind::ReplaceSelection:
         return ReplaceSelection(context, command);
+    case CommandKind::TextPatch:
+        return PatchText(context, command);
     case CommandKind::InsertPicture:
         return InsertPicture(context, command);
     case CommandKind::Cell:
@@ -2445,6 +3944,8 @@ std::wstring CommandStep(const Command& command) {
         return L"INSERT_TEXT";
     case CommandKind::ReplaceSelection:
         return L"REPLACE_SELECTION";
+    case CommandKind::TextPatch:
+        return L"PATCH_TEXT";
     case CommandKind::InsertPicture:
         return L"INSERT_PICTURE";
     case CommandKind::Cell:
@@ -2473,6 +3974,7 @@ bool CommandMayMutate(const Command& command) {
     case CommandKind::DeleteTail:
     case CommandKind::InsertText:
     case CommandKind::ReplaceSelection:
+    case CommandKind::TextPatch:
     case CommandKind::InsertPicture:
     case CommandKind::SetCellText:
     case CommandKind::Merge:

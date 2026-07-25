@@ -20,6 +20,7 @@ from hwp_public_table_edit_tools import HwpPublicTableEditTools
 from hwp_public_table_tools import HwpPublicTableTools
 from hwp_public_tools import HwpPublicTools
 from hwp_public_visibility_tools import HwpPublicVisibilityTools
+from hwp_reference_image_tools import HwpReferenceImageTools
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +37,7 @@ class McpToolBindings:
     public_selection_tools: HwpPublicSelectionTools
     public_document_tools: HwpPublicDocumentTools
     public_live_edit_tools: HwpPublicLiveEditTools
+    reference_image_tools: HwpReferenceImageTools
 
 
 def register_mcp_tools(
@@ -75,19 +77,32 @@ def register_mcp_tools(
 
     public_action_tools = (
         (bindings.public_tools.hwp_fill_table, "hwp_fill_table"),
-        (bindings.public_table_tools.hwp_expand_and_fill_table, "hwp_expand_and_fill_table"),
-        (bindings.public_table_tools.hwp_repeat_table_template, "hwp_repeat_table_template"),
+        (
+            bindings.public_table_tools.hwp_expand_and_fill_table,
+            "hwp_expand_and_fill_table",
+        ),
+        (
+            bindings.public_table_tools.hwp_repeat_table_template,
+            "hwp_repeat_table_template",
+        ),
         (bindings.public_table_tools.hwp_build_table_series, "hwp_build_table_series"),
-        (bindings.public_visibility_tools.hwp_sync_visibility_analysis_tables, "hwp_sync_visibility_analysis_tables"),
+        (
+            bindings.public_visibility_tools.hwp_sync_visibility_analysis_tables,
+            "hwp_sync_visibility_analysis_tables",
+        ),
         (bindings.public_table_tools.hwp_fill_table_images, "hwp_fill_table_images"),
         (bindings.public_table_edit_tools.hwp_format_table, "hwp_format_table"),
-        (bindings.public_table_edit_tools.hwp_merge_table_cells, "hwp_merge_table_cells"),
+        (
+            bindings.public_table_edit_tools.hwp_merge_table_cells,
+            "hwp_merge_table_cells",
+        ),
         (bindings.public_table_edit_tools.hwp_split_table_cell, "hwp_split_table_cell"),
         (bindings.public_object_tools.hwp_insert_image, "hwp_insert_image"),
         (bindings.public_object_tools.hwp_replace_image, "hwp_replace_image"),
         (bindings.public_object_tools.hwp_add_caption, "hwp_add_caption"),
         (bindings.public_selection_tools.hwp_apply_style, "hwp_apply_style"),
         (bindings.public_selection_tools.hwp_format_text, "hwp_format_text"),
+        (bindings.public_selection_tools.hwp_patch_text, "hwp_patch_text"),
         (
             bindings.public_selection_tools.hwp_replace_selected_text,
             "hwp_replace_selected_text",
@@ -99,8 +114,15 @@ def register_mcp_tools(
         (bindings.public_document_tools.hwp_insert_layout, "hwp_insert_layout"),
         (bindings.public_document_tools.hwp_append_layout, "hwp_append_layout"),
         (bindings.public_document_tools.hwp_append_report, "hwp_append_report"),
-        (bindings.public_document_tools.hwp_append_excel_table, "hwp_append_excel_table"),
-        (bindings.public_document_tools.hwp_save_reopen_verify, "hwp_save_reopen_verify"),
+        (
+            bindings.public_document_tools.hwp_append_excel_table,
+            "hwp_append_excel_table",
+        ),
+        (bindings.public_document_tools.hwp_save, "hwp_save"),
+        (
+            bindings.public_document_tools.hwp_save_reopen_verify,
+            "hwp_save_reopen_verify",
+        ),
     )
     for public_tool, name in public_action_tools:
         server.add_tool(public_tool, name=name, description=tool_spec(name).description)
@@ -110,12 +132,16 @@ def register_mcp_tools(
         (
             bindings.document_wrappers.hwp_copy_style,
             bindings.qa.hwp_list_open_documents,
+            bindings.qa.hwp_open_document,
             bindings.operation.hwp_connect,
             bindings.public_inspection_tools.hwp_inspect,
             bindings.public_inspection_tools.hwp_inspect_page_fast,
             bindings.public_inspection_tools.hwp_inspect_structure,
             bindings.public_inspection_tools.hwp_render_page,
             bindings.public_inspection_tools.hwp_list_styles,
+            bindings.reference_image_tools.hwp_analyze_reference_image,
+            bindings.reference_image_tools.hwp_get_reference_image_analysis_section,
+            bindings.public_document_tools.hwp_preflight_layout,
             bindings.qa.hwp_watch_state,
             bindings.qa.hwp_list_window_states,
             bindings.qa.hwp_inspect_window_state,
@@ -131,6 +157,7 @@ def register_mcp_tools(
             bindings.qa.hwp_propagate_table_cells,
             bindings.qa.hwp_insert_folder_images,
             bindings.qa.hwp_rebuild_document,
+            bindings.operation.hwp_get_operation_status,
             bindings.operation.hwp_disconnect,
         ),
         profile,

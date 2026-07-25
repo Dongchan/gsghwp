@@ -12,8 +12,10 @@ from pydantic import Field
 from hwp_public_cell_selector import SeriesImageCell, SeriesTextCell
 from hwp_live_values import ContractModel
 from hwp_operation_contract import (
+    IdempotencyStatus,
     OperationResult,
     OperationStatus,
+    TableFormatCandidate,
     WorkflowTargetCandidate,
 )
 from hwp_runtime_identity import RuntimeBuildInfo
@@ -109,6 +111,7 @@ class PublicActionResult(ContractModel):
     status: PublicActionStatus
     message: str = Field(max_length=4_000)
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
+    idempotency_status: IdempotencyStatus = "not_requested"
     runtime: RuntimeBuildInfo
     verified: bool
     modified: bool
@@ -116,6 +119,10 @@ class PublicActionResult(ContractModel):
     target_candidates: tuple[PublicTargetCandidate, ...] = Field(
         default=(),
         max_length=3,
+    )
+    format_candidates: tuple[TableFormatCandidate, ...] = Field(
+        default=(),
+        max_length=24,
     )
     recipe_id: str | None = Field(default=None, max_length=100)
     commands_executed: int = Field(default=0, ge=0)
@@ -181,6 +188,8 @@ def _required_inputs(
 ) -> tuple[str, ...]:
     match status:
         case "needs_target":
+            if result.text_candidates:
+                return ("target.occurrence",)
             return (input_aliases.get("inputs.target", "target.target_id"),)
         case "needs_input":
             aliases = {
@@ -200,9 +209,26 @@ def _required_inputs(
 
 
 def _verified(result: OperationResult) -> bool:
-    if result.verified is not None:
-        return result.verified
-    return result.status == "executed" and result.verification is not None
+    return result.verified is True
+
+
+def _public_message(result: OperationResult) -> str:
+    if not result.text_candidates:
+        return result.message
+    locations = ", ".join(
+        (
+            f"occurrence={candidate.occurrence} "
+            f"start={candidate.start.list_id}:{candidate.start.paragraph}:"
+            f"{candidate.start.character} "
+            f"end={candidate.end.list_id}:{candidate.end.paragraph}:"
+            f"{candidate.end.character}"
+        )
+        for candidate in result.text_candidates
+    )
+    return (
+        f"{result.message} 후보 위치: {locations}. "
+        "전체 후보는 operation_id로 hwp_get_operation_status를 조회할 수 있습니다"
+    )
 
 
 def refresh_public_target_ids(
@@ -250,13 +276,15 @@ def to_public_action_result(
     )
     return PublicActionResult(
         status=status,
-        message=result.message,
+        message=_public_message(result),
         request_id=result.request_id,
+        idempotency_status=result.idempotency_status,
         runtime=result.runtime,
         verified=_verified(result),
         modified=modified,
         required_inputs=_required_inputs(status, result, input_aliases),
         target_candidates=public_candidates,
+        format_candidates=result.format_candidates,
         recipe_id=result.recipe_id,
         commands_executed=result.commands_executed or 0,
         updated_addresses=result.updated_addresses,

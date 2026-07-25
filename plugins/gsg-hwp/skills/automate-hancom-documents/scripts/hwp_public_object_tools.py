@@ -21,8 +21,8 @@ from hwp_public_action_contract import (
     PublicImageSize,
     PublicImageWidth,
     PublicObjectTargetStore,
+    PublicOperationId,
     PublicStyleId,
-    new_public_request_id,
 )
 from hwp_public_contract import (
     PublicActionResult,
@@ -76,6 +76,7 @@ class HwpPublicObjectTools:
     async def hwp_insert_image(
         self,
         *,
+        operation_id: PublicOperationId,
         path: Path,
         width_mm: PublicImageWidth | None = None,
         height_mm: PublicImageHeight | None = None,
@@ -94,7 +95,7 @@ class HwpPublicObjectTools:
         return await self._execute(
             metadata.INSERT_IMAGE_INTENT,
             HwpOperateInputs(
-                request_id=new_public_request_id(),
+                request_id=operation_id,
                 document=document_path,
                 operation="image.insert",
                 target=canonical_target,
@@ -111,11 +112,12 @@ class HwpPublicObjectTools:
     async def hwp_replace_image(
         self,
         *,
+        operation_id: PublicOperationId,
         path: Path,
         target_id: str | None = None,
         document_path: str | None = None,
     ) -> PublicActionResult:
-        request_id = new_public_request_id()
+        request_id = operation_id
         resolved = self._targets.resolve_picture(target_id, document_path)
         if resolved is None:
             return self._unknown_target(request_id)
@@ -135,12 +137,13 @@ class HwpPublicObjectTools:
     async def hwp_add_caption(
         self,
         *,
+        operation_id: PublicOperationId,
         text: str,
         target_id: str | None = None,
         style_id: PublicStyleId = 0,
         document_path: str | None = None,
     ) -> PublicActionResult:
-        request_id = new_public_request_id()
+        request_id = operation_id
         resolved = self._targets.resolve_control(target_id, document_path)
         if resolved is None:
             return self._unknown_target(request_id)

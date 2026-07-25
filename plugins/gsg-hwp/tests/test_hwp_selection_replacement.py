@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import ClassVar
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import anyio
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -24,9 +24,7 @@ from hwp_live_contract import (  # noqa: E402
     ConnectedDocument,
     CursorPosition,
     LiveContext,
-    MutationResult,
     OpenDocument,
-    OpenDocumentList,
     PageSetup,
     ParagraphStyle,
     SelectionPosition,
@@ -35,6 +33,13 @@ from hwp_live_session import LiveHwpController  # noqa: E402
 from hwp_mcp import build_server  # noqa: E402
 from hwp_mcp_dispatch import McpThreadDispatcher  # noqa: E402
 from hwp_mcp_operation_executor import HwpOperationExecutor  # noqa: E402
+from hwp_live_text_patch_contract import TextPatchRequest, TextPatchTarget  # noqa: E402
+from hwp_operation_journal import OperationJournal  # noqa: E402
+from hwp_operation_contract import (  # noqa: E402
+    HwpOperateInputs,
+    HwpOperateTarget,
+    OperationResult,
+)
 
 
 class _InputSchema(BaseModel):
@@ -118,23 +123,51 @@ def test_production_replacement_tool_accepts_only_current_selection_and_text() -
 
     schema = schemas["hwp_replace_selected_text"]
 
-    assert schema.required == ("replacement",)
-    assert frozenset(schema.properties) == frozenset(("replacement", "document_path"))
+    assert schema.required == ("operation_id", "replacement")
+    assert frozenset(schema.properties) == frozenset(
+        ("operation_id", "replacement", "document_path")
+    )
 
 
-def test_executor_replaces_the_exact_selection_returned_by_inspection() -> None:
+def test_executor_replaces_the_exact_selection_returned_by_inspection(
+    tmp_path: Path,
+) -> None:
     document = _document()
     connected = ConnectedDocument(session_id="selection-session", document=document)
     context = _selected_context(document)
-    mutation = MutationResult(action="replace_selection", current_page=2, modified=True)
+    atomic_result = OperationResult(
+        request_id="selection-replacement",
+        status="executed",
+        changed=True,
+        query="선택 텍스트 교체",
+        registry_entries=1,
+        lookup_microseconds=0,
+        message="선택 본문을 교체하고 다시 읽어 검증했습니다",
+        verification="native_operation_specific_readback",
+        verified=True,
+    )
     bridge = HancomBridge(LiveHwpController())
     dispatcher = McpThreadDispatcher(watch_workers=1)
-    executor = HwpOperationExecutor(bridge, dispatcher, None)
+    executor = HwpOperationExecutor(
+        bridge,
+        dispatcher,
+        OperationJournal(tmp_path / "journal"),
+    )
 
-    async def replace() -> MutationResult:
+    async def replace() -> OperationResult:
         try:
             return await executor.replace_selected_text(
-                document.selector,
+                "선택 텍스트 교체",
+                HwpOperateInputs(
+                    request_id="selection-replacement",
+                    document=document.selector,
+                    operation="document.replace_selection",
+                    target=HwpOperateTarget(
+                        kind="selection",
+                        binding="selection",
+                    ),
+                    parameters={"replacement": "바뀐 문장"},
+                ),
                 "바뀐 문장",
             )
         finally:
@@ -143,23 +176,26 @@ def test_executor_replaces_the_exact_selection_returned_by_inspection() -> None:
     with (
         patch.object(
             HancomBridge,
-            "list_open_documents",
-            return_value=OpenDocumentList(documents=(document,)),
+            "ensure_connection",
+            return_value=connected,
         ),
-        patch.object(HancomBridge, "connect", return_value=connected),
         patch.object(HancomBridge, "context", return_value=context),
         patch.object(
-            HancomBridge,
-            "replace_selection",
-            return_value=mutation,
-        ) as native_replace,
+            HwpOperationExecutor,
+            "patch_text",
+            new=AsyncMock(return_value=atomic_result),
+        ) as atomic_patch,
     ):
         result = anyio.run(replace)
 
-    assert result == mutation
-    native_replace.assert_called_once_with(
-        connected.session_id,
-        context.selection,
-        context.selected_text,
-        "바뀐 문장",
+    assert result.status == "executed"
+    assert result.request_id == "selection-replacement"
+    assert result.changed is True
+    atomic_patch.assert_awaited_once()
+    await_args = atomic_patch.await_args
+    assert await_args is not None
+    assert await_args.args[2] == TextPatchRequest(
+        target=TextPatchTarget(kind="current"),
+        expected_text=context.selected_text,
+        replacement="바뀐 문장",
     )

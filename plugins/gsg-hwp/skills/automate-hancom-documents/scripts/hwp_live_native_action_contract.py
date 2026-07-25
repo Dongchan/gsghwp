@@ -56,6 +56,7 @@ from hwp_live_native_action_models import (
     SaveDocumentFileCommand,
     SelectControlCommand,
     SetCellTextCommand,
+    TextPatchCommand,
     TextValue,
 )
 
@@ -177,11 +178,11 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                 raise HwpLiveError("네이티브 파라미터 배열 정의가 올바르지 않습니다")
             if any(
                 item.name not in array_counts
-                or item.index < 1
-                or item.index > array_counts[item.name]
+                or item.index < 0
+                or item.index >= array_counts[item.name]
                 for item in array_values
             ):
-                raise HwpLiveError("네이티브 파라미터 배열 인덱스는 1부터 배열 크기까지입니다")
+                raise HwpLiveError("네이티브 파라미터 배열 인덱스는 0부터 배열 크기 미만입니다")
             lines = [
                 f"ACTION\t{_plain(action, '액션 이름')}\t"
                 + _plain(parameter_set, "파라미터셋 이름")
@@ -258,6 +259,119 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
             return (
                 f"REPLACE_SELECTION\t{_encode(expected)}\t{_encode(replacement)}",
             )
+        case TextPatchCommand(
+            target=target,
+            expected_text=expected,
+            replacement=replacement,
+            start=start,
+            end=end,
+            occurrence=occurrence,
+            match_case=match_case,
+            table_instance_id=table_instance_id,
+            cell_address=cell_address,
+            preserve_format=preserve_format,
+        ):
+            if target == "current":
+                if any(
+                    value is not None
+                    for value in (
+                        start,
+                        end,
+                        occurrence,
+                        table_instance_id,
+                        cell_address,
+                    )
+                ):
+                    raise HwpLiveError("현재 위치 text.patch 대상에 범위·검색·셀 입력을 함께 쓸 수 없습니다")
+                return (
+                    "\t".join(
+                        (
+                            "PATCH_TEXT",
+                            "CURRENT",
+                            "1" if expected is not None else "0",
+                            _encode("" if expected is None else expected),
+                            _encode(replacement),
+                        )
+                        + (("1",) if preserve_format else ())
+                    ),
+                )
+            if expected is None:
+                raise HwpLiveError("범위·검색·표 셀 text.patch에는 확인할 기존 텍스트가 필요합니다")
+            if target == "range":
+                if (
+                    start is None
+                    or end is None
+                    or occurrence is not None
+                    or table_instance_id is not None
+                    or cell_address is not None
+                    or start.list_id != end.list_id
+                ):
+                    raise HwpLiveError("범위 text.patch 좌표가 올바르지 않습니다")
+                return (
+                    "\t".join(
+                        (
+                            "PATCH_TEXT",
+                            "RANGE",
+                            str(start.list_id),
+                            str(start.paragraph),
+                            str(start.character),
+                            str(end.list_id),
+                            str(end.paragraph),
+                            str(end.character),
+                            _encode(expected),
+                            _encode(replacement),
+                        )
+                        + (("1",) if preserve_format else ())
+                    ),
+                )
+            occurrence_value = 0 if occurrence is None else occurrence
+            if occurrence_value < 0:
+                raise HwpLiveError("text.patch 검색 순번은 1 이상이어야 합니다")
+            if target == "find":
+                if (
+                    start is not None
+                    or end is not None
+                    or table_instance_id is not None
+                    or cell_address is not None
+                ):
+                    raise HwpLiveError("문서 검색 text.patch 대상에 범위·셀 입력을 함께 쓸 수 없습니다")
+                return (
+                    "\t".join(
+                        (
+                            "PATCH_TEXT",
+                            "FIND",
+                            str(occurrence_value),
+                            "1" if match_case else "0",
+                            _encode(expected),
+                            _encode(replacement),
+                        )
+                        + (("1",) if preserve_format else ())
+                    ),
+                )
+            if target == "table_cell":
+                if (
+                    start is not None
+                    or end is not None
+                    or not table_instance_id
+                    or not cell_address
+                ):
+                    raise HwpLiveError("표 셀 text.patch에는 표 ID와 셀 주소가 필요합니다")
+                return (
+                    "\t".join(
+                        (
+                            "PATCH_TEXT",
+                            "CELL",
+                            _encode(table_instance_id),
+                            _plain(cell_address, "셀 주소").upper(),
+                            str(occurrence_value),
+                            "1" if match_case else "0",
+                            _encode(expected),
+                            _encode(replacement),
+                        )
+                        + (("1",) if preserve_format else ())
+                    ),
+                )
+            raise HwpLiveError("지원하지 않는 text.patch 대상입니다")
         case InsertPictureCommand(path=path, width_mm=width, height_mm=height):
             if (width is None) != (height is None):
                 raise HwpLiveError("네이티브 그림 배치 영역의 가로와 세로가 함께 필요합니다")
@@ -271,9 +385,28 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
             )
         case CellCommand(address=address):
             return (f"CELL\t{_plain(address, '셀 주소').upper()}",)
-        case SetCellTextCommand(address=address, text=text):
+        case SetCellTextCommand(
+            address=address,
+            text=text,
+            expected_text=expected,
+            preserve_style=preserve_style,
+        ):
+            if expected is None and not preserve_style:
+                return (
+                    f"SET_CELL_TEXT\t{_plain(address, '셀 주소').upper()}\t{_encode(text)}",
+                )
+            if expected is None:
+                raise HwpLiveError("서식 보존 셀 교체에는 확인할 기존 텍스트가 필요합니다")
             return (
-                f"SET_CELL_TEXT\t{_plain(address, '셀 주소').upper()}\t{_encode(text)}",
+                "\t".join(
+                    (
+                        "SET_CELL_TEXT",
+                        _plain(address, "셀 주소").upper(),
+                        _encode(expected),
+                        _encode(text),
+                        "1" if preserve_style else "0",
+                    )
+                ),
             )
         case MergeCommand(first=first, second=second):
             return (

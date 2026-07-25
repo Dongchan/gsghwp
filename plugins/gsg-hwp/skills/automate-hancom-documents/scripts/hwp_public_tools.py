@@ -3,8 +3,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Annotated, Final, Protocol, final
-from uuid import uuid4
-
 from pydantic import Field
 
 from hwp_operation_contract import (
@@ -14,6 +12,7 @@ from hwp_operation_contract import (
     HwpOperatePostconditions,
     OperationResult,
 )
+from hwp_public_action_contract import PublicOperationId
 from hwp_public_contract import (
     PublicActionResult,
     PublicTableTarget,
@@ -30,7 +29,12 @@ from hwp_public_table_target import (
 
 _FILL_TABLE_INTENT: Final = "기존 표 채우기"
 _FILL_TABLE_INPUT_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
-    {"inputs.target": "target_id"}
+    {
+        "inputs.target": "target_id",
+        "inputs.policy.numeric_value_mode": (
+            "cells (format_candidates.replacement 중 확인한 값)"
+        ),
+    }
 )
 
 
@@ -57,6 +61,7 @@ class HwpPublicTools:
 
     async def hwp_fill_table(
         self,
+        operation_id: PublicOperationId,
         records: Annotated[
             list[dict[str, str]] | None,
             Field(description="표의 실제 머리글 이름을 키로 사용하는 레코드 목록"),
@@ -106,7 +111,7 @@ class HwpPublicTools:
             start_cell=start_cell,
             fill_blanks_only=fill_blanks_only,
         )
-        request_id = f"hwp-public-{uuid4().hex}"
+        request_id = operation_id
         try:
             selected = self._targets.resolve(target)
         except UnknownPublicTargetError as error:

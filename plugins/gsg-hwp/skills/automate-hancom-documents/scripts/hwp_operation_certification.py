@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Final, Literal
 
 from hwp_operation_contract import HwpWorkflowId, OperationCandidate
+from hwp_operation_descriptor import operation_descriptors
 
 
 RollbackBehavior = Literal[
@@ -196,94 +197,29 @@ CERTIFIED_PRIMITIVES: Final = {
         ("official Style action succeeds",),
     ),
     "ResolveTextRange": CertifiedPrimitive("ResolveTextRange", ("native text selection",), ("one explicit text range",), ("target",), _BUILDS, _FORMATS, "none", ("selection remains in the connected document",)),
-    "ApplyTextFormat": CertifiedPrimitive("ApplyTextFormat", ("resolved native text range",), ("native character or paragraph formatting",), ("parameters",), _BUILDS, _FORMATS, "no_automatic_rollback", ("protocol-9 native action result is returned",)),
+    "ApplyTextFormat": CertifiedPrimitive("ApplyTextFormat", ("resolved native text range",), ("native character or paragraph formatting",), ("parameters",), _BUILDS, _FORMATS, "no_automatic_rollback", ("requested character and paragraph properties match native readback",)),
     "ApplyTableFormat": CertifiedPrimitive("ApplyTableFormat", ("resolved native table and cell",), ("native cell border, fill, or text formatting",), ("target", "parameters"), _BUILDS, _FORMATS, "no_automatic_rollback", ("target table remains structurally observable",)),
     "ResolveCells": CertifiedPrimitive("ResolveCells", ("resolved native table",), ("validated cell address or range",), ("target", "parameters"), _BUILDS, _FORMATS, "none", ("every requested address belongs to the resolved table",)),
     "TableMergeCell": CertifiedPrimitive("TableMergeCell", ("validated rectangular cell range",), ("native merged cell",), ("parameters.start", "parameters.end"), _BUILDS, _FORMATS, "automatic_undo_on_postcondition_failure", ("target table remains structurally observable",)),
     "TableSplitCell": CertifiedPrimitive("TableSplitCell", ("validated native table cell",), ("native split rows and columns",), ("parameters.cell", "parameters.columns", "parameters.rows"), _BUILDS, _FORMATS, "automatic_undo_on_postcondition_failure", ("target table remains structurally observable",)),
+    "ResolveTextPatch": CertifiedPrimitive("ResolveTextPatch", ("one connected editable document",), ("one cursor, range, search match, or table cell target",), ("target", "expected_text"), _BUILDS, _FORMATS, "none", ("ambiguous matches are returned without mutation",)),
+    "PatchText": CertifiedPrimitive("PatchText", ("resolved text patch target and verified original text",), ("one native text replacement and optional format application",), ("replacement", "formatting"), _BUILDS, _FORMATS, "no_automatic_rollback", ("native protocol 11 executes the patch once",)),
+    "VerifyTextPatch": CertifiedPrimitive("VerifyTextPatch", ("completed native text patch",), ("operation-specific text and format readback",), (), _BUILDS, _FORMATS, "none", ("replacement range and requested formatting match native readback",)),
+    "SaveDocument": CertifiedPrimitive("SaveDocument", ("one connected saved editable document",), ("native save without clear or reopen",), (), _BUILDS, _FORMATS, "none", ("save reports success and modified state is clear",)),
+    "ReopenDiagnostic": CertifiedPrimitive("ReopenDiagnostic", ("successful native save with recovery snapshot",), ("isolated reopen persistence diagnostic",), (), _BUILDS, _FORMATS, "none", ("failed reopen restores the existing document session",)),
+    "VerifySavedDocument": CertifiedPrimitive("VerifySavedDocument", ("completed native save",), ("saved document persistence evidence",), (), _BUILDS, _FORMATS, "none", ("body, tables, and character formatting hashes match readback",)),
 }
 
 CERTIFIED_RECIPES: Final = {
-    "document.delete_page": CertifiedRecipe(
-        "document.delete_page.v1", "document.delete_page", 1,
-        ("ResolvePage", "DeletePage", "VerifyStructure"), "native_batch",
-    ),
-    "document.undo": CertifiedRecipe(
-        "document.undo.v1", "document.undo", 1,
-        ("ResolveHistory", "Undo", "VerifySnapshot"), "native_batch",
-    ),
-    "document.redo": CertifiedRecipe(
-        "document.redo.v1", "document.redo", 1,
-        ("ResolveHistory", "Redo", "VerifySnapshot"), "native_batch",
-    ),
-    "control.delete": CertifiedRecipe(
-        "control.delete.v1", "control.delete", 1,
-        ("ResolveControl", "DeleteControl", "VerifyStructure"), "native_batch",
-    ),
-    "document.append_layout": CertifiedRecipe(
-        "page.append_from_template.v1",
-        "document.append_layout",
-        1,
-        ("MoveDocEnd", "ApplyLayout"),
-        "transactional",
-    ),
-    "document.insert_layout": CertifiedRecipe(
-        "document.insert_layout.v1",
-        "document.insert_layout",
-        1,
-        ("ApplyLayout",),
-        "native_batch",
-    ),
-    "table.fill_existing": CertifiedRecipe(
-        "table.fill_existing.v1",
-        "table.fill_existing",
-        1,
-        ("ResolveTable", "MapRowsToCells", "FillCells", "VerifyStructure"),
-        "native_batch",
-    ),
-    "table.expand_and_fill": CertifiedRecipe(
-        "table.expand_and_fill.v1", "table.expand_and_fill", 1,
-        ("ResolveTable", "ExpandRows", "MapRowsToCells", "FillCells", "VerifyStructure"),
-        "native_batch",
-    ),
-    "table.repeat_template": CertifiedRecipe(
-        "table.repeat_template.v1", "table.repeat_template", 1,
-        ("ResolveTable", "RepeatTemplate", "VerifyStructure"), "native_batch",
-    ),
-    "table.build_series": CertifiedRecipe(
-        "table.build_series.v1", "table.build_series", 1,
-        ("ResolveTable", "RepeatTemplate", "FillCells", "InsertImages", "VerifyStructure"),
-        "native_batch",
-    ),
-    "table.insert_images": CertifiedRecipe(
-        "table.fill_with_images.v1", "table.insert_images", 1,
-        ("ResolveTable", "MapImagesToCells", "InsertImages", "VerifyStructure"),
-        "native_batch",
-    ),
-    "image.insert": CertifiedRecipe(
-        "image.insert_or_replace.v1", "image.insert", 1,
-        ("ResolvePosition", "InsertImages", "VerifyStructure"), "native_batch",
-    ),
-    "image.replace": CertifiedRecipe(
-        "image.insert_or_replace.v1", "image.replace", 1,
-        ("ResolvePicture", "PictureChange", "VerifyStructure"), "native_batch",
-    ),
-    "caption.add": CertifiedRecipe(
-        "caption.add_or_update.v1", "caption.add", 1,
-        ("ResolveControl", "ApplyCaption", "VerifyStructure"), "native_batch",
-    ),
-    "style.copy": CertifiedRecipe(
-        "style.copy_and_apply.v1", "style.copy", 1,
-        ("ResolvePosition", "CopyAndApplyStyle", "VerifyStructure"), "native_batch",
-    ),
-    "style.apply": CertifiedRecipe(
-        "style.copy_and_apply.v1", "style.apply", 1,
-        ("ResolvePosition", "ApplyStyle", "VerifyStructure"), "native_batch",
-    ),
-    "text.format": CertifiedRecipe("text.format.v1", "text.format", 1, ("ResolveTextRange", "ApplyTextFormat"), "native_batch"),
-    "table.format": CertifiedRecipe("table.format.v1", "table.format", 1, ("ResolveTable", "ApplyTableFormat", "VerifyStructure"), "native_batch"),
-    "table.merge_cells": CertifiedRecipe("table.merge_cells.v1", "table.merge_cells", 1, ("ResolveTable", "ResolveCells", "TableMergeCell", "VerifyStructure"), "native_batch"),
-    "table.split_cells": CertifiedRecipe("table.split_cells.v1", "table.split_cells", 1, ("ResolveTable", "ResolveCells", "TableSplitCell", "VerifyStructure"), "native_batch"),
+    descriptor.workflow_id: CertifiedRecipe(
+        descriptor.recipe.recipe_id,
+        descriptor.workflow_id,
+        descriptor.recipe.version,
+        descriptor.recipe.steps,
+        descriptor.recipe.atomicity,
+    )
+    for descriptor in operation_descriptors()
+    if descriptor.recipe is not None
 }
 
 

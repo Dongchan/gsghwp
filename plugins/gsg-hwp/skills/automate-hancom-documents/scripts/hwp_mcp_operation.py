@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import final
 
-from hwp_errors import HwpLiveError
 from hwp_live_bridge import HancomBridge
 from hwp_live_contract import ConnectedDocument, MutationResult
 from hwp_mcp_dispatch import McpThreadDispatcher
@@ -13,6 +12,7 @@ from hwp_operation_contract import (
     HwpOperateInputs,
     OperationResult,
 )
+from hwp_public_action_contract import PublicOperationId
 
 
 @final
@@ -54,13 +54,18 @@ class McpOperationHandler:
         requested = HwpOperateInputs() if inputs is None else inputs
         return await self._executor.execute(intent, requested, guards)
 
+    async def hwp_get_operation_status(
+        self,
+        operation_id: PublicOperationId,
+        document_path: str | None = None,
+    ) -> OperationResult:
+        return await self._executor.get_operation_status(
+            operation_id,
+            document_path,
+        )
+
     async def hwp_disconnect(self, session_id: str | None = None) -> MutationResult:
-        connected_session = self._executor.operation_session_id
-        selected_session = connected_session if session_id is None else session_id
-        if selected_session is None:
-            raise HwpLiveError("연결된 한컴 라이브 세션이 없습니다")
-        result = await self._dispatcher.run(self._bridge.disconnect, selected_session)
-        if connected_session == selected_session:
-            self._executor.operation_session_id = None
-            self._executor.operation_document = None
-        return result
+        return await self._dispatcher.run_mutation(
+            self._bridge.disconnect,
+            session_id,
+        )

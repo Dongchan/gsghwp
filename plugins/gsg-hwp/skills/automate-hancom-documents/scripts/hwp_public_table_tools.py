@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+# noqa: E501  # noqa: SIZE_OK — the four table actions share one target-resolution and mapping pipeline.
+
 from pathlib import Path
 from typing import Annotated, Protocol, assert_never, final
-from uuid import uuid4
-
 from pydantic import Field
 from typing_extensions import TypeIs
 
@@ -20,6 +20,7 @@ from hwp_operation_contract import (
 from hwp_operation_registry import operation_registry
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
 from hwp_priority_table_expand import data_record_count
+from hwp_public_action_contract import PublicOperationId
 from hwp_public_contract import (
     PublicActionResult,
     PublicTableTarget,
@@ -49,10 +50,14 @@ class PublicTableExecutor(PublicTableStructureReader, Protocol):
     ) -> OperationResult: ...
 
 
-def _new_request(intent: str, target: PublicTableTarget | None) -> PublicTableResolutionRequest:
+def _new_request(
+    intent: str,
+    target: PublicTableTarget | None,
+    operation_id: PublicOperationId,
+) -> PublicTableResolutionRequest:
     return PublicTableResolutionRequest(
         target=target,
-        request_id=f"hwp-public-{uuid4().hex}",
+        request_id=operation_id,
         query=intent,
     )
 
@@ -125,6 +130,7 @@ class HwpPublicTableTools:
 
     async def hwp_expand_and_fill_table(
         self,
+        operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
         records: list[dict[str, str]] | None = None,
         cells: dict[str, str] | None = None,
@@ -143,7 +149,7 @@ class HwpPublicTableTools:
         selected = self._targets.resolve(target)
         data = requested.to_canonical_data()
         inputs = HwpOperateInputs(
-            request_id=f"hwp-public-{uuid4().hex}",
+            request_id=operation_id,
             document=selected.document_path,
             operation="table.expand_and_fill",
             target=selected.target,
@@ -165,11 +171,12 @@ class HwpPublicTableTools:
     async def hwp_repeat_table_template(
         self,
         *,
+        operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
         count: Annotated[int, Field(ge=1, le=100)],
         caption_pattern: Annotated[str | None, Field(min_length=1, max_length=2_000)] = None,
     ) -> PublicActionResult:
-        request = _new_request(metadata.REPEAT_INTENT, target)
+        request = _new_request(metadata.REPEAT_INTENT, target, operation_id)
         resolved = await self._resolved(request)
         match resolved:
             case PublicActionResult():
@@ -196,10 +203,11 @@ class HwpPublicTableTools:
     async def hwp_build_table_series(
         self,
         *,
+        operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
         items: Annotated[list[SeriesItem], Field(min_length=1, max_length=100)],
     ) -> PublicActionResult:
-        request = _new_request(metadata.SERIES_INTENT, target)
+        request = _new_request(metadata.SERIES_INTENT, target, operation_id)
         resolved = await self._resolved(request)
         match resolved:
             case PublicActionResult():
@@ -233,11 +241,12 @@ class HwpPublicTableTools:
     async def hwp_fill_table_images(
         self,
         *,
+        operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
         images: Annotated[dict[str, Path], Field(min_length=1, max_length=200)],
         preserve_existing_images: bool = True,
     ) -> PublicActionResult:
-        request = _new_request(metadata.TABLE_IMAGES_INTENT, target)
+        request = _new_request(metadata.TABLE_IMAGES_INTENT, target, operation_id)
         resolved = await self._resolved(request)
         match resolved:
             case PublicActionResult():

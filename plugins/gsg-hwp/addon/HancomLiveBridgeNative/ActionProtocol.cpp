@@ -367,6 +367,60 @@ bool ParseRequest(
                 DecodeUtf8Base64(fields[1], &command.first) &&
                 DecodeUtf8Base64(fields[2], &command.second)) {
                 command.kind = CommandKind::ReplaceSelection;
+            } else if (fields[0] == L"PATCH_TEXT" &&
+                (fields.size() == 5 || fields.size() == 6) &&
+                fields[1] == L"CURRENT" &&
+                ParseBoolean(fields[2], &command.hasExpectedText) &&
+                DecodeUtf8Base64(fields[3], &command.first) &&
+                DecodeUtf8Base64(fields[4], &command.second) &&
+                (command.hasExpectedText || command.first.empty()) &&
+                (fields.size() == 5 ||
+                 ParseBoolean(fields[5], &command.preserveFormat))) {
+                command.kind = CommandKind::TextPatch;
+                command.name = fields[1];
+            } else if (fields[0] == L"PATCH_TEXT" &&
+                (fields.size() == 10 || fields.size() == 11) &&
+                fields[1] == L"RANGE" &&
+                ParseLong(fields[2], &command.list) &&
+                ParseLong(fields[3], &command.paragraph) &&
+                ParseLong(fields[4], &command.character) &&
+                ParseLong(fields[5], &command.endList) &&
+                ParseLong(fields[6], &command.endParagraph) &&
+                ParseLong(fields[7], &command.endCharacter) &&
+                DecodeUtf8Base64(fields[8], &command.first) && !command.first.empty() &&
+                DecodeUtf8Base64(fields[9], &command.second) &&
+                (fields.size() == 10 ||
+                 ParseBoolean(fields[10], &command.preserveFormat))) {
+                command.kind = CommandKind::TextPatch;
+                command.name = fields[1];
+                command.hasExpectedText = true;
+            } else if (fields[0] == L"PATCH_TEXT" &&
+                (fields.size() == 6 || fields.size() == 7) &&
+                fields[1] == L"FIND" &&
+                ParseLong(fields[2], &command.occurrence) &&
+                ParseBoolean(fields[3], &command.matchCase) &&
+                DecodeUtf8Base64(fields[4], &command.first) && !command.first.empty() &&
+                DecodeUtf8Base64(fields[5], &command.second) &&
+                (fields.size() == 6 ||
+                 ParseBoolean(fields[6], &command.preserveFormat))) {
+                command.kind = CommandKind::TextPatch;
+                command.name = fields[1];
+                command.hasExpectedText = true;
+            } else if (fields[0] == L"PATCH_TEXT" &&
+                (fields.size() == 8 || fields.size() == 9) &&
+                fields[1] == L"CELL" &&
+                DecodeUtf8Base64(fields[2], &command.tableInstanceId) &&
+                !command.tableInstanceId.empty() && !fields[3].empty() &&
+                ParseLong(fields[4], &command.occurrence) &&
+                ParseBoolean(fields[5], &command.matchCase) &&
+                DecodeUtf8Base64(fields[6], &command.first) && !command.first.empty() &&
+                DecodeUtf8Base64(fields[7], &command.second) &&
+                (fields.size() == 8 ||
+                 ParseBoolean(fields[8], &command.preserveFormat))) {
+                command.kind = CommandKind::TextPatch;
+                command.name = fields[1];
+                command.cellAddress = fields[3];
+                command.hasExpectedText = true;
             } else if (fields[0] == L"INSERT_PICTURE" &&
                 (fields.size() == 2 || fields.size() == 4) &&
                 DecodeUtf8Base64(fields[1], &command.first) && !command.first.empty()) {
@@ -380,6 +434,14 @@ bool ParseRequest(
             } else if (fields[0] == L"CELL" && fields.size() == 2 && !fields[1].empty()) {
                 command.kind = CommandKind::Cell;
                 command.first = fields[1];
+            } else if (fields[0] == L"SET_CELL_TEXT" && fields.size() == 5 &&
+                !fields[1].empty() &&
+                DecodeUtf8Base64(fields[2], &command.expectedText) &&
+                DecodeUtf8Base64(fields[3], &command.second) &&
+                ParseBoolean(fields[4], &command.preserveFormat)) {
+                command.kind = CommandKind::SetCellText;
+                command.first = fields[1];
+                command.hasExpectedText = true;
             } else if (fields[0] == L"SET_CELL_TEXT" && fields.size() == 3 &&
                 !fields[1].empty() && DecodeUtf8Base64(fields[2], &command.second)) {
                 command.kind = CommandKind::SetCellText;
@@ -471,7 +533,7 @@ bool ParseRequest(
                         const auto array = arrays.find(value.name);
                         if (array == arrays.end() ||
                             !ParseLong(item[2], &value.index) ||
-                            value.index < 1 || value.index > array->second ||
+                            value.index < 0 || value.index >= array->second ||
                             !ParseValue(item, 3, &value.value) ||
                             (value.value.kind == ValueKind::Enumeration && item.size() != 6) ||
                             (value.value.kind != ValueKind::Enumeration && item.size() != 5)) {

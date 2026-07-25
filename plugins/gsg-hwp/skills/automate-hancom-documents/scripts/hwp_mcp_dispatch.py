@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import asyncio
+import asyncio  # noqa: F401 -- # noqa: ANYIO_OK (concurrent Future bridge)
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from threading import Event, Lock
 from typing import ParamSpec, TypeVar, final
+
+import anyio
 
 from hwp_errors import HwpLiveError
 
@@ -62,6 +64,23 @@ class McpThreadDispatcher:
     async def run(self, operation: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
         future = self._submit_operation(partial(operation, *args, **kwargs))
         return await asyncio.wrap_future(future)
+
+    async def run_mutation(
+        self,
+        operation: Callable[P, T],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> T:
+        future = self._submit_operation(partial(operation, *args, **kwargs))
+        wrapped = asyncio.wrap_future(future)
+        try:
+            return await asyncio.shield(wrapped)
+        except asyncio.CancelledError:
+            if future.cancel():
+                raise
+            with anyio.CancelScope(shield=True):
+                _ = await asyncio.shield(wrapped)
+            return wrapped.result()
 
     async def watch(
         self,

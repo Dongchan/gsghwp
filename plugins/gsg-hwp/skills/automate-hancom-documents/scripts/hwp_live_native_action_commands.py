@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +187,20 @@ class ReplaceSelectionCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class TextPatchCommand:
+    target: Literal["current", "range", "find", "table_cell"]
+    expected_text: str | None
+    replacement: str
+    start: NativePosition | None = None
+    end: NativePosition | None = None
+    occurrence: int | None = None
+    match_case: bool = False
+    table_instance_id: str | None = None
+    cell_address: str | None = None
+    preserve_format: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class InsertPictureCommand:
     path: Path
     width_mm: float | None = None
@@ -201,6 +216,8 @@ class CellCommand:
 class SetCellTextCommand:
     address: str
     text: str
+    expected_text: str | None = None
+    preserve_style: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +257,7 @@ type NativeActionCommand = (
     | DeleteTailCommand
     | InsertTextCommand
     | ReplaceSelectionCommand
+    | TextPatchCommand
     | InsertPictureCommand
     | CellCommand
     | SetCellTextCommand

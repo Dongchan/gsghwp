@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-from contextlib import suppress
+# noqa: E501  # noqa: SIZE_OK — all COM-dispatched operation entry points share one connection boundary.
+
 from typing import final
 
+from anyio import to_thread
+
 from hwp_errors import HwpLiveError
+from hwp_layout_preflight import LayoutPreflightResult
 from hwp_live_bridge import HancomBridge
 from hwp_live_contract import (
     ConnectedDocument,
     DocumentStyleList,
+    LayoutPlan,
     LiveContext,
-    MutationResult,
-    OpenDocument,
     PreviewResult,
 )
 from hwp_live_native_action_contract import NativeActionFailure
-from hwp_live_session_candidate import select_operation_document
 from hwp_live_structure_contract import DocumentStructure, FastPageInspection
 from hwp_mcp_dispatch import McpThreadDispatcher
 from hwp_mcp_result_envelope import transport_error_result
@@ -22,11 +24,61 @@ from hwp_native_failure_result import native_action_failure_result
 from hwp_operation_contract import (
     HwpOperateGuards,
     HwpOperateInputs,
+    OperationPosition,
     OperationResult,
+    TextMatchCandidate,
     canonical_workflow,
 )
 from hwp_operation_idempotency import OperationIdempotency, OperationTicket
 from hwp_operation_journal import OperationJournal
+from hwp_operation_registry import operation_registry
+from hwp_operation_verification import enforce_operation_verification
+from hwp_live_text_patch_contract import TextPatchRequest, TextPatchTarget
+
+
+def _text_match_candidates(
+    encoded: str,
+    matched_text: str,
+) -> tuple[TextMatchCandidate, ...]:
+    candidates: list[TextMatchCandidate] = []
+    for occurrence, item in enumerate(encoded.split("|"), start=1):
+        endpoints = item.split("-")
+        if len(endpoints) != 2:
+            raise HwpLiveError("네이티브 text.patch 후보 범위 형식이 올바르지 않습니다")
+        coordinates: list[tuple[int, int, int]] = []
+        for endpoint in endpoints:
+            fields = endpoint.split(":")
+            if len(fields) != 3:
+                raise HwpLiveError(
+                    "네이티브 text.patch 후보 좌표 형식이 올바르지 않습니다"
+                )
+            try:
+                coordinate = tuple(int(field) for field in fields)
+            except ValueError as error:
+                raise HwpLiveError(
+                    "네이티브 text.patch 후보 좌표가 숫자가 아닙니다"
+                ) from error
+            if len(coordinate) != 3 or min(coordinate) < 0:
+                raise HwpLiveError("네이티브 text.patch 후보 좌표가 올바르지 않습니다")
+            coordinates.append(coordinate)
+        start, end = coordinates
+        candidates.append(
+            TextMatchCandidate(
+                occurrence=occurrence,
+                start=OperationPosition(
+                    list_id=start[0],
+                    paragraph=start[1],
+                    character=start[2],
+                ),
+                end=OperationPosition(
+                    list_id=end[0],
+                    paragraph=end[1],
+                    character=end[2],
+                ),
+                matched_text=matched_text,
+            )
+        )
+    return tuple(candidates)
 
 
 @final
@@ -35,8 +87,6 @@ class HwpOperationExecutor:
         "_bridge",
         "_dispatcher",
         "_idempotency",
-        "operation_document",
-        "operation_session_id",
     )
 
     def __init__(
@@ -50,38 +100,14 @@ class HwpOperationExecutor:
         self._idempotency = OperationIdempotency(
             OperationJournal() if operation_journal is None else operation_journal
         )
-        self.operation_document: OpenDocument | None = None
-        self.operation_session_id: str | None = None
 
     async def ensure_connection(
         self,
         document_selector: str | None,
     ) -> ConnectedDocument:
-        listing = await self._dispatcher.run(self._bridge.list_open_documents)
-        selected = select_operation_document(listing, document_selector)
-        if self.operation_session_id is not None:
-            assert self.operation_document is not None
-            if self.operation_document.selector == selected.selector:
-                self.operation_document = selected
-            else:
-                with suppress(HwpLiveError):
-                    _ = await self._dispatcher.run(
-                        self._bridge.disconnect,
-                        self.operation_session_id,
-                    )
-                self.operation_session_id = None
-                self.operation_document = None
-        if self.operation_session_id is None:
-            connected = await self._dispatcher.run(
-                self._bridge.connect, selected.selector
-            )
-            self.operation_session_id = connected.session_id
-            self.operation_document = connected.document
-        assert self.operation_session_id is not None
-        assert self.operation_document is not None
-        return ConnectedDocument(
-            session_id=self.operation_session_id,
-            document=self.operation_document,
+        return await self._dispatcher.run_mutation(
+            self._bridge.ensure_connection,
+            document_selector,
         )
 
     async def inspect_context(self, document_selector: str | None) -> LiveContext:
@@ -91,22 +117,234 @@ class HwpOperationExecutor:
             connected.session_id,
         )
 
-    async def replace_selected_text(
+    async def preflight_layout(
         self,
         document_selector: str | None,
-        replacement: str,
-    ) -> MutationResult:
+        plan: LayoutPlan,
+    ) -> LayoutPreflightResult:
         connected = await self.ensure_connection(document_selector)
-        context = await self._dispatcher.run(
-            self._bridge.context,
-            connected.session_id,
-        )
         return await self._dispatcher.run(
-            self._bridge.replace_selection,
+            self._bridge.preflight_layout,
             connected.session_id,
-            context.selection,
-            context.selected_text,
-            replacement,
+            plan,
+        )
+
+    async def replace_selected_text(
+        self,
+        intent: str,
+        inputs: HwpOperateInputs,
+        replacement: str,
+    ) -> OperationResult:
+        try:
+            connected = await self.ensure_connection(inputs.document)
+            context = await self._dispatcher.run(
+                self._bridge.context,
+                connected.session_id,
+            )
+        except HwpLiveError as error:
+            return transport_error_result(
+                inputs,
+                error,
+                intent=intent,
+                mutation_started=False,
+            )
+        if not context.selection.selected:
+            return OperationResult(
+                request_id=inputs.request_id,
+                status="needs_input",
+                query=intent,
+                registry_entries=operation_registry().count,
+                lookup_microseconds=0,
+                required_inputs=("inputs.target",),
+                message="현재 선택된 본문 범위가 없습니다",
+                verified=False,
+                partial_mutation=False,
+                retry_safe=True,
+            )
+        return await self.patch_text(
+            intent,
+            inputs,
+            TextPatchRequest(
+                target=TextPatchTarget(kind="current"),
+                expected_text=context.selected_text,
+                replacement=replacement,
+            ),
+        )
+
+    async def patch_text(
+        self,
+        intent: str,
+        inputs: HwpOperateInputs,
+        request: TextPatchRequest,
+    ) -> OperationResult:
+        if request.target.kind != "current" and request.expected_text is None:
+            return OperationResult(
+                request_id=inputs.request_id,
+                status="schema_conflict",
+                query=intent,
+                registry_entries=operation_registry().count,
+                lookup_microseconds=0,
+                message="범위·검색·표 셀 text.patch에는 확인할 기존 텍스트가 필요합니다",
+                verified=False,
+                partial_mutation=False,
+                retry_safe=True,
+            )
+        if (
+            request.target.kind == "current"
+            and request.expected_text is None
+            and not request.replacement
+        ):
+            return OperationResult(
+                request_id=inputs.request_id,
+                status="schema_conflict",
+                query=intent,
+                registry_entries=operation_registry().count,
+                lookup_microseconds=0,
+                message="선택이 없는 현재 커서에는 빈 문자열을 삽입할 수 없습니다",
+                verified=False,
+                partial_mutation=False,
+                retry_safe=True,
+            )
+        try:
+            connected = await self.ensure_connection(inputs.document)
+        except HwpLiveError as error:
+            return transport_error_result(
+                inputs,
+                error,
+                intent=intent,
+                mutation_started=False,
+            )
+        prepared = await to_thread.run_sync(
+            self._idempotency.prepare,
+            connected.document,
+            intent,
+            inputs,
+            None,
+        )
+        if isinstance(prepared, OperationResult):
+            return prepared
+        ticket: OperationTicket | None = prepared
+
+        def execute_started_patch() -> OperationResult:
+            try:
+                patched = self._bridge.patch_text(connected.session_id, request)
+                before = patched.before
+                after = patched.after
+                result = OperationResult(
+                    request_id=inputs.request_id,
+                    status="executed",
+                    changed=True,
+                    query=intent,
+                    registry_entries=operation_registry().count,
+                    lookup_microseconds=0,
+                    message="본문 text.patch를 적용하고 변경 범위와 서식을 다시 읽어 검증했습니다",
+                    execution_mode="native_in_process",
+                    native_protocol=11,
+                    verification="native_operation_specific_readback",
+                    verified=True,
+                    commands_executed=patched.native.commands_executed,
+                    native_actions_executed=patched.native.actions_executed,
+                    native_elapsed_microseconds=patched.native.elapsed_microseconds,
+                    current_page=after.current_page,
+                    page_count=after.page_count,
+                    modified=after.modified,
+                    partial_mutation=False,
+                    retry_safe=True,
+                    commands_completed=patched.native.commands_executed,
+                    cursor_before=OperationPosition(
+                        list_id=before.cursor.list_id,
+                        paragraph=before.cursor.paragraph,
+                        character=before.cursor.character,
+                    ),
+                    cursor_after=OperationPosition(
+                        list_id=after.cursor.list_id,
+                        paragraph=after.cursor.paragraph,
+                        character=after.cursor.character,
+                    ),
+                )
+            except NativeActionFailure as failure:
+                if failure.code == "AMBIGUOUS_TEXT_MATCH":
+                    result = OperationResult(
+                        request_id=inputs.request_id,
+                        status="ambiguous",
+                        query=intent,
+                        registry_entries=operation_registry().count,
+                        lookup_microseconds=0,
+                        text_candidates=_text_match_candidates(
+                            failure.location,
+                            ""
+                            if request.expected_text is None
+                            else request.expected_text,
+                        ),
+                        message="일치하는 본문이 여러 개여서 변경하지 않았습니다. occurrence를 지정하세요",
+                        execution_mode="native_in_process",
+                        native_protocol=11,
+                        verification="native_operation_specific_readback",
+                        verified=False,
+                        commands_executed=0,
+                        partial_mutation=False,
+                        retry_safe=True,
+                        commands_completed=0,
+                    )
+                elif failure.code in {
+                    "TEXT_NOT_FOUND",
+                    "TEXT_OCCURRENCE_NOT_FOUND",
+                }:
+                    result = OperationResult(
+                        request_id=inputs.request_id,
+                        status="not_found",
+                        query=intent,
+                        registry_entries=operation_registry().count,
+                        lookup_microseconds=0,
+                        message=str(failure),
+                        execution_mode="native_in_process",
+                        native_protocol=11,
+                        verification="native_operation_specific_readback",
+                        verified=False,
+                        commands_executed=0,
+                        partial_mutation=False,
+                        retry_safe=True,
+                        commands_completed=0,
+                    )
+                else:
+                    result = native_action_failure_result(intent, failure).model_copy(
+                        update={
+                            "request_id": inputs.request_id,
+                            "native_protocol": 11,
+                        }
+                    )
+            except HwpLiveError as error:
+                result = transport_error_result(inputs, error, intent=intent)
+            return self._idempotency.commit(
+                ticket,
+                enforce_operation_verification(canonical_workflow(inputs), result),
+            )
+
+        async with self._idempotency.execution(ticket):
+            return await self._dispatcher.run_mutation(execute_started_patch)
+
+    async def get_operation_status(
+        self,
+        operation_id: str,
+        document_selector: str | None,
+    ) -> OperationResult:
+        inputs = HwpOperateInputs(
+            request_id=operation_id,
+            document=document_selector,
+        )
+        try:
+            connected = await self.ensure_connection(document_selector)
+        except HwpLiveError as error:
+            return transport_error_result(
+                inputs,
+                error,
+                intent="operation status",
+                mutation_started=False,
+            )
+        return await to_thread.run_sync(
+            self._idempotency.status,
+            connected.document,
+            operation_id,
         )
 
     async def inspect_styles(
@@ -180,7 +418,7 @@ class HwpOperationExecutor:
                 guards.cursor.character,
             )
         try:
-            _ = await self.ensure_connection(inputs.document)
+            connected = await self.ensure_connection(inputs.document)
         except HwpLiveError as error:
             return transport_error_result(
                 inputs,
@@ -188,23 +426,18 @@ class HwpOperationExecutor:
                 intent=intent,
                 mutation_started=False,
             )
-        assert self.operation_session_id is not None
-        assert self.operation_document is not None
-        prepared = self._idempotency.prepare(
-            self.operation_document,
-            intent,
-            inputs,
-            guards,
+        prepared = await to_thread.run_sync(
+            self._idempotency.prepare, connected.document, intent, inputs, guards
         )
         if isinstance(prepared, OperationResult):
             return prepared
         ticket: OperationTicket | None = prepared
         reconcile = ticket is not None and ticket.action == "reconcile"
-        with self._idempotency.execution(ticket):
+
+        def execute_started_mutation() -> OperationResult:
             try:
-                result = await self._dispatcher.run(
-                    self._bridge.operate,
-                    self.operation_session_id,
+                result = self._bridge.operate(
+                    connected.session_id,
                     intent,
                     inputs.parameters,
                     resolve_only=reconcile,
@@ -224,7 +457,13 @@ class HwpOperationExecutor:
                 result = native_action_failure_result(intent, failure)
             except HwpLiveError as error:
                 result = transport_error_result(inputs, error, intent=intent)
-        return self._idempotency.commit(
-            ticket,
-            result.model_copy(update={"request_id": inputs.request_id}),
-        )
+            result = enforce_operation_verification(canonical_workflow(inputs), result)
+            return self._idempotency.commit(
+                ticket,
+                result.model_copy(update={"request_id": inputs.request_id}),
+            )
+
+        async with self._idempotency.execution(ticket):
+            return await self._dispatcher.run_mutation(
+                execute_started_mutation,
+            )

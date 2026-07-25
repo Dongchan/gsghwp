@@ -27,8 +27,10 @@ from hwp_live_native_batch_contract import (
     NativeBatchRequest,
     NativeBatchResult,
     NativeLifecycleResult,
+    NativeSaveResult,
     decode_batch_result,
     decode_lifecycle_result,
+    decode_save_result,
     encode_batch_request,
 )
 
@@ -60,8 +62,22 @@ class _DispatchSource(Protocol):
     def QueryInterface(self, interface_id: object) -> object: ...
 
 
+_document_routes: dict[int, int] = {}
+
+
+def select_native_document_route(window_handle: int, document_id: int) -> None:
+    if window_handle <= 0 or document_id <= 0:
+        raise ValueError("한컴 네이티브 문서 라우팅 값은 양수여야 합니다")
+    _document_routes[window_handle] = document_id
+
+
+def clear_native_document_route(window_handle: int) -> None:
+    _ = _document_routes.pop(window_handle, None)
+
+
 class _BatchDispatch(Protocol):
     ProtocolVersion: int
+    TargetDocumentID: int
 
     def Execute(self, payload: str) -> str: ...
 
@@ -84,6 +100,36 @@ class _BatchDispatch(Protocol):
     def ProbeOfficialApi(self, payload: str) -> str: ...
 
     def SaveReopenVerify(self) -> str: ...
+
+    def SaveVerify(self) -> str: ...
+
+    def ActivateDocument(self, document_id: int) -> str: ...
+
+    def ActivationStatus(self, document_id: int) -> int: ...
+
+
+class _EventHandle(Protocol):
+    def Close(self) -> None: ...
+
+
+@runtime_checkable
+class _Win32Event(Protocol):
+    WAIT_OBJECT_0: int
+    WAIT_TIMEOUT: int
+
+    def OpenEvent(
+        self,
+        desired_access: int,
+        inherit_handle: bool,
+        name: str,
+    ) -> _EventHandle: ...
+
+    def WaitForMultipleObjects(
+        self,
+        handles: tuple[_EventHandle, ...],
+        wait_all: bool,
+        milliseconds: int,
+    ) -> int: ...
 
 
 @runtime_checkable
@@ -135,18 +181,100 @@ def _source_for_window(
         return None
     if process_id <= 0:
         return None
-    expected_name = f"!HancomLiveBatch.{process_id}"
+    document_id = _document_routes.get(window_handle)
+    document_name = (
+        None
+        if document_id is None
+        else f"!HancomLiveBatch.{process_id}.{window_handle}.{document_id}"
+    )
+    window_name = f"!HancomLiveBatch.{process_id}.{window_handle}"
+    legacy_name = f"!HancomLiveBatch.{process_id}"
     context = pythoncom.CreateBindCtx(0)
     rot = pythoncom.GetRunningObjectTable()
+    window_moniker: _Moniker | None = None
+    legacy_moniker: _Moniker | None = None
     for moniker in rot.EnumRunning():
-        if moniker.GetDisplayName(context, moniker) == expected_name:
+        display_name = moniker.GetDisplayName(context, moniker)
+        if document_name is not None and display_name == document_name:
             return rot.GetObject(moniker)
+        if display_name == window_name:
+            window_moniker = moniker
+        if display_name == legacy_name:
+            legacy_moniker = moniker
+    if window_moniker is not None:
+        return rot.GetObject(window_moniker)
+    if legacy_moniker is not None:
+        return rot.GetObject(legacy_moniker)
     return None
 
 
 def native_batch_available(window_handle: int) -> bool:
     with _com_apartment() as (pythoncom, _, process):
         return _source_for_window(window_handle, pythoncom, process) is not None
+
+
+def activate_native_document(window_handle: int, document_id: int) -> bool:
+    select_native_document_route(window_handle, document_id)
+    with _com_apartment() as modules:
+        batch = _batch_for_window(window_handle, 12, *modules)
+        if batch is None:
+            return False
+        try:
+            token = str(batch.ActivateDocument(document_id))
+            if not token:
+                return False
+            event_module = import_module("win32event")
+            if not isinstance(event_module, _Win32Event):
+                raise HwpLiveError("Windows 이벤트 대기 런타임을 찾을 수 없습니다")
+            success = event_module.OpenEvent(
+                0x00100000,
+                False,
+                token + ".Success",
+            )
+            failure = event_module.OpenEvent(
+                0x00100000,
+                False,
+                token + ".Failure",
+            )
+            try:
+                waited = event_module.WaitForMultipleObjects(
+                    (success, failure),
+                    False,
+                    45_000,
+                )
+                if waited == event_module.WAIT_OBJECT_0:
+                    return True
+                if waited == event_module.WAIT_OBJECT_0 + 1:
+                    activation = int(batch.ActivationStatus(document_id))
+                    raise HwpLiveError(
+                        "한컴 네이티브 문서 탭 전환이 실패했습니다"
+                        + f" (HRESULT 0x{activation & 0xFFFFFFFF:08X})"
+                    )
+                if waited == event_module.WAIT_TIMEOUT:
+                    raise HwpLiveError(
+                        "한컴 네이티브 문서 탭 전환 제한시간을 초과했습니다"
+                        + "; worker_isolation_required=true"
+                        + "; reconcile_required=false; retry_safe=true"
+                    )
+                raise HwpLiveError(
+                    f"한컴 네이티브 문서 탭 전환 대기 결과가 올바르지 않습니다 ({waited})"
+                )
+            finally:
+                failure.Close()
+                success.Close()
+        except (
+            AttributeError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            com_error,
+        ) as error:
+            raise HwpLiveError(
+                "한컴 네이티브 문서 탭 전환에 실패했습니다"
+            ) from error
+        finally:
+            batch = None
 
 
 def _batch_for_window(
@@ -163,6 +291,15 @@ def _batch_for_window(
         batch = client.Dispatch(source.QueryInterface(pythoncom.IID_IDispatch))
         if int(batch.ProtocolVersion) < minimum_version:
             raise HwpLiveError("한컴 네이티브 실시간 프로토콜 버전이 낮습니다")
+        document_id = _document_routes.get(window_handle)
+        target_document_id = int(batch.TargetDocumentID)
+        if (
+            document_id is not None
+            and target_document_id not in (0, document_id)
+        ):
+            raise HwpLiveError(
+                "한컴 네이티브 라우팅 문서 ID가 대상과 다릅니다"
+            )
     except HwpLiveError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
@@ -209,6 +346,27 @@ def execute_native_lifecycle(window_handle: int) -> NativeLifecycleResult | None
         finally:
             batch = None
         return decode_lifecycle_result(str(response))
+
+
+def execute_native_save(window_handle: int) -> NativeSaveResult | None:
+    with _com_apartment() as modules:
+        batch = _batch_for_window(window_handle, 12, *modules)
+        if batch is None:
+            return None
+        try:
+            response = batch.SaveVerify()
+        except (
+            AttributeError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            com_error,
+        ) as error:
+            raise HwpLiveError("한컴 네이티브 일반 저장 검증 실행에 실패했습니다") from error
+        finally:
+            batch = None
+        return decode_save_result(str(response))
 
 
 def read_native_snapshot(window_handle: int) -> NativeSnapshot | None:

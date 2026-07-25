@@ -33,6 +33,14 @@ from hwp_live_native_text_format import (
     style_command,
 )
 from hwp_live_table_contract import TableBlock
+from hwp_reference_layout_contract import ReferenceLayoutBlock
+from hwp_reference_layout_evidence import prepare_reference_layout
+from hwp_reference_layout_geometry import SectionPageGeometry
+from hwp_reference_layout_native import compile_reference_layout_command
+from hwp_reference_layout_patch import (
+    ReferenceLayoutPatchBlock,
+    compile_reference_layout_patch_command,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +53,9 @@ class NativeLayoutContext:
     ] = ()
     caption_format_sources: tuple[tuple[str, NativePosition], ...] = ()
     page_count: int | None = None
+    page_geometry: SectionPageGeometry | None = None
+    page_number: int = 1
+    base_style_id: int = 0
     expected_cursor: NativePosition | None = None
     expected_selection: NativeSelection | None = None
 
@@ -93,6 +104,7 @@ def build_native_layout_request(
         for name, character, paragraph in context.text_formats
     }
     caption_format_sources = dict(context.caption_format_sources)
+    layout_page_number = context.page_number
     for block_index, block in enumerate(plan.blocks):
         match block:
             case ParagraphBlock():
@@ -126,6 +138,29 @@ def build_native_layout_request(
                         styles,
                         text_formats,
                         caption_format_sources,
+                    )
+                )
+                continue
+            case ReferenceLayoutBlock():
+                if context.page_geometry is None:
+                    raise HwpLiveError("참조 이미지 레이아웃에는 현재 구역 용지 정보가 필요합니다")
+                commands.append(
+                    compile_reference_layout_command(
+                        prepare_reference_layout(block),
+                        context.page_geometry,
+                        page_number=layout_page_number,
+                        base_style_id=context.base_style_id,
+                    )
+                )
+                continue
+            case ReferenceLayoutPatchBlock():
+                if context.page_geometry is None:
+                    raise HwpLiveError("참조 이미지 부분 보정에는 현재 구역 용지 정보가 필요합니다")
+                commands.append(
+                    compile_reference_layout_patch_command(
+                        block,
+                        context.page_geometry,
+                        page_number=context.page_number,
                     )
                 )
                 continue
@@ -166,6 +201,7 @@ def build_native_layout_request(
                 continue
             case PageBreakBlock():
                 commands.append(RunCommand("BreakPage"))
+                layout_page_number += 1
                 continue
         assert_never(block)
     return NativeActionRequest(

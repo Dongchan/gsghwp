@@ -42,7 +42,8 @@ if ($null -eq $uv) {
 $previousEnvironment = $env:UV_PROJECT_ENVIRONMENT
 try {
     $env:UV_PROJECT_ENVIRONMENT = $paths.RuntimeEnvironment
-    & $uv.Source sync --locked --no-dev --no-install-project --project $pluginRoot
+    & $uv.Source sync --managed-python --locked --no-dev --no-install-project `
+        --project $pluginRoot
     if ($LASTEXITCODE -ne 0) {
         throw "잠금 파일에 맞춘 Python 런타임 설치에 실패했습니다."
     }
@@ -63,4 +64,6 @@ Write-Host "설치 완료"
 Write-Host "  복구 백업: $($result.BackupFile)"
 Write-Host "  설치 네이티브 DLL: $($result.NativeDll)"
 Write-Host "  설치 파일 경로 보안 DLL: $($result.SecurityDll)"
+Write-Host "  전용 uv 관리 Python 3.12 환경: $($paths.RuntimeEnvironment)"
+Write-Host "  자동 업데이트: GitHub Release를 6시간 간격으로 확인하고 한/글 종료 시 적용"
 Write-Host "한/글과 Codex를 다시 시작한 뒤 새 작업에서 플러그인을 사용하세요."

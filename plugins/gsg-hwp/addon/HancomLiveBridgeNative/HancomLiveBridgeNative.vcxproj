@@ -70,6 +70,9 @@
     <ClCompile Include="OfficialApiProbe.cpp" />
     <ClCompile Include="OfficialApiAutomationProbe.cpp" />
     <ClCompile Include="OfficialApiAutomationOwner.cpp" />
+    <ClCompile Include="OfficialApiParameterArray.cpp" />
+    <ClCompile Include="OfficialApiParameterArrayWriter.cpp" />
+    <ClCompile Include="OfficialApiVirtualMethod.cpp" />
     <ClCompile Include="OfficialApiAutomationArguments.cpp" />
     <ClCompile Include="OfficialApiAutomationInvoke.cpp" />
     <ClCompile Include="OfficialApiFixture.cpp" />
@@ -77,6 +80,14 @@
     <ClCompile Include="OfficialApiState.cpp" />
     <ClCompile Include="OfficialApiVariant.cpp" />
     <ClCompile Include="ParagraphFormatting.cpp" />
+    <ClCompile Include="ReferenceLayoutPayloadArrays.cpp" />
+    <ClCompile Include="ReferenceLayoutGapSpec.cpp" />
+    <ClCompile Include="ReferenceLayoutSpec.cpp" />
+    <ClCompile Include="ReferenceLayoutSpecSetters.cpp" />
+    <ClCompile Include="ReferenceLayoutCommands.cpp" />
+    <ClCompile Include="ReferenceLayoutExecutor.cpp" />
+    <ClCompile Include="ReferenceLayoutStyleCommands.cpp" />
+    <ClCompile Include="ReferenceLayoutValidation.cpp" />
     <ClCompile Include="TableInspection.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -93,6 +104,8 @@
     <ClInclude Include="OfficialApiProbe.h" />
     <ClInclude Include="OfficialApiAutomationProbe.h" />
     <ClInclude Include="OfficialApiAutomationOwner.h" />
+    <ClInclude Include="OfficialApiParameterArray.h" />
+    <ClInclude Include="OfficialApiVirtualMethod.h" />
     <ClInclude Include="OfficialApiAutomationArguments.h" />
     <ClInclude Include="OfficialApiAutomationInvoke.h" />
     <ClInclude Include="OfficialApiFixture.h" />
@@ -100,6 +113,12 @@
     <ClInclude Include="OfficialApiState.h" />
     <ClInclude Include="OfficialApiVariant.h" />
     <ClInclude Include="ParagraphFormatting.h" />
+    <ClInclude Include="ReferenceLayoutPayloadArrays.h" />
+    <ClInclude Include="ReferenceLayoutGapSpec.h" />
+    <ClInclude Include="ReferenceLayoutSpec.h" />
+    <ClInclude Include="ReferenceLayoutSpecSetters.h" />
+    <ClInclude Include="ReferenceLayoutCommands.h" />
+    <ClInclude Include="ReferenceLayoutExecutor.h" />
     <ClInclude Include="TableInspection.h" />
   </ItemGroup>
   <ItemGroup>

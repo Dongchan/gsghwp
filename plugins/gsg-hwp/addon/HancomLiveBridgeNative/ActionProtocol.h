@@ -46,6 +46,7 @@ enum class CommandKind {
     DeleteTail,
     InsertText,
     ReplaceSelection,
+    TextPatch,
     InsertPicture,
     Cell,
     SetCellText,
@@ -65,6 +66,10 @@ struct Command {
     LONG list = 0;
     LONG paragraph = 0;
     LONG character = 0;
+    LONG endList = 0;
+    LONG endParagraph = 0;
+    LONG endCharacter = 0;
+    LONG occurrence = 0;
     LONG page = 0;
     LONG styleId = -1;
     bool hasCaptionFormat = false;
@@ -84,10 +89,16 @@ struct Command {
     LONG captionFormatSourceParagraph = 0;
     LONG captionFormatSourceCharacter = 0;
     bool hasPictureBox = false;
+    bool hasExpectedText = false;
+    bool matchCase = false;
+    bool preserveFormat = false;
     double pictureWidthMm = 0.0;
     double pictureHeightMm = 0.0;
     std::wstring first;
     std::wstring second;
+    std::wstring expectedText;
+    std::wstring tableInstanceId;
+    std::wstring cellAddress;
 };
 
 struct Request {

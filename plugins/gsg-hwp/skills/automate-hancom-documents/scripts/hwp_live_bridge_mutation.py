@@ -24,6 +24,7 @@ from hwp_live_workflow import (
     TablePropagationResult,
 )
 from hwp_office_table import OfficeTableSource
+from hwp_live_text_patch_contract import TextPatchRequest, TextPatchResult
 
 
 class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
@@ -42,7 +43,18 @@ class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
                 expected_selection,
                 expected_text,
                 replacement,
-            )
+            ),
+            session_id=session_id,
+        )
+
+    def patch_text(
+        self,
+        session_id: str,
+        request: TextPatchRequest,
+    ) -> TextPatchResult:
+        return self._call_mutation(
+            lambda: self._bridge_controller().patch_text(session_id, request),
+            session_id=session_id,
         )
 
     def apply_layout(
@@ -58,7 +70,8 @@ class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
                 plan,
                 expected_cursor,
                 expected_selected_text,
-            )
+            ),
+            session_id=session_id,
         )
 
     def update_table_cells(
@@ -74,7 +87,8 @@ class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
                 table_ref,
                 state_token,
                 updates,
-            )
+            ),
+            session_id=session_id,
         )
 
     def insert_table_images(
@@ -90,7 +104,8 @@ class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
                 table_ref,
                 state_token,
                 images,
-            )
+            ),
+            session_id=session_id,
         )
 
     def repeat_table_template(
@@ -99,7 +114,8 @@ class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
         plan: TableTemplateRepeatPlan,
     ) -> TableTemplateRepeatResult:
         return self._call_mutation(
-            lambda: self._bridge_controller().repeat_table_template(session_id, plan)
+            lambda: self._bridge_controller().repeat_table_template(session_id, plan),
+            session_id=session_id,
         )
 
     def import_office_table(
@@ -119,7 +135,8 @@ class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
                 state_token,
                 source,
                 target_start,
-            )
+            ),
+            session_id=session_id,
         )
 
     def propagate_table_cells(
@@ -128,7 +145,8 @@ class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
         plan: TablePropagationPlan,
     ) -> TablePropagationResult:
         return self._call_mutation(
-            lambda: self._bridge_controller().propagate_table_cells(session_id, plan)
+            lambda: self._bridge_controller().propagate_table_cells(session_id, plan),
+            session_id=session_id,
         )
 
     def insert_folder_images(
@@ -137,5 +155,6 @@ class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
         plan: FolderImagePlan,
     ) -> FolderImageResult:
         return self._call_mutation(
-            lambda: self._bridge_controller().insert_folder_images(session_id, plan)
+            lambda: self._bridge_controller().insert_folder_images(session_id, plan),
+            session_id=session_id,
         )

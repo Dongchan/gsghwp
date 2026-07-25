@@ -35,6 +35,7 @@ from hwp_live_native_action_commands import (
     SaveDocumentFileCommand as SaveDocumentFileCommand,
     SelectControlCommand as SelectControlCommand,
     SetCellTextCommand as SetCellTextCommand,
+    TextPatchCommand as TextPatchCommand,
     TextValue as TextValue,
 )
 from hwp_live_native_action_results import (

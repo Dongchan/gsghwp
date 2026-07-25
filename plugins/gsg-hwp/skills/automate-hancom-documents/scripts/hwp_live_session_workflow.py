@@ -19,56 +19,34 @@ from hwp_operation_contract import (
     OperationStatus,
     WorkflowResolution,
 )
+from hwp_operation_descriptor import operation_descriptors
 from hwp_operation_registry import operation_registry
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
 
 
-WORKFLOW_REQUIRED_INPUTS: Mapping[HwpWorkflowId, tuple[str, ...]] = {
-    "document.append_layout": ("inputs.layout",),
-    "document.insert_layout": ("inputs.layout",),
+_LEGACY_WORKFLOW_REQUIRED_INPUTS: Mapping[HwpWorkflowId, tuple[str, ...]] = {
     "document.insert_page": ("inputs.target", "inputs.layout"),
-    "document.delete_page": ("inputs.target",),
-    "control.delete": ("inputs.target",),
     "document.rebuild": ("inputs.layout",),
-    "document.replace_selection": ("inputs.target", "inputs.data"),
-    "text.insert": ("inputs.target", "inputs.data"),
-    "text.replace": ("inputs.target", "inputs.data"),
-    "text.format": ("inputs.target", "inputs.parameters"),
     "table.inspect": ("inputs.target",),
     "table.create": ("inputs.target", "inputs.layout"),
-    "table.fill_existing": ("inputs.target", "inputs.data"),
-    "table.expand_and_fill": ("inputs.target", "inputs.data"),
-    "table.format": ("inputs.target", "inputs.parameters"),
-    "table.merge_cells": ("inputs.target", "inputs.parameters"),
-    "table.split_cells": ("inputs.target", "inputs.parameters"),
     "table.resize": ("inputs.target", "inputs.data"),
-    "table.repeat_template": ("inputs.recipe",),
     "table.propagate": ("inputs.target", "inputs.data"),
     "table.import_data": ("inputs.target", "inputs.data"),
-    "table.insert_images": ("inputs.target", "inputs.assets"),
-    "table.build_series": ("inputs.recipe",),
-    "image.insert": ("inputs.assets",),
-    "image.replace": ("inputs.target", "inputs.assets"),
     "image.resize": ("inputs.target", "inputs.data"),
-    "caption.add": ("inputs.target", "inputs.recipe"),
-    "style.apply": ("inputs.recipe",),
-    "style.copy": ("inputs.recipe",),
+}
+
+WORKFLOW_REQUIRED_INPUTS: Mapping[HwpWorkflowId, tuple[str, ...]] = {
+    **_LEGACY_WORKFLOW_REQUIRED_INPUTS,
+    **{
+        descriptor.workflow_id: descriptor.input_schema
+        for descriptor in operation_descriptors()
+    },
 }
 
 _WORKFLOW_TARGET_KINDS: Mapping[HwpWorkflowId, frozenset[str]] = {
-    "document.delete_page": frozenset(("page",)),
-    "control.delete": frozenset(("control",)),
-    "text.format": frozenset(("selection",)),
-    "table.fill_existing": frozenset(("table",)),
-    "table.expand_and_fill": frozenset(("table",)),
-    "table.format": frozenset(("table",)),
-    "table.merge_cells": frozenset(("table",)),
-    "table.split_cells": frozenset(("table",)),
-    "table.repeat_template": frozenset(("table",)),
-    "table.insert_images": frozenset(("table",)),
-    "table.build_series": frozenset(("table",)),
-    "image.replace": frozenset(("picture",)),
-    "caption.add": frozenset(("table", "control")),
+    descriptor.workflow_id: descriptor.target_kinds
+    for descriptor in operation_descriptors()
+    if descriptor.target_kinds
 }
 
 @dataclass(frozen=True, slots=True)

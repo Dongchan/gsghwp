@@ -6,7 +6,7 @@
 
 실제 설치 전에 다음 내용을 사용자에게 분명히 알린다.
 
-1. `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.55\HancomLiveBridge.dll`이 복사 또는 교체된다.
+1. `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.121\HancomLiveBridge.dll`이 복사 또는 교체된다.
 2. `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll`이 복사 또는 교체된다.
 3. HKCU의 다음 세 값이 변경된다.
    - `Software\HNC\HwpUserAction\Modules`
@@ -15,6 +15,9 @@
 4. 기존 DLL 2개와 레지스트리 값의 존재 여부·종류·값은 `%LOCALAPPDATA%\GSG_HWP\backups`에 먼저 저장된다.
 5. `uninstall.ps1 -AcceptChanges`로 설치 전 상태를 복원할 수 있다.
 6. HKLM, `regsvr32`, 관리자 권한은 사용하지 않는다.
+7. 설치 후 MCP 시작 시 6시간 간격으로 공식 GitHub Release를 확인하고, 한/글이 종료된 경우에만 해시 검증된 업데이트의 DLL·HKCU 값을 적용한다.
+8. 각 업데이트 전 직전 상태도 백업되며 `restore-update.ps1 -AcceptChanges`로 직전 버전을 복원할 수 있다.
+9. Python은 시스템 설치본이 아니라 `%LOCALAPPDATA%\GSG_HWP\runtime\<버전>\.venv`의 uv 관리 Python 3.12만 사용한다.
 
 ## 설치 절차
 
@@ -22,7 +25,7 @@
 2. 한/글 프로세스가 실행 중이면 저장을 안내하고 모두 종료한다. 설치 목적으로 사용자의 열린 문서를 수정하거나 테스트 문서를 새로 열지 않는다.
 3. 저장소 루트에서 `install.ps1`을 옵션 없이 실행한다. 종료 코드 2는 변경 없이 미리보기만 마친 정상 결과다.
 4. 위 변경·백업·복원 내용을 안내했고 사용자가 설치를 요청한 상태라면 `install.ps1 -AcceptChanges`를 실행한다.
-5. `uv`가 없다는 오류가 나면 사용자에게 알리고 `winget install --id astral-sh.uv -e`로 설치한 뒤 다시 실행한다. 설치기는 잠금된 `pyhwpx` 환경에서 파일 경로 보안 DLL을 가져와 해시를 검증한다.
+5. `uv`가 없다는 오류가 나면 사용자에게 알리고 `winget install --id astral-sh.uv -e`로 설치한 뒤 다시 실행한다. 설치기는 `uv sync --managed-python`으로 버전별 `.venv`를 만들고, 잠금된 `pyhwpx` 환경에서 파일 경로 보안 DLL을 가져와 해시를 검증한다. 일반 Python이나 개발자의 `.venv`를 사용하지 않는다.
 6. 대상 앱에 맞게 MCP를 등록한다.
 
 ### Codex
@@ -49,6 +52,8 @@ claude mcp add --transport stdio --scope user gsg-hwp -- `
 7. 한/글과 에이전트 앱을 다시 시작하고 새 작업에서 `gsg-hwp` 연결과 `hwp_runtime_info`를 확인한다.
 
 ## 제거와 원상복구
+
+직전 자동 업데이트만 되돌리는 요청이면 한/글을 종료하고 `restore-update.ps1` 미리보기 후 `restore-update.ps1 -AcceptChanges`를 실행한다. 이 작업은 직전 DLL·HKCU·활성 패키지 상태를 복원하며 최초 설치 전 백업은 유지한다.
 
 1. 대상 앱에서 `gsg-hwp` MCP 또는 플러그인을 제거한다.
 2. 한/글을 모두 종료한다.

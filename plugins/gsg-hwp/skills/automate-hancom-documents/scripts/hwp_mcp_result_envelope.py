@@ -175,7 +175,7 @@ def normalize_production_result(
         update={
             "status": status,
             "changed": changed,
-            "verified": status == "executed",
+            "verified": result.verified is True and status == "executed",
             "retry_safe": retryable,
             "request_id": inputs.request_id,
             "selected_operation": workflow,
@@ -197,11 +197,13 @@ def transport_error_result(
     mutation_started: bool = True,
 ) -> OperationResult:
     workflow = canonical_workflow(inputs)
+    reconcile_required = "reconcile_required=true" in error.reason
     return OperationResult(
         status="transport_error",
         changed=mutation_started,
         verified=False,
-        retry_safe=not mutation_started,
+        retry_safe=not mutation_started and not reconcile_required,
+        reconcile_required=reconcile_required,
         request_id=inputs.request_id,
         selected_operation=workflow,
         query=intent or workflow or "hwp_operate",

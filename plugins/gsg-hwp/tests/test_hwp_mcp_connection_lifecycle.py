@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import anyio
+import pytest
 
 
 SCRIPTS = (
@@ -22,7 +23,6 @@ from hwp_live_bridge import HancomBridge  # noqa: E402
 from hwp_live_contract import (  # noqa: E402
     ConnectedDocument,
     OpenDocument,
-    OpenDocumentList,
 )
 from hwp_live_session import LiveHwpController  # noqa: E402
 from hwp_mcp_dispatch import McpThreadDispatcher  # noqa: E402
@@ -31,6 +31,12 @@ from hwp_mcp_operation_executor import HwpOperationExecutor  # noqa: E402
 from hwp_mcp_result_envelope import normalize_production_result  # noqa: E402
 from hwp_operation_contract import HwpOperateInputs, OperationResult  # noqa: E402
 from hwp_public_contract import to_public_action_result  # noqa: E402
+from hwp_session_state_support import (  # noqa: E402
+    ChangeSignal,
+    SessionState,
+    WindowReader,
+    patched_controller,
+)
 
 
 def _document() -> OpenDocument:
@@ -56,18 +62,15 @@ def test_executor_reconnects_when_the_active_document_changes() -> None:
             "title": "second.hwp",
             "full_name": "C:/documents/second.hwp",
             "document_id": 18,
-            "window_handle": 102,
         }
     )
-    first_connection = ConnectedDocument(
-        session_id="first-session",
-        document=first_document,
+    state = SessionState(first_document)
+    signal = ChangeSignal()
+    bridge = HancomBridge(
+        LiveHwpController(),
+        window_reader=WindowReader(first_document.window_handle),
+        change_signal=signal,
     )
-    second_connection = ConnectedDocument(
-        session_id="second-session",
-        document=second_document,
-    )
-    bridge = HancomBridge(LiveHwpController())
     dispatcher = McpThreadDispatcher(watch_workers=1)
     executor = HwpOperationExecutor(bridge, dispatcher, None)
     handler = McpOperationHandler(bridge, dispatcher, executor)
@@ -75,37 +78,24 @@ def test_executor_reconnects_when_the_active_document_changes() -> None:
     async def connect_after_switch() -> tuple[ConnectedDocument, ConnectedDocument]:
         try:
             first = await handler.hwp_connect()
+            state.document = second_document
+            state.fail_disconnect_after_clear = True
+            with pytest.raises(HwpLiveError, match="COM 속성"):
+                _ = await handler.hwp_connect()
+            state.fail_disconnect_after_clear = False
             second = await handler.hwp_connect()
             return first, second
         finally:
             await dispatcher.close(bridge.close)
 
-    with (
-        patch.object(
-            HancomBridge,
-            "list_open_documents",
-            side_effect=(
-                OpenDocumentList(documents=(first_document,)),
-                OpenDocumentList(documents=(second_document,)),
-            ),
-        ),
-        patch.object(
-            HancomBridge,
-            "connect",
-            side_effect=(first_connection, second_connection),
-        ) as native_connect,
-        patch.object(
-            HancomBridge,
-            "disconnect",
-            side_effect=HwpLiveError("닫힌 문서의 이전 세션입니다"),
-        ) as native_disconnect,
-    ):
+    with patched_controller(state):
         first, second = anyio.run(connect_after_switch)
 
-    assert first == first_connection
-    assert second == second_connection
-    assert native_connect.call_count == 2
-    native_disconnect.assert_called_once_with(first_connection.session_id)
+    assert first.session_id == "session-1"
+    assert first.document == first_document
+    assert second.session_id == "session-2"
+    assert second.document == second_document
+    assert state.connect_calls == 2
 
 
 def test_connection_transport_error_is_unchanged_and_retry_safe() -> None:
@@ -122,7 +112,7 @@ def test_connection_transport_error_is_unchanged_and_retry_safe() -> None:
 
     with patch.object(
         HancomBridge,
-        "list_open_documents",
+        "ensure_connection",
         side_effect=HwpLiveError("열린 문서를 확인할 수 없습니다"),
     ):
         result = anyio.run(execute_without_connection)
@@ -164,7 +154,7 @@ def test_dispatcher_serializes_operations_before_the_sta_bridge() -> None:
         try:
             async with anyio.create_task_group() as tasks:
                 for _ in range(6):
-                    tasks.start_soon(dispatcher.run, operation)
+                    _ = tasks.start_soon(dispatcher.run, operation)
         finally:
             await dispatcher.close(lambda: None)
 

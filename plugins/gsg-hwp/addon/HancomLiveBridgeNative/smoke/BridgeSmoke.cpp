@@ -6,6 +6,7 @@
 
 #include "../BridgeStatus.h"
 #include "../TableInspection.h"
+#include "FakeParameterArrayDispatch.h"
 
 #include <algorithm>
 #include <cstring>
@@ -44,6 +45,12 @@ class FakeDispatch final
       public IConnectionPointContainer,
       public IConnectionPoint {
 public:
+    explicit FakeDispatch(
+        const LONG windowHandle = 4242,
+        const LONG documentId = 17)
+        : windowHandle_(windowHandle),
+          documentId_(documentId) {}
+
     enum Member : DISPID {
         XHwpDocuments = 1,
         ActiveDocument = 2,
@@ -106,6 +113,13 @@ public:
         Clear = 59,
         Open = 60,
         DeleteCtrl = 61,
+        HArrayFixture = 62,
+        SelectionMode = 63,
+        XHwpWindows = 64,
+        ActiveWindow = 65,
+        WindowHandle = 66,
+        FindItem = 67,
+        SetActiveDocument = 68,
     };
 
     bool CompletedLifecycleSequence() const noexcept {
@@ -120,19 +134,34 @@ public:
             lifecycleCalls_.size() == 1 && lifecycleCalls_[0] == L"Save";
     }
 
+    bool RecoveredLifecycleSession() const noexcept {
+        return lifecycleRecovered_ && documentOpen_ && modified_;
+    }
+
     void PrepareLifecycleSuccess() {
         lifecycleCalls_.clear();
         saveCalledWithTrue_ = false;
         clearCalledWithDiscard_ = false;
         openCalledWithArguments_ = false;
+        lifecycleRecovered_ = false;
         saveReturnsTrue_ = true;
         saveClearsModified_ = true;
+        openReturnsTrue_ = true;
         modified_ = true;
         documentOpen_ = true;
         fullName_ = L"C:\\\uD55C\uAE00\\x.hwp";
         requireActiveDocumentFullName_ = true;
         activeDocumentFullNameReady_ = false;
         activeDocumentFullNameReads_ = 0;
+        unstableSerializationMetadataFixture_ = false;
+        unstableCaretMetadataFixture_ = true;
+        serializationReads_ = 0;
+    }
+
+    void PrepareSaveVerifySerializationFixture() {
+        PrepareLifecycleSuccess();
+        unstableSerializationMetadataFixture_ = true;
+        unstableCaretMetadataFixture_ = false;
     }
 
     void PrepareLifecycleSaveFailure() {
@@ -140,8 +169,10 @@ public:
         saveCalledWithTrue_ = false;
         clearCalledWithDiscard_ = false;
         openCalledWithArguments_ = false;
+        lifecycleRecovered_ = false;
         saveReturnsTrue_ = true;
         saveClearsModified_ = false;
+        openReturnsTrue_ = true;
         modified_ = true;
         documentOpen_ = true;
         fullName_ = L"C:\\\uD55C\uAE00\\x.hwp";
@@ -155,8 +186,10 @@ public:
         saveCalledWithTrue_ = false;
         clearCalledWithDiscard_ = false;
         openCalledWithArguments_ = false;
+        lifecycleRecovered_ = false;
         saveReturnsTrue_ = false;
         saveClearsModified_ = true;
+        openReturnsTrue_ = true;
         modified_ = true;
         documentOpen_ = true;
         fullName_ = L"C:\\\uD55C\uAE00\\x.hwp";
@@ -170,15 +203,25 @@ public:
         modified_ = false;
     }
 
+    void PrepareLifecycleOpenFailure() {
+        PrepareLifecycleSuccess();
+        openReturnsTrue_ = false;
+    }
+
     void RestoreLifecycleFixture() {
         saveReturnsTrue_ = true;
         saveClearsModified_ = true;
+        openReturnsTrue_ = true;
+        lifecycleRecovered_ = false;
         modified_ = false;
         documentOpen_ = true;
         fullName_ = L"C:\\x.hwp";
         requireActiveDocumentFullName_ = false;
         activeDocumentFullNameReady_ = false;
         activeDocumentFullNameReads_ = 0;
+        unstableSerializationMetadataFixture_ = false;
+        unstableCaretMetadataFixture_ = false;
+        serializationReads_ = 0;
     }
 
     bool UsedAnchorSelectionForCopy() const noexcept {
@@ -256,6 +299,46 @@ public:
 
     const std::wstring& InsertedText() const noexcept {
         return insertedText_;
+    }
+
+    size_t InsertTextExecutions() const noexcept {
+        return insertTextExecutions_;
+    }
+
+    void PrepareSelectedControlTextPatch() noexcept {
+        selectionMode_ = 4;
+        insertedText_.clear();
+        insertTextExecutions_ = 0;
+    }
+
+    void RestoreTextPatchSelectionFixture() noexcept {
+        selectionMode_ = 1;
+        insertedText_.clear();
+    }
+
+    void PrepareTextDeletionPatch() noexcept {
+        textDeletionFixture_ = true;
+        textSelectionActive_ = true;
+        selectionMode_ = 1;
+        currentList_ = 0;
+        currentParagraph_ = 108;
+        currentCharacter_ = 0;
+        insertedText_.clear();
+        insertTextExecutions_ = 0;
+        textDeletionActions_ = 0;
+    }
+
+    bool DeletedSelectedText() const noexcept {
+        return textDeletionFixture_ && !textSelectionActive_ &&
+            selectionMode_ == 0 && textDeletionActions_ == 1 &&
+            insertTextExecutions_ == 0;
+    }
+
+    void RestoreTextDeletionPatch() noexcept {
+        textDeletionFixture_ = false;
+        textSelectionActive_ = true;
+        selectionMode_ = 1;
+        textDeletionActions_ = 0;
     }
 
     bool MessageBoxModeRestored() const noexcept {
@@ -417,6 +500,20 @@ public:
             members[0] = ReleaseScan;
         } else if (name == L"HInsertText") {
             members[0] = HInsertText;
+        } else if (name == L"HArrayFixture") {
+            members[0] = HArrayFixture;
+        } else if (name == L"SelectionMode") {
+            members[0] = SelectionMode;
+        } else if (name == L"XHwpWindows") {
+            members[0] = XHwpWindows;
+        } else if (name == L"Active_XHwpWindow") {
+            members[0] = ActiveWindow;
+        } else if (name == L"WindowHandle") {
+            members[0] = WindowHandle;
+        } else if (name == L"FindItem") {
+            members[0] = FindItem;
+        } else if (name == L"SetActive_XHwpDocument") {
+            members[0] = SetActiveDocument;
         } else if (name == L"Text") {
             members[0] = Text;
         } else if (name == L"ReturnBoolean") {
@@ -531,9 +628,16 @@ public:
         }
         VariantInit(result);
         if ((flags & DISPATCH_PROPERTYGET) != 0) {
-            if (member == XHwpDocuments || member == ActiveDocument || member == HeadCtrl ||
+            if (member == HSet) {
+                result->vt = VT_DISPATCH;
+                result->pdispVal = parameterSet_;
+                static_cast<void>(parameterSet_->AddRef());
+                return S_OK;
+            }
+            if (member == XHwpDocuments || member == ActiveDocument ||
+                member == XHwpWindows || member == ActiveWindow || member == HeadCtrl ||
                 member == HAction || member == CurSelectedCtrl ||
-                member == HParameterSet || member == HSet ||
+                member == HParameterSet ||
                 member == XHwpMessageBox || member == Application) {
                 if (member == HeadCtrl && !documentOpen_) {
                     result->vt = VT_EMPTY;
@@ -554,9 +658,20 @@ public:
                 static_cast<void>(AddRef());
                 return S_OK;
             }
+            if (member == HArrayFixture) {
+                result->vt = VT_DISPATCH;
+                result->pdispVal = parameterSet_;
+                static_cast<void>(parameterSet_->AddRef());
+                return S_OK;
+            }
             if (member == DocumentId) {
                 result->vt = VT_I4;
-                result->lVal = 17;
+                result->lVal = documentId_;
+                return S_OK;
+            }
+            if (member == WindowHandle) {
+                result->vt = VT_I4;
+                result->lVal = windowHandle_;
                 return S_OK;
             }
             if (member == FullName) {
@@ -585,6 +700,11 @@ public:
                 result->boolVal = modified_ ? VARIANT_TRUE : VARIANT_FALSE;
                 return S_OK;
             }
+            if (member == SelectionMode) {
+                result->vt = VT_I4;
+                result->lVal = selectionMode_;
+                return S_OK;
+            }
             if (member == CtrlID) {
                 result->vt = VT_BSTR;
                 result->bstrVal = SysAllocString(L"tbl");
@@ -606,6 +726,29 @@ public:
             }
         }
         if ((flags & DISPATCH_METHOD) != 0) {
+            if (member == FindItem) {
+                if (parameters == nullptr || parameters->cArgs != 1 ||
+                    parameters->rgvarg[0].vt != VT_I4) {
+                    return DISP_E_TYPEMISMATCH;
+                }
+                pendingDocumentId_ = parameters->rgvarg[0].lVal;
+                result->vt = VT_DISPATCH;
+                result->pdispVal = this;
+                static_cast<void>(AddRef());
+                return S_OK;
+            }
+            if (member == SetActiveDocument) {
+                if (parameters != nullptr && parameters->cArgs != 0) {
+                    return DISP_E_BADPARAMCOUNT;
+                }
+                if (pendingDocumentId_ <= 0) {
+                    return E_INVALIDARG;
+                }
+                documentId_ = pendingDocumentId_;
+                pendingDocumentId_ = 0;
+                result->vt = VT_EMPTY;
+                return S_OK;
+            }
             if (member == GetPos) {
                 if (parameters == nullptr || parameters->cArgs != 3 ||
                     parameters->rgvarg[0].vt != (VT_I4 | VT_BYREF) ||
@@ -661,11 +804,14 @@ public:
                 openCalledWithArguments_ = path == L"C:\\\uD55C\uAE00\\x.hwp" &&
                     format == L"HWP" && options == L"lock:FALSE";
                 lifecycleCalls_.push_back(L"Open");
-                documentOpen_ = true;
-                modified_ = false;
-                fullName_ = L"C:\\\uD55C\uAE00\\X.HWP";
+                if (openReturnsTrue_) {
+                    documentOpen_ = true;
+                    modified_ = false;
+                    fullName_ = L"C:\\\uD55C\uAE00\\X.HWP";
+                }
                 result->vt = VT_BOOL;
-                result->boolVal = VARIANT_TRUE;
+                result->boolVal =
+                    openReturnsTrue_ ? VARIANT_TRUE : VARIANT_FALSE;
                 return S_OK;
             }
             if (member == ReturnBoolean) {
@@ -861,14 +1007,57 @@ public:
                 nativeTableBlockCopied_ = nativeTableRangeSelected_ &&
                     format == L"HWP" && options == L"saveblock:true";
                 result->vt = VT_BSTR;
+                const bool unstableHwpml =
+                    unstableSerializationMetadataFixture_ &&
+                    format == L"HWPML2X" && options.empty();
+                const bool unstableCaretHwpml =
+                    unstableCaretMetadataFixture_ &&
+                    format == L"HWPML2X" && options.empty();
+                const wchar_t* const hwpml =
+                    unstableHwpml &&
+                    (serializationReads_++ % 2 != 0)
+                    ? L"<HWPML><BINDATA Encoding=\"Base64\" Id=\"3\" "
+                      L"Size=\"5360\">REENCODED_SAME_IMAGE</BINDATA>"
+                      L"<CHARSHAPE TextColor=\"255\"/>"
+                      L"<TEXT CharShape=\"1\">body-text</TEXT></HWPML>"
+                    : unstableCaretHwpml &&
+                      (serializationReads_++ % 2 != 0)
+                    ? L"<HWPML><HEAD><DOCSETTING>"
+                      L"<CARETPOS List=\"0\" Para=\"0\" Pos=\"0\"/>"
+                      L"</DOCSETTING></HEAD>"
+                      L"<BODY><PARAMETERSET Count=\"1\" SetId=\"537\">"
+                      L"<ITEM ItemId=\"614\" Type=\"Set\">"
+                      L"<PARAMETERSET Count=\"0\" SetId=\"614\"/>"
+                      L"</ITEM></PARAMETERSET>"
+                      L"<CHARSHAPE TextColor=\"255\"/>"
+                      L"<TEXT CharShape=\"1\">body-text</TEXT></BODY></HWPML>"
+                    : unstableCaretHwpml
+                    ? L"<HWPML><HEAD><DOCSETTING>"
+                      L"<CARETPOS List=\"26\" Para=\"0\" Pos=\"7\"/>"
+                      L"</DOCSETTING></HEAD>"
+                      L"<BODY><PARAMETERSET Count=\"1\" SetId=\"537\">"
+                      L"<ITEM ItemId=\"16385\" Type=\"BinData\">0</ITEM>"
+                      L"</PARAMETERSET>"
+                      L"<CHARSHAPE TextColor=\"255\"/>"
+                      L"<TEXT CharShape=\"1\">body-text</TEXT></BODY></HWPML>"
+                    : L"<HWPML><BINDATA Encoding=\"Base64\" Id=\"3\" "
+                      L"Size=\"5373\">UNCHANGED_IMAGE</BINDATA>"
+                      L"<CHARSHAPE TextColor=\"255\"/>"
+                      L"<TEXT CharShape=\"1\">body-text</TEXT></HWPML>";
                 const wchar_t* const value = atomicAppendFixture_ && tailSelection_ &&
                     format == L"UNICODE" && options == L"saveblock:true"
                     ? atomicTail_.c_str()
                     : nativeTableBlockCopied_
                     ? L"SFdQX05BVElWRV9UQUJMRQ=="
+                    : (format == L"TEXT" && options.empty()
+                        ? L"body-text\tcell-text"
+                        : (format == L"HWPML2X" && options.empty()
+                            ? hwpml
+                        : (format == L"HWP" && options.empty()
+                            ? L"SERIALIZED_BODY_TABLE_RED_STYLE"
                     : (format == L"UNICODE" && options == L"saveblock:true"
                         ? L"old"
-                        : L"");
+                        : L""))));
                 result->bstrVal = SysAllocString(value);
                 return result->bstrVal != nullptr ? S_OK : E_OUTOFMEMORY;
             }
@@ -879,7 +1068,10 @@ public:
                     return DISP_E_TYPEMISMATCH;
                 }
                 result->vt = VT_BOOL;
-                result->boolVal = VARIANT_TRUE;
+                result->boolVal =
+                    textDeletionFixture_ && !textSelectionActive_
+                    ? VARIANT_FALSE
+                    : VARIANT_TRUE;
                 return S_OK;
             }
             if (member == SetTextFile) {
@@ -892,6 +1084,16 @@ public:
                 const std::wstring options(parameters->rgvarg[0].bstrVal);
                 const std::wstring format(parameters->rgvarg[1].bstrVal);
                 const std::wstring block(parameters->rgvarg[2].bstrVal);
+                if (block == L"SERIALIZED_BODY_TABLE_RED_STYLE" &&
+                    format == L"HWP" &&
+                    options.empty()) {
+                    lifecycleRecovered_ = true;
+                    documentOpen_ = true;
+                    modified_ = true;
+                    result->vt = VT_I4;
+                    result->lVal = 1;
+                    return S_OK;
+                }
                 nativeTableBlockPasted_ = nativeTableBlockCopied_ &&
                     block == L"SFdQX05BVElWRV9UQUJMRQ==" &&
                     format == L"HWP" && options == L"insertfile";
@@ -916,7 +1118,15 @@ public:
                 if (action == L"SelectCtrlFront" && failSelectCtrlFrontWithHresult_) {
                     return E_FAIL;
                 }
-                if (action == L"MoveDocEnd" && atomicAppendFixture_) {
+                if (action == L"Delete" && textDeletionFixture_ &&
+                    textSelectionActive_) {
+                    textSelectionActive_ = false;
+                    selectionMode_ = 0;
+                    currentList_ = 0;
+                    currentParagraph_ = 108;
+                    currentCharacter_ = 0;
+                    ++textDeletionActions_;
+                } else if (action == L"MoveDocEnd" && atomicAppendFixture_) {
                     currentList_ = 0;
                     currentParagraph_ = 108;
                     currentCharacter_ = 0;
@@ -987,10 +1197,13 @@ public:
                     currentProfile_.indentation = pendingProfile_.indentation;
                     currentProfile_.previousSpacing = pendingProfile_.previousSpacing;
                     currentProfile_.nextSpacing = pendingProfile_.nextSpacing;
-                } else if (activeParameter_ == HInsertText && atomicAppendFixture_) {
-                    atomicTail_.append(insertedText_);
-                    currentCharacter_ += static_cast<LONG>(insertedText_.size());
-                    UpdateAtomicTailMaximumOccurrences();
+                } else if (activeParameter_ == HInsertText) {
+                    ++insertTextExecutions_;
+                    if (atomicAppendFixture_) {
+                        atomicTail_.append(insertedText_);
+                        currentCharacter_ += static_cast<LONG>(insertedText_.size());
+                        UpdateAtomicTailMaximumOccurrences();
+                    }
                 }
                 result->vt = VT_BOOL;
                 result->boolVal = VARIANT_TRUE;
@@ -1114,8 +1327,14 @@ private:
             occurrences);
     }
 
-    ~FakeDispatch() = default;
+    ~FakeDispatch() {
+        static_cast<void>(parameterSet_->Release());
+    }
     volatile LONG references_ = 1;
+    LONG windowHandle_ = 0;
+    LONG documentId_ = 0;
+    LONG pendingDocumentId_ = 0;
+    FakeParameterArrayDispatch* parameterSet_ = new FakeParameterArrayDispatch();
     bool anchorRead_ = false;
     bool positionedAfterAnchor_ = false;
     bool frontSelectedAfterPosition_ = false;
@@ -1136,6 +1355,11 @@ private:
     LONG currentList_ = 0;
     LONG currentParagraph_ = 0;
     LONG currentCharacter_ = 0;
+    LONG selectionMode_ = 1;
+    bool textDeletionFixture_ = false;
+    bool textSelectionActive_ = true;
+    size_t textDeletionActions_ = 0;
+    size_t insertTextExecutions_ = 0;
     std::wstring atomicTail_;
     size_t atomicTailDeletes_ = 0;
     size_t atomicTailMaximumOccurrences_ = 0;
@@ -1158,14 +1382,19 @@ private:
     bool saveCalledWithTrue_ = false;
     bool clearCalledWithDiscard_ = false;
     bool openCalledWithArguments_ = false;
+    bool lifecycleRecovered_ = false;
     bool saveReturnsTrue_ = true;
     bool saveClearsModified_ = true;
+    bool openReturnsTrue_ = true;
     bool modified_ = false;
     bool documentOpen_ = true;
     std::wstring fullName_ = L"C:\\x.hwp";
     bool requireActiveDocumentFullName_ = false;
     bool activeDocumentFullNameReady_ = false;
     LONG activeDocumentFullNameReads_ = 0;
+    bool unstableSerializationMetadataFixture_ = false;
+    bool unstableCaretMetadataFixture_ = false;
+    size_t serializationReads_ = 0;
 };
 
 using QueryModule = IHncUserActionModule*(__stdcall*)();
@@ -1210,7 +1439,7 @@ bool ReadProtocolVersion(IDispatch* const batch) {
         &result,
         nullptr,
         nullptr);
-    const bool matched = SUCCEEDED(status) && result.vt == VT_I4 && result.lVal == 9;
+    const bool matched = SUCCEEDED(status) && result.vt == VT_I4 && result.lVal == 12;
     VariantClear(&result);
     return matched;
 }
@@ -1258,6 +1487,87 @@ bool InvokeString(
     return valid;
 }
 
+bool InvokeLongString(
+    IDispatch* const batch,
+    const wchar_t* const method,
+    const LONG argument,
+    std::wstring* const returned) {
+    if (returned == nullptr) {
+        return false;
+    }
+    LPOLESTR name = const_cast<LPOLESTR>(method);
+    DISPID member = DISPID_UNKNOWN;
+    if (FAILED(batch->GetIDsOfNames(
+            IID_NULL, &name, 1, LOCALE_USER_DEFAULT, &member))) {
+        return false;
+    }
+    VARIANTARG input;
+    VariantInit(&input);
+    input.vt = VT_I4;
+    input.lVal = argument;
+    DISPPARAMS parameters{};
+    parameters.rgvarg = &input;
+    parameters.cArgs = 1;
+    VARIANT result;
+    VariantInit(&result);
+    const HRESULT status = batch->Invoke(
+        member,
+        IID_NULL,
+        LOCALE_USER_DEFAULT,
+        DISPATCH_METHOD,
+        &parameters,
+        &result,
+        nullptr,
+        nullptr);
+    const bool valid = SUCCEEDED(status) &&
+        result.vt == VT_BSTR &&
+        result.bstrVal != nullptr;
+    if (valid) {
+        returned->assign(result.bstrVal, SysStringLen(result.bstrVal));
+    }
+    VariantClear(&result);
+    return valid;
+}
+
+bool ActivateDocumentAndWait(
+    IDispatch* const batch,
+    const LONG documentId) {
+    std::wstring token;
+    if (!InvokeLongString(
+            batch,
+            L"ActivateDocument",
+            documentId,
+            &token)) {
+        return false;
+    }
+    HANDLE const success = OpenEventW(
+        SYNCHRONIZE,
+        FALSE,
+        (token + L".Success").c_str());
+    HANDLE const failure = OpenEventW(
+        SYNCHRONIZE,
+        FALSE,
+        (token + L".Failure").c_str());
+    if (success == nullptr || failure == nullptr) {
+        if (success != nullptr) {
+            CloseHandle(success);
+        }
+        if (failure != nullptr) {
+            CloseHandle(failure);
+        }
+        return false;
+    }
+    HANDLE handles[2] = {success, failure};
+    const DWORD waited = WaitForMultipleObjects(
+        2,
+        handles,
+        FALSE,
+        5'000);
+    CloseHandle(failure);
+    CloseHandle(success);
+    return waited == WAIT_OBJECT_0;
+}
+
 std::vector<std::wstring> SplitTabs(const std::wstring& value) {
     std::vector<std::wstring> fields;
     size_t start = 0;
@@ -1294,54 +1604,88 @@ bool AtomicRollbackFailurePreservedOriginal(
         !failedFields[10].empty() && failedFields[9] != failedFields[10];
 }
 
+bool SaveVerifyMatched(const std::wstring& response) {
+    const std::vector<std::wstring> fields = SplitTabs(response);
+    return fields.size() == 20 &&
+        fields[0] == L"HLS1" &&
+        fields[1] == L"1" &&
+        fields[2] == L"Qzpc7ZWc6riAXHguaHdw" &&
+        fields[3] == L"1" &&
+        fields[4] == L"1" &&
+        fields[5] == L"1" &&
+        !fields[6].empty() &&
+        !fields[7].empty() &&
+        !fields[8].empty() &&
+        fields[9] == L"0" &&
+        fields[10] == L"1" &&
+        fields[11] == L"0" &&
+        fields[12] == fields[3] &&
+        fields[13] == L"0" &&
+        fields[14] == fields[5] &&
+        fields[15] == fields[6] &&
+        fields[16] == fields[7] &&
+        fields[17] == fields[8] &&
+        fields[19].find_first_not_of(L"0123456789") == std::wstring::npos;
+}
+
 bool LifecycleSuccessMatched(const std::wstring& response) {
     const std::vector<std::wstring> fields = SplitTabs(response);
-    return fields.size() == 19 && fields[0] == L"HCL8" && fields[1] == L"1" &&
+    const std::wstring pending = std::to_wstring(static_cast<LONG>(E_PENDING));
+    return fields.size() == 26 && fields[0] == L"HCL12" && fields[1] == L"1" &&
         fields[2] == L"Qzpc7ZWc6riAXFguSFdQ" && fields[3] == L"1" && fields[4] == L"1" &&
-        fields[5] == L"1" && !fields[6].empty() && fields[6] == fields[17] &&
-        fields[7] == L"0" && fields[8] == L"1" && fields[9] == L"0" &&
-        fields[10] == L"0" && fields[11] == L"-1" && fields[12] == L"0" &&
-        fields[13] == L"1" && fields[14] == L"1" && fields[15] == L"0" &&
-        fields[16] == L"1" && !fields[18].empty() &&
-        fields[18].find_first_not_of(L"0123456789") == std::wstring::npos;
+        fields[5] == L"1" && !fields[6].empty() && !fields[7].empty() &&
+        !fields[8].empty() && fields[9] == L"0" && fields[10] == L"1" &&
+        fields[11] == L"0" && fields[12] == L"0" && fields[13] == L"-1" &&
+        fields[14] == L"0" && fields[15] == L"1" && fields[16] == L"0" &&
+        fields[17] == pending && fields[18] == L"-1" && fields[19] == fields[3] &&
+        fields[20] == L"0" && fields[21] == fields[5] && fields[22] == fields[6] &&
+        fields[23] == fields[7] && fields[24] == fields[8] &&
+        fields[25].find_first_not_of(L"0123456789") == std::wstring::npos;
 }
 
 bool LifecycleCleanNoOpMatched(const std::wstring& response) {
     const std::vector<std::wstring> fields = SplitTabs(response);
-    return fields.size() == 19 && fields[0] == L"HCL8" && fields[1] == L"1" &&
-        fields[2] == L"Qzpc7ZWc6riAXFguSFdQ" && fields[3] == L"1" && fields[4] == L"0" &&
-        fields[5] == L"1" && !fields[6].empty() && fields[6] == fields[17] &&
-        fields[7] == L"0" && fields[8] == L"0" && fields[9] == L"0" &&
-        fields[10] == L"0" && fields[11] == L"-1" && fields[12] == L"0" &&
-        fields[13] == L"1" && fields[14] == L"1" && fields[15] == L"0" &&
-        fields[16] == L"1" && !fields[18].empty() &&
-        fields[18].find_first_not_of(L"0123456789") == std::wstring::npos;
+    return LifecycleSuccessMatched(response) ||
+        (fields.size() == 26 && fields[0] == L"HCL12" && fields[1] == L"1" &&
+         fields[4] == L"0" && fields[10] == L"0" && fields[20] == L"0" &&
+         fields[22] == fields[6] && fields[23] == fields[7] &&
+         fields[24] == fields[8]);
 }
 
 bool LifecycleSaveGateMatched(const std::wstring& response) {
     const std::vector<std::wstring> fields = SplitTabs(response);
     const std::wstring pending = std::to_wstring(static_cast<LONG>(E_PENDING));
-    return fields.size() == 19 && fields[0] == L"HCL8" && fields[1] == L"0" &&
-        fields[2] == L"Qzpc7ZWc6riAXHguaHdw" && fields[3] == L"1" && fields[4] == L"1" &&
-        fields[5] == L"1" && !fields[6].empty() && fields[6] == fields[17] &&
-        fields[7] == L"0" && fields[8] == L"1" && fields[9] == L"1" &&
-        fields[10] == pending && fields[11] == L"-1" && fields[12] == pending &&
-        fields[13] == L"-1" && fields[14] == L"1" && fields[15] == L"1" &&
-        fields[16] == L"1" && !fields[18].empty() &&
-        fields[18].find_first_not_of(L"0123456789") == std::wstring::npos;
+    return fields.size() == 26 && fields[0] == L"HCL12" && fields[1] == L"0" &&
+        fields[4] == L"1" && fields[9] == L"0" && fields[10] == L"1" &&
+        fields[11] == L"1" && fields[12] == pending && fields[13] == L"-1" &&
+        fields[14] == pending && fields[15] == L"-1" && fields[16] == L"0" &&
+        fields[17] == pending && fields[18] == L"-1" && fields[20] == L"1" &&
+        fields[22] == fields[6] && fields[23] == fields[7] &&
+        fields[24] == fields[8];
 }
 
 bool LifecycleSaveReturnGateMatched(const std::wstring& response) {
     const std::vector<std::wstring> fields = SplitTabs(response);
     const std::wstring pending = std::to_wstring(static_cast<LONG>(E_PENDING));
-    return fields.size() == 19 && fields[0] == L"HCL8" && fields[1] == L"0" &&
-        fields[2] == L"Qzpc7ZWc6riAXHguaHdw" && fields[3] == L"1" && fields[4] == L"1" &&
-        fields[5] == L"1" && !fields[6].empty() && fields[6] == fields[17] &&
-        fields[7] == L"0" && fields[8] == L"0" && fields[9] == L"0" &&
-        fields[10] == pending && fields[11] == L"-1" && fields[12] == pending &&
-        fields[13] == L"-1" && fields[14] == L"1" && fields[15] == L"0" &&
-        fields[16] == L"1" && !fields[18].empty() &&
-        fields[18].find_first_not_of(L"0123456789") == std::wstring::npos;
+    return fields.size() == 26 && fields[0] == L"HCL12" && fields[1] == L"0" &&
+        fields[4] == L"1" && fields[9] == L"0" && fields[10] == L"0" &&
+        fields[11] == L"0" && fields[12] == pending && fields[13] == L"-1" &&
+        fields[14] == pending && fields[15] == L"-1" && fields[16] == L"0" &&
+        fields[17] == pending && fields[18] == L"-1" && fields[20] == L"0" &&
+        fields[22] == fields[6] && fields[23] == fields[7] &&
+        fields[24] == fields[8];
+}
+
+bool LifecycleRecoveryMatched(const std::wstring& response) {
+    const std::vector<std::wstring> fields = SplitTabs(response);
+    return fields.size() == 26 && fields[0] == L"HCL12" && fields[1] == L"0" &&
+        fields[2].empty() && fields[9] == L"0" && fields[10] == L"1" &&
+        fields[11] == L"0" && fields[12] == L"0" && fields[13] == L"-1" &&
+        fields[14] == L"0" && fields[15] == L"0" && fields[16] == L"1" &&
+        fields[17] == L"0" && fields[18] == L"1" && fields[19] == fields[3] &&
+        fields[20] == L"1" && fields[21] == fields[5] &&
+        fields[22] == fields[6] && fields[23] == fields[7] &&
+        fields[24] == fields[8];
 }
 
 bool ReadBridgeStatus(
@@ -1801,7 +2145,7 @@ int ProbePublishedProcess(const wchar_t* const processIdArgument) {
             protocolMatched = ReadProtocolVersion(batch);
             std::wstring ping;
             pingMatched = InvokeString(batch, L"Ping", nullptr, &ping) &&
-                ping == L"HCB9\tPONG\t9";
+                ping == L"HCB12\tPONG\t12";
             batch->Release();
         }
     }
@@ -1894,7 +2238,7 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
             arguments + 5);
     }
 
-    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(initialized)) {
         std::wcerr << L"CoInitializeEx failed: " << initialized << L'\n';
         return 3;
@@ -1953,7 +2297,13 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         return 6;
     }
 
-    FakeDispatch* const dispatch = new FakeDispatch();
+    constexpr LONG primaryWindowHandle = 4242;
+    constexpr LONG secondaryWindowHandle = 4343;
+    constexpr LONG primaryDocumentId = 17;
+    constexpr LONG secondaryDocumentId = 18;
+    constexpr LONG otherWindowDocumentId = 19;
+    FakeDispatch* const dispatch =
+        new FakeDispatch(primaryWindowHandle, primaryDocumentId);
     const int published = module->DoAction(kOnLoad, dispatch);
     std::wstring streamedCellText;
     const bool streamingScanWorked = hancom::inspection::ReadCurrentListText(
@@ -1961,8 +2311,20 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         &streamedCellText);
     static_cast<void>(dispatch->Release());
     const std::wstring processId = std::to_wstring(GetCurrentProcessId());
+    const std::wstring primaryScope =
+        processId + L"." + std::to_wstring(primaryWindowHandle);
+    const std::wstring primaryDocumentScope =
+        primaryScope + L"." + std::to_wstring(primaryDocumentId);
     IUnknown* const raw = GetPublishedObject(L"HancomLiveBridge." + processId);
     IUnknown* const batchUnknown = GetPublishedObject(L"HancomLiveBatch." + processId);
+    IUnknown* const scopedRaw = GetPublishedObject(
+        L"HancomLiveBridge." + primaryScope);
+    IUnknown* const scopedBatchUnknown = GetPublishedObject(
+        L"HancomLiveBatch." + primaryScope);
+    IUnknown* const documentRaw = GetPublishedObject(
+        L"HancomLiveBridge." + primaryDocumentScope);
+    IUnknown* const documentBatchUnknown = GetPublishedObject(
+        L"HancomLiveBatch." + primaryDocumentScope);
     bridge_status::Snapshot diagnostics{};
     const bool diagnosticsValid = ReadBridgeStatus(
         GetCurrentProcessId(),
@@ -1973,7 +2335,9 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         diagnostics.publishCount >= 1 &&
         diagnostics.publishSuccessCount >= 1;
     if (published == FALSE || FAILED(getLastResult()) || raw == nullptr ||
-        batchUnknown == nullptr || !diagnosticsValid) {
+        batchUnknown == nullptr || scopedRaw == nullptr ||
+        scopedBatchUnknown == nullptr || documentRaw == nullptr ||
+        documentBatchUnknown == nullptr || !diagnosticsValid) {
         std::wcerr << L"ROT publication failed: " << getLastResult() << L'\n';
         if (raw != nullptr) {
             raw->Release();
@@ -1981,16 +2345,47 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         if (batchUnknown != nullptr) {
             batchUnknown->Release();
         }
+        if (scopedRaw != nullptr) {
+            scopedRaw->Release();
+        }
+        if (scopedBatchUnknown != nullptr) {
+            scopedBatchUnknown->Release();
+        }
+        if (documentRaw != nullptr) {
+            documentRaw->Release();
+        }
+        if (documentBatchUnknown != nullptr) {
+            documentBatchUnknown->Release();
+        }
         FreeLibrary(library);
         CoUninitialize();
         return 7;
     }
     raw->Release();
+    scopedRaw->Release();
+    documentRaw->Release();
 
+    bool dynamicDocumentActivationWorked = false;
+    IDispatch* dynamicBatch = nullptr;
+    if (SUCCEEDED(scopedBatchUnknown->QueryInterface(
+            IID_IDispatch,
+            reinterpret_cast<void**>(&dynamicBatch))) &&
+        dynamicBatch != nullptr) {
+        dynamicDocumentActivationWorked =
+            ActivateDocumentAndWait(
+                dynamicBatch,
+                secondaryDocumentId) &&
+            ActivateDocumentAndWait(
+                dynamicBatch,
+                primaryDocumentId);
+        dynamicBatch->Release();
+    }
     IDispatch* batch = nullptr;
-    const HRESULT dispatchStatus = batchUnknown->QueryInterface(
+    const HRESULT dispatchStatus = documentBatchUnknown->QueryInterface(
         IID_IDispatch,
         reinterpret_cast<void**>(&batch));
+    documentBatchUnknown->Release();
+    scopedBatchUnknown->Release();
     batchUnknown->Release();
     std::wstring ping;
     std::wstring badRequest;
@@ -2005,6 +2400,7 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     std::wstring badActionRequest;
     std::wstring unsavedActionRequest;
     std::wstring badArrayIndexRequest;
+    std::wstring validArrayRequest;
     std::wstring sizedPictureRequest;
     std::wstring formattedCaptionRequest;
     std::wstring capturedTableRequest;
@@ -2016,6 +2412,8 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     std::wstring atomicRollbackRequest;
     std::wstring atomicRollbackRetryRequest;
     std::wstring atomicRollbackFailureRequest;
+    std::wstring selectedControlPatchRequest;
+    std::wstring textDeletionPatchRequest;
     std::wstring staleSelectionRequest;
     std::wstring replaceSelectionRequest;
     std::wstring badOfficialApiRequest;
@@ -2039,8 +2437,14 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     constexpr wchar_t badArrayIndexPayload[] =
         L"HCA1\nDOC\t0\tQzpceC5od3A=\n"
         L"ACTION\tTableCreate\tHTableCreation\n"
-        L"ARRAY\tColWidth\t6\n"
-        L"ASET\tColWidth\t0\tMM\t16\n"
+        L"ARRAY\tColWidth\t1\n"
+        L"ASET\tColWidth\t1\tMM\t16\n"
+        L"ENDACTION\nEND";
+    constexpr wchar_t validArrayPayload[] =
+        L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+        L"ACTION\tArrayAction\tHArrayFixture\n"
+        L"ARRAY\tColWidth\t1\n"
+        L"ASET\tColWidth\t0\tI4\t3200\n"
         L"ENDACTION\nEND";
     constexpr wchar_t unsavedBatchPayload[] =
         L"HCB1\nDOC\t17\t \n"
@@ -2103,6 +2507,12 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
         L"EXPECT_SELECTION\t1\t0\t108\t0\t0\t108\t0\n"
         L"REPLACE_SELECTION\tb2xk\tbmV3\nEND";
+    constexpr wchar_t selectedControlPatchPayload[] =
+        L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+        L"PATCH_TEXT\tCURRENT\t0\t \tZGFuZ2Vy\t0\nEND";
+    constexpr wchar_t textDeletionPatchPayload[] =
+        L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+        L"PATCH_TEXT\tCURRENT\t1\tb2xk\t \nEND";
     constexpr wchar_t expectedCallResults[] =
         L"QglVbVYwZFhKdVFtOXZiR1ZoYmc9PQkxCkkJVW1WMGRYSnVTVzUwWldkbGNnPT0JLTQyClMJVW1WMGRYSnVWR1Y0ZEE9PQlRem92VkdWdGNDOUNTVTR3TURBeExuQnVadz09ClYJVW1WMGRYSnVWbTlwWkE9PQ==";
     constexpr wchar_t actionOfficialApiPayload[] =
@@ -2150,6 +2560,12 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         L"ARG\tACTION_SET\tInsertText\nEND\n";
     constexpr wchar_t setIdAliasOfficialApiPayload[] =
         L"HCV1\nAUTOMATION\tIDHwpParameterSet\tGetSetID\tproperty\nEND\n";
+    dispatch->PrepareSaveVerifySerializationFixture();
+    std::wstring saveVerifyResponse;
+    const bool saveVerifyInvoked = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+        InvokeString(batch, L"SaveVerify", nullptr, &saveVerifyResponse);
+    const bool saveVerifyMatched =
+        SaveVerifyMatched(saveVerifyResponse) && dispatch->StoppedLifecycleAfterSave();
     dispatch->PrepareLifecycleSuccess();
     std::wstring lifecycleSuccessResponse;
     const bool lifecycleSuccessInvoked = SUCCEEDED(dispatchStatus) && batch != nullptr &&
@@ -2176,6 +2592,13 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     const bool lifecycleSaveReturnGateMatched =
         LifecycleSaveReturnGateMatched(lifecycleSaveReturnGateResponse) &&
         dispatch->StoppedLifecycleAfterSave();
+    dispatch->PrepareLifecycleOpenFailure();
+    std::wstring lifecycleRecoveryResponse;
+    const bool lifecycleRecoveryInvoked = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+        InvokeString(batch, L"SaveReopenVerify", nullptr, &lifecycleRecoveryResponse);
+    const bool lifecycleRecoveryMatched =
+        LifecycleRecoveryMatched(lifecycleRecoveryResponse) &&
+        dispatch->RecoveredLifecycleSession();
     dispatch->RestoreLifecycleFixture();
     dispatch->PrepareSelectCtrlFrontFailure();
     const bool partialMutationInvoked = SUCCEEDED(dispatchStatus) && batch != nullptr &&
@@ -2201,11 +2624,39 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     const bool atomicRollbackFailureRetainedTail =
         dispatch->AtomicTailRollbackFailureRetainedTail();
     dispatch->RestoreAtomicAppendFixture();
+    dispatch->PrepareSelectedControlTextPatch();
+    const bool selectedControlPatchInvoked = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+        InvokeString(
+            batch,
+            L"ExecuteActions",
+            selectedControlPatchPayload,
+            &selectedControlPatchRequest);
+    const bool selectedControlPatchRejected =
+        selectedControlPatchRequest.rfind(
+            L"HCA2\tERROR\tNON_TEXT_SELECTION\t",
+            0) == 0 &&
+        dispatch->InsertTextExecutions() == 0;
+    const size_t selectedControlPatchInsertions = dispatch->InsertTextExecutions();
+    dispatch->RestoreTextPatchSelectionFixture();
+    dispatch->PrepareTextDeletionPatch();
+    const bool textDeletionPatchInvoked = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+        InvokeString(
+            batch,
+            L"ExecuteActions",
+            textDeletionPatchPayload,
+            &textDeletionPatchRequest);
+    const bool textDeletionPatchVerified =
+        textDeletionPatchRequest.rfind(L"HCA2\tOK\t1\t", 0) == 0 &&
+        dispatch->DeletedSelectedText();
+    dispatch->RestoreTextDeletionPatch();
     if (FAILED(dispatchStatus) || !ReadProtocolVersion(batch) ||
+        !dynamicDocumentActivationWorked ||
+        !saveVerifyInvoked || !saveVerifyMatched ||
         !lifecycleSuccessInvoked || !lifecycleSuccessMatched ||
         !lifecycleCleanNoOpInvoked || !lifecycleCleanNoOpMatched ||
         !lifecycleSaveGateInvoked || !lifecycleSaveGateMatched ||
         !lifecycleSaveReturnGateInvoked || !lifecycleSaveReturnGateMatched ||
+        !lifecycleRecoveryInvoked || !lifecycleRecoveryMatched ||
         !partialMutationInvoked || partialMutationRequest.rfind(
             L"HCA2\tERROR\tACTION_FAILED\tU2VsZWN0Q3RybEZyb250\t"
             L"U2VsZWN0Q3RybEZyb250IHJldHVybmVkIGZhbHNl\t1\t"
@@ -2218,7 +2669,9 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
             atomicRollbackRequest,
             atomicRollbackFailureRequest) ||
         !atomicRollbackFailureRetainedTail ||
-        !InvokeString(batch, L"Ping", nullptr, &ping) || ping != L"HCB9\tPONG\t9" ||
+        !selectedControlPatchInvoked || !selectedControlPatchRejected ||
+        !textDeletionPatchInvoked || !textDeletionPatchVerified ||
+        !InvokeString(batch, L"Ping", nullptr, &ping) || ping != L"HCB12\tPONG\t12" ||
         !InvokeString(batch, L"Execute", L"not-a-request", &badRequest) ||
         badRequest.rfind(L"HCB1\tERROR\tBAD_REQUEST\t", 0) != 0 ||
         !InvokeString(batch, L"Execute", unsavedBatchPayload, &unsavedBatchRequest) ||
@@ -2243,6 +2696,8 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         unsavedActionRequest.rfind(L"HCA2\tERROR\tSTALE_DOCUMENT\t", 0) != 0 ||
         !InvokeString(batch, L"ExecuteActions", badArrayIndexPayload, &badArrayIndexRequest) ||
         badArrayIndexRequest.rfind(L"HCA1\tERROR\tBAD_REQUEST\t", 0) != 0 ||
+        !InvokeString(batch, L"ExecuteActions", validArrayPayload, &validArrayRequest) ||
+        validArrayRequest.rfind(L"HCA2\tOK\t1\t", 0) != 0 ||
         !InvokeString(batch, L"ExecuteActions", sizedPicturePayload, &sizedPictureRequest) ||
         sizedPictureRequest.rfind(L"HCA2\tERROR\tSTALE_DOCUMENT\t", 0) != 0 ||
         !InvokeString(batch, L"ExecuteActions", formattedCaptionPayload, &formattedCaptionRequest) ||
@@ -2432,12 +2887,16 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         std::wcerr
             << L"batch automation contract failed"
             << L"\n  lifecycle-success=" << lifecycleSuccessResponse
+            << L"\n  save-verify=" << saveVerifyResponse
+            << L"\n  save-verify-matched=" << saveVerifyMatched
             << L"\n  lifecycle-success-sequence=" << dispatch->CompletedLifecycleSequence()
             << L"\n  lifecycle-clean-noop=" << lifecycleCleanNoOpResponse
             << L"\n  lifecycle-clean-noop-matched=" << lifecycleCleanNoOpMatched
             << L"\n  lifecycle-save-gate=" << lifecycleSaveGateResponse
             << L"\n  lifecycle-save-stopped=" << dispatch->StoppedLifecycleAfterSave()
             << L"\n  lifecycle-save-return-gate=" << lifecycleSaveReturnGateResponse
+            << L"\n  lifecycle-recovery=" << lifecycleRecoveryResponse
+            << L"\n  lifecycle-recovery-matched=" << lifecycleRecoveryMatched
             << L"\n  partial-mutation=" << partialMutationRequest
             << L"\n  atomic-rollback=" << atomicRollbackRequest
             << L"\n  atomic-rollback-retry=" << atomicRollbackRetryRequest
@@ -2445,12 +2904,18 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
             << L"\n  atomic-rollback-failure=" << atomicRollbackFailureRequest
             << L"\n  atomic-rollback-failure-retained-tail="
             << atomicRollbackFailureRetainedTail
+            << L"\n  selected-control-patch=" << selectedControlPatchRequest
+            << L"\n  selected-control-patch-rejected=" << selectedControlPatchRejected
+            << L"\n  selected-control-patch-insertions=" << selectedControlPatchInsertions
+            << L"\n  text-deletion-patch=" << textDeletionPatchRequest
+            << L"\n  text-deletion-patch-verified=" << textDeletionPatchVerified
             << L"\n  snapshot=" << snapshot
             << L"\n  page=" << page
             << L"\n  page-v3=" << pageV3
             << L"\n  structure=" << structure
             << L"\n  bad-action=" << badActionRequest
             << L"\n  bad-array=" << badArrayIndexRequest
+            << L"\n  valid-array=" << validArrayRequest
             << L"\n  call-return=" << callReturnRequest
             << L"\n  stale-selection=" << staleSelectionRequest
             << L"\n  replace-selection=" << replaceSelectionRequest
@@ -2488,6 +2953,99 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         return 8;
     }
     batch->Release();
+    FakeDispatch* const secondaryDocumentDispatch =
+        new FakeDispatch(primaryWindowHandle, secondaryDocumentId);
+    const int secondaryDocumentPublished =
+        module->DoAction(kOnLoad, secondaryDocumentDispatch);
+    static_cast<void>(secondaryDocumentDispatch->Release());
+    const std::wstring secondaryDocumentScope =
+        primaryScope + L"." + std::to_wstring(secondaryDocumentId);
+    IUnknown* const retainedPrimaryDocumentRaw = GetPublishedObject(
+        L"HancomLiveBridge." + primaryDocumentScope);
+    IUnknown* const retainedPrimaryDocumentBatch = GetPublishedObject(
+        L"HancomLiveBatch." + primaryDocumentScope);
+    IUnknown* const secondaryDocumentRaw = GetPublishedObject(
+        L"HancomLiveBridge." + secondaryDocumentScope);
+    IUnknown* const secondaryDocumentBatch = GetPublishedObject(
+        L"HancomLiveBatch." + secondaryDocumentScope);
+    const bool documentRegistryWorked =
+        secondaryDocumentPublished != FALSE &&
+        retainedPrimaryDocumentRaw != nullptr &&
+        retainedPrimaryDocumentBatch != nullptr &&
+        secondaryDocumentRaw != nullptr &&
+        secondaryDocumentBatch != nullptr;
+    if (retainedPrimaryDocumentRaw != nullptr) {
+        retainedPrimaryDocumentRaw->Release();
+    }
+    if (retainedPrimaryDocumentBatch != nullptr) {
+        retainedPrimaryDocumentBatch->Release();
+    }
+    if (secondaryDocumentRaw != nullptr) {
+        secondaryDocumentRaw->Release();
+    }
+    if (secondaryDocumentBatch != nullptr) {
+        secondaryDocumentBatch->Release();
+    }
+    if (!documentRegistryWorked) {
+        std::wcerr << L"document-scoped ROT registry failed\n";
+        static_cast<void>(releasePublication());
+        FreeLibrary(library);
+        CoUninitialize();
+        return 20;
+    }
+    FakeDispatch* const secondaryDispatch =
+        new FakeDispatch(secondaryWindowHandle, otherWindowDocumentId);
+    const int secondaryPublished = module->DoAction(kOnLoad, secondaryDispatch);
+    static_cast<void>(secondaryDispatch->Release());
+    const std::wstring secondaryScope =
+        processId + L"." + std::to_wstring(secondaryWindowHandle);
+    const std::wstring otherWindowDocumentScope =
+        secondaryScope + L"." + std::to_wstring(otherWindowDocumentId);
+    IUnknown* const retainedPrimaryRaw = GetPublishedObject(
+        L"HancomLiveBridge." + primaryScope);
+    IUnknown* const retainedPrimaryBatch = GetPublishedObject(
+        L"HancomLiveBatch." + primaryScope);
+    IUnknown* const secondaryRaw = GetPublishedObject(
+        L"HancomLiveBridge." + secondaryScope);
+    IUnknown* const secondaryBatch = GetPublishedObject(
+        L"HancomLiveBatch." + secondaryScope);
+    IUnknown* const otherWindowDocumentRaw = GetPublishedObject(
+        L"HancomLiveBridge." + otherWindowDocumentScope);
+    IUnknown* const otherWindowDocumentBatch = GetPublishedObject(
+        L"HancomLiveBatch." + otherWindowDocumentScope);
+    const bool windowRegistryWorked =
+        secondaryPublished != FALSE &&
+        retainedPrimaryRaw != nullptr &&
+        retainedPrimaryBatch != nullptr &&
+        secondaryRaw != nullptr &&
+        secondaryBatch != nullptr &&
+        otherWindowDocumentRaw != nullptr &&
+        otherWindowDocumentBatch != nullptr;
+    if (retainedPrimaryRaw != nullptr) {
+        retainedPrimaryRaw->Release();
+    }
+    if (retainedPrimaryBatch != nullptr) {
+        retainedPrimaryBatch->Release();
+    }
+    if (secondaryRaw != nullptr) {
+        secondaryRaw->Release();
+    }
+    if (secondaryBatch != nullptr) {
+        secondaryBatch->Release();
+    }
+    if (otherWindowDocumentRaw != nullptr) {
+        otherWindowDocumentRaw->Release();
+    }
+    if (otherWindowDocumentBatch != nullptr) {
+        otherWindowDocumentBatch->Release();
+    }
+    if (!windowRegistryWorked) {
+        std::wcerr << L"window-scoped ROT registry failed\n";
+        static_cast<void>(releasePublication());
+        FreeLibrary(library);
+        CoUninitialize();
+        return 21;
+    }
     if (argumentCount == 3 && std::wcscmp(arguments[2], L"--hold") == 0) {
         std::wcout << L"READY " << GetCurrentProcessId() << L'\n' << std::flush;
         const ULONGLONG deadline = GetTickCount64() + 15'000;
@@ -2507,7 +3065,23 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     }
     if (FAILED(releasePublication()) ||
         GetPublishedObject(L"HancomLiveBridge." + processId) != nullptr ||
-        GetPublishedObject(L"HancomLiveBatch." + processId) != nullptr) {
+        GetPublishedObject(L"HancomLiveBatch." + processId) != nullptr ||
+        GetPublishedObject(L"HancomLiveBridge." + primaryScope) != nullptr ||
+        GetPublishedObject(L"HancomLiveBatch." + primaryScope) != nullptr ||
+        GetPublishedObject(
+            L"HancomLiveBridge." + primaryDocumentScope) != nullptr ||
+        GetPublishedObject(
+            L"HancomLiveBatch." + primaryDocumentScope) != nullptr ||
+        GetPublishedObject(
+            L"HancomLiveBridge." + secondaryDocumentScope) != nullptr ||
+        GetPublishedObject(
+            L"HancomLiveBatch." + secondaryDocumentScope) != nullptr ||
+        GetPublishedObject(L"HancomLiveBridge." + secondaryScope) != nullptr ||
+        GetPublishedObject(L"HancomLiveBatch." + secondaryScope) != nullptr ||
+        GetPublishedObject(
+            L"HancomLiveBridge." + otherWindowDocumentScope) != nullptr ||
+        GetPublishedObject(
+            L"HancomLiveBatch." + otherWindowDocumentScope) != nullptr) {
         std::wcerr << L"ROT revoke failed\n";
         FreeLibrary(library);
         CoUninitialize();
@@ -2524,7 +3098,10 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
                << L"ATOMIC_ROLLBACK_FAILURE " << atomicRollbackFailureRequest << L'\n'
                << L"ATOMIC_ROLLBACK_FAILURE_TAIL_RETAINED "
                << atomicRollbackFailureRetainedTail << L'\n'
-               << L"PASS UserAction ABI, inspection, lifecycle, action batch, dual ROT publication, and revoke\n";
+               << L"SELECTED_CONTROL_PATCH " << selectedControlPatchRequest << L'\n'
+               << L"TEXT_DELETION_PATCH " << textDeletionPatchRequest << L'\n'
+               << L"PASS UserAction ABI, inspection, lifecycle, action batch, "
+                  L"window/document-scoped ROT publication, and revoke\n";
     FreeLibrary(library);
     CoUninitialize();
     return 0;

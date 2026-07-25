@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from typing import Annotated, assert_never, final
-from uuid import uuid4
-
 from pydantic import Field
 from typing_extensions import TypeIs
 
@@ -13,6 +11,7 @@ from hwp_operation_contract import (
     HwpOperatePostconditions,
     OperationResult,
 )
+from hwp_public_action_contract import PublicOperationId
 from hwp_public_cell_selector import PublicCellReference
 from hwp_public_contract import PublicActionResult, PublicTableTarget
 from hwp_public_contract import refresh_public_target_ids, to_public_action_result
@@ -102,6 +101,7 @@ class HwpPublicTableEditTools:
     async def hwp_format_table(
         self,
         *,
+        operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
         cell: PublicCellReference | None = None,
         row_height_mm: Annotated[float | None, Field(ge=1, le=250)] = None,
@@ -121,7 +121,7 @@ class HwpPublicTableEditTools:
         request = PublicTableEditResolutionRequest(
             resolution=PublicTableResolutionRequest(
                 target=target,
-                request_id=f"hwp-public-{uuid4().hex}",
+                request_id=operation_id,
                 query=metadata.FORMAT_TABLE_INTENT,
             ),
             cells=(
@@ -169,6 +169,7 @@ class HwpPublicTableEditTools:
     async def hwp_merge_table_cells(
         self,
         *,
+        operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
         start_cell: PublicCellReference,
         end_cell: PublicCellReference,
@@ -176,7 +177,7 @@ class HwpPublicTableEditTools:
         request = PublicTableEditResolutionRequest(
             resolution=PublicTableResolutionRequest(
                 target=target,
-                request_id=f"hwp-public-{uuid4().hex}",
+                request_id=operation_id,
                 query=metadata.MERGE_TABLE_CELLS_INTENT,
             ),
             cells=(
@@ -212,6 +213,7 @@ class HwpPublicTableEditTools:
     async def hwp_split_table_cell(
         self,
         *,
+        operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
         cell: PublicCellReference,
         columns: Annotated[int, Field(ge=1, le=65_535)],
@@ -222,7 +224,7 @@ class HwpPublicTableEditTools:
         request = PublicTableEditResolutionRequest(
             resolution=PublicTableResolutionRequest(
                 target=target,
-                request_id=f"hwp-public-{uuid4().hex}",
+                request_id=operation_id,
                 query=metadata.SPLIT_TABLE_CELL_INTENT,
             ),
             cells=(NamedPublicCellReference("cell", cell),),

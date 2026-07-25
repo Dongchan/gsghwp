@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Generator
-from contextlib import contextmanager
+# noqa: E501  # noqa: SIZE_OK — idempotency decisions and journal finalization share one state machine.
+
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from threading import Event, Thread
 from typing import Literal, final
 
-from anyio import get_cancelled_exc_class
+from anyio import CancelScope, get_cancelled_exc_class, to_thread
 
 from hwp_errors import HwpLiveError
 from hwp_live_contract import OpenDocument
@@ -43,7 +45,7 @@ class OperationIdempotency:
         intent: str,
     ) -> OperationResult:
         kind: JournalDecisionKind = decision.kind
-        match kind:
+        match kind:  # noqa: E501  # noqa: MATCH_OK — JournalDecisionKind is exhaustive.
             case "in_progress":
                 status = "operation_in_progress"
                 idempotency_status = "in_progress"
@@ -91,6 +93,23 @@ class OperationIdempotency:
             target_resolution_basis=decision.target_resolution_basis,
         )
 
+    @staticmethod
+    def _replayed_result(decision: JournalDecision) -> OperationResult:
+        if decision.result is None:
+            raise OperationJournalError("replay decision has no operation result")
+        return decision.result.model_copy(
+            update={
+                "idempotency_status": "replayed",
+                "result_digest": decision.result_digest,
+                "journal_state": decision.state,
+                "journal_attempt": decision.attempt,
+                "started_at": decision.started_at,
+                "updated_at": decision.updated_at,
+                "stale_after_seconds": decision.stale_after_seconds,
+                "journal_failure_code": decision.failure_code,
+            }
+        )
+
     def prepare(
         self,
         document: OpenDocument,
@@ -108,36 +127,58 @@ class OperationIdempotency:
             request_payload_digest(intent, inputs, guards),
             inputs.recovery,
         )
-        match decision.kind:
+        match decision.kind:  # noqa: E501  # noqa: MATCH_OK — JournalDecisionKind is exhaustive.
             case "execute":
                 self._journal.mark_executing(session, request_id)
                 return OperationTicket(session, request_id, "execute")
             case "reconcile":
                 return OperationTicket(session, request_id, "reconcile")
             case "replay":
-                if decision.result is None:
-                    raise OperationJournalError("replay decision has no operation result")
-                return decision.result.model_copy(
-                    update={
-                        "idempotency_status": "replayed",
-                        "result_digest": decision.result_digest,
-                        "journal_state": decision.state,
-                        "journal_attempt": decision.attempt,
-                        "started_at": decision.started_at,
-                        "updated_at": decision.updated_at,
-                        "stale_after_seconds": decision.stale_after_seconds,
-                        "journal_failure_code": decision.failure_code,
-                    }
-                )
+                return self._replayed_result(decision)
             case "in_progress" | "stale" | "failed" | "aborted" | "conflict":
                 return self._blocked_result(decision, request_id, intent)
+
+    def status(
+        self,
+        document: OpenDocument,
+        request_id: str,
+    ) -> OperationResult:
+        decision = self._journal.lookup(document_session_key(document), request_id)
+        if decision is None:
+            return OperationResult(
+                request_id=request_id,
+                status="not_found",
+                query="operation status",
+                registry_entries=operation_registry().count,
+                lookup_microseconds=0,
+                message=(
+                    "해당 operation_id의 작업 기록이 없거나 보존 한도에 따라 "
+                    "만료되었습니다. 이 ID를 새 작업에 재사용하지 마세요"
+                ),
+            )
+        match decision.kind:  # noqa: E501  # noqa: MATCH_OK — observable decision kinds are exhaustive.
+            case "replay":
+                return self._replayed_result(decision)
+            case "in_progress" | "stale" | "failed" | "aborted":
+                return self._blocked_result(
+                    decision,
+                    request_id,
+                    "operation status",
+                )
+            case "execute" | "reconcile" | "conflict":
+                raise OperationJournalError(
+                    "non-observable journal decision reached status lookup"
+                )
 
     def _heartbeat(self, ticket: OperationTicket, stop: Event) -> None:
         while not stop.wait(self._journal.heartbeat_interval_seconds):
             self._journal.heartbeat(ticket.document_session, ticket.request_id)
 
-    @contextmanager
-    def execution(self, ticket: OperationTicket | None) -> Generator[None]:
+    @asynccontextmanager
+    async def execution(
+        self,
+        ticket: OperationTicket | None,
+    ) -> AsyncGenerator[None]:
         if ticket is None or ticket.action == "reconcile":
             yield
             return
@@ -153,11 +194,13 @@ class OperationIdempotency:
         try:
             yield
         except cancelled_error:
-            self._journal.mark_aborted(
-                ticket.document_session,
-                ticket.request_id,
-                "client_cancelled",
-            )
+            with CancelScope(shield=True):
+                await to_thread.run_sync(
+                    self._journal.mark_aborted,
+                    ticket.document_session,
+                    ticket.request_id,
+                    "client_cancelled",
+                )
             raise
         except HwpLiveError as error:
             self._journal.mark_failed(
@@ -168,7 +211,8 @@ class OperationIdempotency:
             raise
         finally:
             stop.set()
-            heartbeat.join()
+            with CancelScope(shield=True):
+                await to_thread.run_sync(heartbeat.join)
 
     def commit(
         self,
@@ -194,11 +238,44 @@ class OperationIdempotency:
                     "message": "이전 시도를 중단 상태로 확정하고 네이티브 resolve/snapshot만 수행했습니다",
                 }
             )
-        if result.status == "operation_failed":
+        unverified_execution = (
+            result.status == "executed" and result.verified is not True
+        )
+        if (
+            result.status in {"operation_failed", "partial_change", "transport_error"}
+            or result.reconcile_required
+            or result.partial_mutation is True
+            or unverified_execution
+        ):
+            reconcile_required = (
+                result.reconcile_required
+                or result.partial_mutation is True
+                or result.status == "partial_change"
+                or (unverified_execution and result.changed)
+            )
+            failure_code = (
+                "partial_mutation_reconcile_required"
+                if reconcile_required
+                else "transport_error"
+                if result.status == "transport_error"
+                else "unverified_operation_result"
+                if unverified_execution
+                else "native_verification_failed"
+            )
             failed = result.model_copy(
                 update={
                     "request_id": ticket.request_id,
                     "idempotency_status": "failed",
+                    "status": (
+                        "operation_failed"
+                        if unverified_execution
+                        else result.status
+                    ),
+                    "verified": False,
+                    "reconcile_required": reconcile_required,
+                    "retry_safe": (
+                        False if reconcile_required else result.retry_safe
+                    ),
                 }
             )
             digest = operation_result_digest(failed)
@@ -206,7 +283,7 @@ class OperationIdempotency:
             self._journal.mark_failed(
                 ticket.document_session,
                 ticket.request_id,
-                "native_verification_failed",
+                failure_code,
                 result=failed,
                 result_digest=digest,
             )

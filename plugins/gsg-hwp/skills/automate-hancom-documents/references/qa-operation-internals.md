@@ -21,3 +21,24 @@ Only a certified recipe or primitive graph may execute. The 1,452-entry official
 Writes use a stable `inputs.request_id` for an identical payload. A committed replay returns the recorded result without executing native commands again, while a changed payload with the same ID returns `request_id_conflict`.
 
 Do not automatically retry `operation_stale`, `known_failure`, `unsupported`, partial changes, or transport failures. Reconciliation and explicitly confirmed recovery follow `verification-recovery.md`. Guards are opt-in and a missing cursor guard is not a reason to block execution.
+
+## QA safety circuit
+
+Every QA document mutation passes through the same per-document safety circuit.
+If the native mutation raises or post-verification reports a partial change, the
+document selector is marked unsafe. Further writes to that document are blocked
+for the lifetime of the live session so an uncertain result cannot be compounded
+by another edit.
+
+## State cache bounds
+
+The QA state cache is an LRU bounded to eight page snapshots and 16 MiB. A
+snapshot larger than the byte budget is returned to the caller but is not
+retained. Disconnect clears the cache.
+
+## Watch concurrency
+
+`hwp_watch_state` may run concurrently through the supervisor so a long watch
+does not block status or unrelated QA calls. Native COM work still uses the
+single serialized worker path. Reload requested while any worker call is active
+returns `deferred` and occurs only after the worker reaches quiescence.

@@ -3,19 +3,30 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from hwp_errors import HwpLiveError
+from hwp_layout_preflight import LayoutPreflightResult, preflight_layout
 from hwp_live_contract import LayoutPlan
 from hwp_live_auto_route import (
     prepare_natural_route,
     resolve_conservative_route,
 )
-from hwp_live_native_batch import execute_native_lifecycle
+from hwp_live_native_batch import (
+    execute_native_lifecycle,
+    execute_native_save,
+    read_native_snapshot,
+)
 from hwp_live_operation import operate_validated
 from hwp_live_operation_recipe import (
     is_document_end_layout_intent,
+    native_style_plan,
     operate_layout,
 )
 from hwp_live_session_data import LiveHwpDataSession
-from hwp_live_session_lifecycle import lifecycle_preflight_result, lifecycle_result
+from hwp_live_session_lifecycle import (
+    lifecycle_preflight_result,
+    lifecycle_result,
+    save_preflight_result,
+    save_result,
+)
 from hwp_live_session_recipe_dispatch import operate_resolved_recipe
 from hwp_live_session_routing import read_operation_routing_context
 from hwp_live_session_table_fill import operate_table_fill
@@ -48,6 +59,45 @@ class LiveHwpOperationSession(LiveHwpDataSession):
     _last_routing_context: OperationRoutingContext | None
     _structure_snapshot: DocumentStructure | None
 
+    def preflight_layout(
+        self,
+        session_id: str,
+        plan: LayoutPlan,
+    ) -> LayoutPreflightResult:
+        candidate, hwp = self._validate(session_id)
+        guard = self._guard(candidate, hwp)
+        snapshot = read_native_snapshot(candidate.window_handle)
+        if snapshot is None:
+            raise HwpLiveError(
+                "레이아웃 사전 검사 전에 한컴 문서 상태를 읽지 못했습니다"
+            )
+        if (
+            plan.target == "after_page"
+            and plan.page is not None
+            and plan.page > snapshot.page_count
+        ):
+            raise HwpLiveError("레이아웃 삽입 기준 쪽이 현재 문서 범위를 벗어났습니다")
+        setup_page = (
+            plan.page
+            if plan.target == "after_page" and plan.page is not None
+            else snapshot.page_count
+            if plan.target == "document_end"
+            else snapshot.current_page
+        )
+        layout_page = setup_page + 1 if plan.target == "after_page" else setup_page
+        resolved, geometry = native_style_plan(
+            candidate,
+            plan,
+            snapshot.style_id,
+            guard,
+            setup_page=setup_page,
+        )
+        return preflight_layout(
+            resolved,
+            geometry,
+            page_number=layout_page,
+        )
+
     def operate(
         self,
         session_id: str,
@@ -75,6 +125,20 @@ class LiveHwpOperationSession(LiveHwpDataSession):
             None if target is None else target.page_hint,
         )
         self._last_routing_context = routing_context
+        if workflow == "document.save":
+            preflight = save_preflight_result(
+                intent_or_operation_id,
+                resolve_only=resolve_only,
+                allow_document_change=allow_document_change,
+            )
+            if preflight is not None:
+                return preflight
+            native_save = execute_native_save(candidate.window_handle)
+            if native_save is None:
+                raise HwpLiveError(
+                    "한컴 네이티브 일반 저장 검증기를 사용할 수 없습니다"
+                )
+            return save_result(intent_or_operation_id, native_save)
         if workflow == "document.save_reopen_verify":
             preflight = lifecycle_preflight_result(
                 intent_or_operation_id,
@@ -105,7 +169,9 @@ class LiveHwpOperationSession(LiveHwpDataSession):
             resolution = natural_route.resolution
         else:
             resolution = resolve_explicit_workflow(intent_or_operation_id, workflow)
-        preflight_inputs = WorkflowPreflightInputs(target, data, assets, inputs, layout, recipe)
+        preflight_inputs = WorkflowPreflightInputs(
+            target, data, assets, inputs, layout, recipe
+        )
         if workflow is not None and resolution.status == "schema_conflict":
             return workflow_result(
                 resolution,
@@ -116,7 +182,9 @@ class LiveHwpOperationSession(LiveHwpDataSession):
             preflight = explicit_workflow_preflight(resolution, preflight_inputs)
             if preflight is not None:
                 return preflight
-        atomic_resolution = resolve_operation(intent_or_operation_id) if workflow is None else None
+        atomic_resolution = (
+            resolve_operation(intent_or_operation_id) if workflow is None else None
+        )
         natural_execution = prepare_natural_route(
             natural_route,
             preflight_inputs,
@@ -124,7 +192,10 @@ class LiveHwpOperationSession(LiveHwpDataSession):
         )
         if natural_execution.blocked_result is not None:
             return natural_execution.blocked_result
-        atomic_rescue = natural_execution.workflow is None and natural_execution.selection is not None
+        atomic_rescue = (
+            natural_execution.workflow is None
+            and natural_execution.selection is not None
+        )
         if (
             resolution.status == "resolved"
             and resolution.workflow_id == "document.inspect_structure"
@@ -252,8 +323,10 @@ class LiveHwpOperationSession(LiveHwpDataSession):
         self,
         session_id: str,
     ) -> OperationRoutingContext:
-        if self._session_id is None or session_id != self._session_id:
+        if session_id not in self._sessions:
             raise HwpLiveError("유효한 한컴 라이브 세션이 아닙니다")
+        if self._session_id != session_id:
+            raise HwpLiveError("요청한 세션에는 현재 작업의 라우팅 컨텍스트가 없습니다")
         if self._last_routing_context is None:
             raise HwpLiveError("최근 hwp_operate 빠른 구조 컨텍스트가 없습니다")
         return self._last_routing_context

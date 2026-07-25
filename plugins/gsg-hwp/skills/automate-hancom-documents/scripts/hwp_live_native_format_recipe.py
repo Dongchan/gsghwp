@@ -40,6 +40,7 @@ from hwp_live_native_table_topology import (
     verify_split_transition,
 )
 from hwp_live_native_format_target import TargetFailure
+from hwp_live_text_format_verification import verify_text_format
 from hwp_operation_certification import certified_recipe
 from hwp_operation_contract import OperationResult, OperationStatus
 from hwp_operation_registry import operation_registry
@@ -361,6 +362,8 @@ def _execute_prepared(
         raise HwpLiveError(
             "서식 작업 후 페이지 수 보존 완료조건을 만족하지 못했습니다"
         )
+    if isinstance(prepared.plan, TextFormatCommandPlan):
+        verify_text_format(prepared.plan.formatting, before, after)
     _verify_structural_plan(
         prepared,
         request.candidate.window_handle,
@@ -375,7 +378,7 @@ def _execute_prepared(
         update={
             "execution_mode": "native_in_process",
             "native_protocol": 9,
-            "verification": "native_snapshot_before_after",
+            "verification": "native_operation_specific_readback",
             "verified": True,
             "commands_executed": native.commands_executed,
             "commands_completed": native.commands_executed,

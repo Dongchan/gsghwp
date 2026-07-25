@@ -90,6 +90,7 @@ def test_main_defers_wrapper_and_operation_registry_loading() -> None:
     server = MagicMock()
     with (
         patch.object(hwp_mcp, "startup_runtime_record", return_value="runtime"),
+        patch.object(hwp_mcp, "ensure_codex_skill_registered"),
         patch.object(hwp_mcp, "ensure_native_bridge_registered"),
         patch.object(hwp_mcp, "build_server", return_value=server),
         patch.object(hwp_mcp, "configured_mcp_profile", return_value="production"),
@@ -107,7 +108,7 @@ def test_production_catalog_keeps_stable_forward_gateway() -> None:
     assert "hwp_execute" in tool_names("production")
 
 
-def test_mcp_configuration_uses_bundled_python_hot_reload_proxy() -> None:
+def test_mcp_configuration_uses_portable_update_launcher() -> None:
     configuration = _McpConfiguration.model_validate_json(
         (SCRIPTS.parents[2] / ".mcp.json").read_text(encoding="utf-8")
     )
@@ -136,9 +137,7 @@ def test_runtime_identity_tool_is_public_and_forwardable() -> None:
         )
         forwarded = await server.call_unconverted_tool(
             "hwp_execute",
-            HwpExecuteArguments(
-                {"tool_name": "hwp_runtime_info", "arguments": {}}
-            ),
+            HwpExecuteArguments({"tool_name": "hwp_runtime_info", "arguments": {}}),
         )
         return (
             RuntimeStatus.model_validate(direct),

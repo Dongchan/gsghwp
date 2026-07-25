@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Annotated, Protocol, final
-from uuid import uuid4
-
 from pydantic import Field
 
 from hwp_operation_contract import (
@@ -15,6 +13,7 @@ from hwp_operation_contract import (
 )
 from hwp_operation_registry import operation_registry
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
+from hwp_public_action_contract import PublicOperationId
 from hwp_public_contract import (
     PublicActionResult,
     to_public_action_result,
@@ -88,6 +87,7 @@ class HwpPublicVisibilityTools:
     async def hwp_sync_visibility_analysis_tables(
         self,
         *,
+        operation_id: PublicOperationId,
         source_page: Annotated[
             int,
             Field(ge=1, description="예비조망점 선정표가 있는 쪽"),
@@ -115,14 +115,14 @@ class HwpPublicVisibilityTools:
             "source",
         )
         if isinstance(source, PublicActionResult):
-            return source
+            return source.model_copy(update={"request_id": operation_id})
         template = await self._resolved(
             document_path,
             template_page,
             "template",
         )
         if isinstance(template, PublicActionResult):
-            return template
+            return template.model_copy(update={"request_id": operation_id})
         try:
             plan = build_visibility_series_plan(
                 source.table,
@@ -132,10 +132,10 @@ class HwpPublicVisibilityTools:
             )
         except VisibilitySeriesPlanError as error:
             return self._public(
-                _failure(f"hwp-public-{uuid4().hex}", str(error)),
+                _failure(operation_id, str(error)),
             )
         inputs = HwpOperateInputs(
-            request_id=f"hwp-public-{uuid4().hex}",
+            request_id=operation_id,
             document=template.document_path,
             operation="table.build_series",
             target=template.target,

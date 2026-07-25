@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Literal
 
 from hwp_errors import HwpLiveError
 from hwp_live_native_action_models import (
@@ -9,6 +10,7 @@ from hwp_live_native_action_models import (
     NativeActionRequest,
     SelectControlCommand,
     SetCellTextCommand,
+    TextPatchCommand,
 )
 from hwp_live_rot import HwpDocumentCandidate
 from hwp_live_structure_contract import DocumentStructure, StructureCell, StructureTable
@@ -25,6 +27,7 @@ from hwp_operation_contract import (
     HwpOperatePostconditions,
     HwpOperateTarget,
 )
+from hwp_table_format_inference import infer_table_cell_edits
 
 
 _ADDRESS = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
@@ -36,6 +39,7 @@ class PreparedWorkflowTableFill:
     table_index: int
     control_instance_id: str
     replacements: tuple[tuple[str, str], ...]
+    native_protocol: Literal[9, 12]
 
 
 def _cell_map(table: StructureTable) -> dict[str, StructureCell]:
@@ -187,6 +191,8 @@ def prepare_table_fill(
     data: HwpOperateData,
     policy: HwpOperatePolicy,
     postconditions: HwpOperatePostconditions,
+    *,
+    surrounding_texts: tuple[str, ...] = (),
 ) -> PreparedWorkflowTableFill:
     _ = postconditions
     control_id = table.control_instance_id
@@ -197,10 +203,52 @@ def prepare_table_fill(
         data,
         fill_blanks_only=policy.fill_blanks_only,
     )
+    if policy.preserve_style:
+        edits = infer_table_cell_edits(
+            table,
+            replacements,
+            numeric_value_mode=policy.numeric_value_mode,
+            surrounding_texts=surrounding_texts,
+        )
+        replacements = tuple((edit.address, edit.replacement) for edit in edits)
+        edit_commands = tuple(
+            command
+            for edit in edits
+            for command in (
+                (
+                    SetCellTextCommand(
+                        edit.address,
+                        edit.replacement,
+                        expected_text=edit.expected_text,
+                        preserve_style=True,
+                    ),
+                )
+                if not edit.expected_text
+                else tuple(
+                    TextPatchCommand(
+                        target="table_cell",
+                        expected_text=patch.expected_text,
+                        replacement=patch.replacement,
+                        occurrence=patch.occurrence,
+                        match_case=True,
+                        table_instance_id=control_id,
+                        cell_address=edit.address,
+                        preserve_format=True,
+                    )
+                    for patch in edit.patches
+                )
+            )
+        )
+        native_protocol: Literal[9, 12] = 12
+    else:
+        edit_commands = tuple(
+            SetCellTextCommand(address, value) for address, value in replacements
+        )
+        native_protocol = 9
     commands = (
         SelectControlCommand(control_id),
         CaptureTableCommand(),
-        *(SetCellTextCommand(address, value) for address, value in replacements),
+        *edit_commands,
     )
     return PreparedWorkflowTableFill(
         request=NativeActionRequest(
@@ -211,6 +259,7 @@ def prepare_table_fill(
         table_index=table_index,
         control_instance_id=control_id,
         replacements=replacements,
+        native_protocol=native_protocol,
     )
 
 

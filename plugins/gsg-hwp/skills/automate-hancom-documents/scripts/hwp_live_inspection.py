@@ -189,6 +189,10 @@ def inspect_context(
             bottom_margin_mm=_number(page, "BottomMargin"),
             left_margin_mm=_number(page, "LeftMargin"),
             right_margin_mm=_number(page, "RightMargin"),
+            header_mm=_number(page, "HeaderLen"),
+            footer_mm=_number(page, "FooterLen"),
+            gutter_mm=_number(page, "GutterLen"),
+            gutter_type=_integer(page, "GutterType"),
         ),
     )
 

@@ -2,15 +2,25 @@
 
 GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서 현재 열려 있는 HWP 문서를 빠르게 조회하고 네이티브 방식으로 편집·검수하도록 연결하는 로컬 MCP**입니다.
 
-- 배포 버전: **v1.0.4**
-- MCP 런타임: `0.3.87`
-- C++ 네이티브 브리지: `0.5.55`
-- 네이티브 프로토콜: `9`
+- 배포 버전: **v1.1.0**
+- 원본 소스 버전: `0.5.73-dev.1`
+- MCP 런타임: `0.3.89`
+- C++ 네이티브 브리지: `0.5.121`
+- 네이티브 프로토콜: `12`
 - 개발자: **inodesign**
-- 공개 도구: 업무 도구 37개 + 런타임 재로드 1개 = 총 38개
+- 공개 도구: 업무 도구 44개 + 런타임 재로드 1개 = 총 45개
 - 공식 API 카탈로그: 1,452개 중 네이티브 라우팅 1,448개
 
 버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록합니다.
+
+### v1.1.0 주요 변경
+
+- 제공된 FULL `0.5.73-dev.1` 소스를 기준으로 Python MCP, C++/ATL 소스와 생산 바이너리를 빠짐없이 교체했습니다.
+- 참고 이미지 분석, 편집 가능한 네이티브 레이아웃 생성·수정, 사전 배치 검사와 작업 상태 조회 기능을 포함했습니다.
+- GitHub `main`에 새 배포 버전을 올리면 검증 후 Release와 `latest.json`을 만드는 자동 배포 워크플로를 추가했습니다.
+- 설치된 MCP는 6시간 간격으로 GitHub Release를 확인하고, SHA-256 검증과 자체 테스트를 통과한 버전만 자동 적용합니다.
+- 초기 설치와 모든 업데이트는 시스템 Python이 아니라 `%LOCALAPPDATA%\GSG_HWP\runtime\<버전>\.venv`의 **uv 관리 Python 3.12**만 사용합니다.
+- 업데이트 직전 DLL·HKCU 레지스트리·활성 버전 상태도 별도로 백업하며 `restore-update.ps1`로 직전 버전, `uninstall.ps1`로 최초 설치 전 상태를 복원할 수 있습니다.
 
 ### v1.0.4 주요 변경
 
@@ -143,7 +153,7 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 | `automation:0068` | `IHwpObject.ImportStyle` | 스타일 가져오기 | 공식 TLB 슬롯과 유효 `HStyleTemplate/HSet` 입력에서도 `0xD0000005`로 실패 |
 | `automation:0365` | `IDHwpParameterArray.Clone` | ParameterArray 복제 | 런타임 객체가 공식 인터페이스를 제공하지 않아 `E_NOINTERFACE`로 실패 |
 
-`1,448개 라우팅`은 `1,448개의 MCP 도구가 화면에 노출된다`는 뜻이 아닙니다. 실제 운영 표면은 작업 중심 도구 37개와 재로드 도구 1개로 제한합니다. 모든 API를 각각 도구로 노출하면 도구 스키마가 지나치게 커지고, AI가 비슷한 도구 사이에서 헤매며, 선택·전송·추론 병목이 생길 수 있기 때문입니다.
+`1,448개 라우팅`은 `1,448개의 MCP 도구가 화면에 노출된다`는 뜻이 아닙니다. 실제 운영 표면은 작업 중심 도구 44개와 재로드 도구 1개로 제한합니다. 모든 API를 각각 도구로 노출하면 도구 스키마가 지나치게 커지고, AI가 비슷한 도구 사이에서 헤매며, 선택·전송·추론 병목이 생길 수 있기 때문입니다.
 
 원하는 기능이 공개 도구에 없더라도 내부 카탈로그와 네이티브 라우트에 대응 기능이 이미 있는 경우가 많습니다. 다음처럼 에이전트에게 **필요한 기능 하나만** 연결해 달라고 요청할 수 있습니다.
 
@@ -158,7 +168,9 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 - Codex 데스크톱/CLI, Claude Code 또는 로컬 stdio MCP를 지원하는 에이전트 앱
 - Git
 - `uv` 패키지 관리자
-- Python 3.12 런타임은 설치 과정에서 사용자별 격리 환경으로 구성
+- `uv`가 내려받고 관리하는 Python 3.12를 버전별 `.venv`에 격리하여 사용
+
+배포 ZIP에는 개발자의 `.venv`나 일반 Python 설치본을 넣지 않습니다. `install.ps1`이 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\1.1.0\.venv`를 새로 만들며, 시작 스크립트는 그 안의 `Scripts\python.exe`만 실행합니다. PC에 별도로 설치된 시스템 Python 3.12는 선택하거나 수정하지 않습니다.
 
 네이티브 UserAction DLL, 파일 경로 보안 모듈과 Event Bridge는 `Win32`, 런처는 `x64` Release 빌드입니다. 다른 한/글 주버전·비트 조합은 별도 검증 전까지 지원 대상으로 간주하지 않습니다.
 
@@ -174,11 +186,11 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 
 ### Codex에 요청
 
-> https://github.com/innae1121-bit/gsghwp.git 를 설치해줘. 먼저 README.md와 AGENTS.md를 읽고, 변경되는 DLL 2개·HKCU 레지스트리 3개 값·백업 위치·원상복구 방법을 나에게 안내해. install.ps1을 옵션 없이 실행해 미리보기를 보여준 뒤 설치를 진행하고, gsg-hwp 플러그인을 등록해서 새 작업에서 MCP 도구를 확인해줘.
+> https://github.com/innae1121-bit/gsghwp.git 를 설치해줘. 먼저 README.md와 AGENTS.md를 읽고, 변경되는 DLL 2개·HKCU 레지스트리 3개 값·백업 위치·자동 업데이트·직전 버전 및 최초 상태 복구 방법을 나에게 안내해. install.ps1을 옵션 없이 실행해 미리보기를 보여준 뒤 설치를 진행하고, 전용 uv 관리 `.venv`가 생성됐는지 확인하고 gsg-hwp 플러그인을 등록해서 새 작업에서 MCP 도구를 확인해줘.
 
 ### Claude Code에 요청
 
-> https://github.com/innae1121-bit/gsghwp.git 를 설치해줘. README.md와 CLAUDE.md를 먼저 읽고 DLL·레지스트리 백업/복원 내용을 안내한 뒤 install.ps1 미리보기와 실제 설치를 실행해. 마지막에 gsg-hwp stdio MCP를 사용자 범위로 등록하고 연결 상태를 확인해줘.
+> https://github.com/innae1121-bit/gsghwp.git 를 설치해줘. README.md와 CLAUDE.md를 먼저 읽고 DLL·레지스트리 백업/복원, 자동 업데이트와 전용 `.venv` 내용을 안내한 뒤 install.ps1 미리보기와 실제 설치를 실행해. 마지막에 gsg-hwp stdio MCP를 사용자 범위로 등록하고 연결 상태를 확인해줘.
 
 ### 다른 에이전트 앱에 요청
 
@@ -190,14 +202,16 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 
 | 항목 | 변경 내용 |
 |---|---|
-| 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.55\HancomLiveBridge.dll` 복사 또는 교체 |
+| 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.121\HancomLiveBridge.dll` 복사 또는 교체 |
 | 파일 경로 보안 DLL | `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll` 복사 또는 교체 |
 | 레지스트리 1 | `HKCU\Software\HNC\HwpUserAction\Modules`의 `한컴브릿지` 값 |
 | 레지스트리 2 | `HKCU\Software\HNC\HwpUserAction\Modules\Uses`의 `한컴브릿지` 값 |
 | 레지스트리 3 | `HKCU\Software\HNC\HwpAutomation\Modules`의 `FilePathCheckerModule` 값 |
 | 원본 백업 | `%LOCALAPPDATA%\GSG_HWP\backups\<시각-식별자>` |
 | 활성 설치 기록 | `%LOCALAPPDATA%\GSG_HWP\state\active-install.json` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.0.4\.venv` |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.1.0\.venv` |
+| 자동 업데이트 상태 | `%LOCALAPPDATA%\GSG_HWP\updater` |
+| 내려받은 버전 | `%LOCALAPPDATA%\GSG_HWP\packages\<버전>\gsg-hwp` |
 
 백업에는 다음 정보가 저장됩니다.
 
@@ -206,7 +220,30 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 - 원래 값의 종류(`String`, `DWord` 등)와 실제 값
 - 두 대상 경로에 DLL이 원래 있었는지와 기존 DLL 원본
 
-설치는 현재 사용자 영역인 HKCU만 사용합니다. HKLM, `regsvr32`, 관리자 권한은 사용하지 않습니다. MCP 서버 시작은 설치 상태를 **읽기 전용으로 확인**할 뿐 DLL 복사나 레지스트리 변경을 자동 실행하지 않습니다.
+설치는 현재 사용자 영역인 HKCU만 사용합니다. HKLM, `regsvr32`, 관리자 권한은 사용하지 않습니다. 최초 설치는 반드시 `-AcceptChanges`가 있어야 실행됩니다. 이후 MCP 시작 시 자동 업데이트를 확인하며, 새 버전이 있고 한/글이 종료된 상태일 때만 새 DLL과 HKCU 값을 적용합니다. 이때도 직전 상태를 먼저 별도 백업하며 실패하면 기존 버전으로 되돌립니다.
+
+## 자동 업데이트
+
+설치 후 MCP를 시작할 때 다음 순서로 업데이트합니다.
+
+1. 6시간 간격으로 공식 GitHub Release의 `latest.json`을 확인합니다.
+2. 버전이 더 높을 때만 태그가 고정된 `gsg-hwp-plugin-v<버전>.zip`을 받습니다.
+3. `latest.json`의 SHA-256과 ZIP 내부 경로를 검증합니다. 임의 서버나 `main` 브랜치 ZIP은 실행하지 않습니다.
+4. 새 버전 전용 uv 관리 `.venv`를 만들고 MCP import 자체 테스트를 수행합니다.
+5. 한/글이 실행 중이면 변경하지 않고 다음 시작까지 보류합니다.
+6. DLL·레지스트리 직전 상태를 백업한 뒤 새 버전을 적용합니다. 네트워크 또는 검증 실패 시 현재 버전을 그대로 실행합니다.
+
+자동 업데이트를 끄려면 MCP 클라이언트 환경 변수에 `GSG_HWP_AUTO_UPDATE=0`을 설정합니다. 직전 업데이트만 되돌릴 때는 한/글을 종료한 뒤 다음 명령을 사용합니다.
+
+```powershell
+# 미리보기
+.\restore-update.ps1
+
+# 직전 자동 업데이트의 DLL·HKCU·활성 패키지 상태 복원
+.\restore-update.ps1 -AcceptChanges
+```
+
+개발자가 새 버전을 배포할 때는 `.codex-plugin/plugin.json`과 `compatibility-manifest.json`의 배포 버전을 함께 올려 `main`에 반영해야 합니다. `.github/workflows/publish-release.yml`이 안전 QA를 통과한 경우에만 같은 버전의 GitHub Release, 업데이트 ZIP과 `latest.json`을 자동 생성합니다. 버전 번호를 올리지 않은 커밋은 기존 Release를 덮어쓰지 않습니다.
 
 ## 수동 설치
 
@@ -327,6 +364,7 @@ claude mcp remove gsg-hwp
 ```text
 gsghwp/
 ├─ .agents/plugins/marketplace.json   # GitHub 기반 Codex 마켓플레이스
+├─ .github/workflows/publish-release.yml # 버전별 GitHub Release 자동 생성
 ├─ .mcp.json                          # Claude Code 프로젝트용 stdio 설정
 ├─ AGENTS.md                          # 범용·Codex 설치/복원 지침
 ├─ CLAUDE.md                          # Claude Code 설치/복원 지침
@@ -335,13 +373,15 @@ gsghwp/
 ├─ LICENSE                            # GSG HWP 자체 코드의 MIT License
 ├─ THIRD_PARTY_NOTICES.md             # 외부 구성요소·한컴·미디어 권리 고지
 ├─ install.ps1                        # 미리보기, 런타임 설치, DLL/레지스트리 백업·등록
+├─ restore-update.ps1                 # 직전 자동 업데이트 상태 복원
 ├─ uninstall.ps1                      # DLL/레지스트리 원상복구
 └─ plugins/gsg-hwp/
    ├─ .codex-plugin/plugin.json       # inodesign 개발자 메타데이터
    ├─ .mcp.json                       # Codex 플러그인 stdio 설정
    ├─ compatibility-manifest.json     # 구성요소 버전·해시·API 범위
    ├─ pyproject.toml / uv.lock        # Python 3.12 의존성 잠금
-   ├─ scripts/                        # 휴대형 MCP 시작과 설치 모듈
+   ├─ update-policy.json              # 공식 Release 자동 업데이트 정책
+   ├─ scripts/                        # 휴대형 MCP 시작, 설치·업데이트 모듈
    ├─ addon/
    │  ├─ HancomLiveBridgeNative/      # C++ UserAction DLL 및 ATL 배치 소스
    │  ├─ HancomEventBridge/           # Win32 이벤트 사이드카
@@ -368,7 +408,9 @@ GSG HWP의 MIT License는 자체 코드의 사용·수정·재배포·상업적 
 - MCP 시작 경로는 개발자 절대 경로가 아니라 플러그인 상대 경로와 `%LOCALAPPDATA%`를 사용합니다.
 - 사용자 문서는 기본적으로 로컬 한/글 프로세스에서 처리됩니다.
 
-## 업데이트
+## 수동 업데이트
+
+자동 업데이트를 끈 환경이나 저장소 자체를 최신 버전으로 바꾸려는 경우에만 사용합니다.
 
 ```powershell
 Set-Location (Join-Path $env:LOCALAPPDATA "GSG_HWP\source")
@@ -379,7 +421,7 @@ codex plugin marketplace upgrade gsg-hwp
 codex plugin add gsg-hwp@gsg-hwp
 ```
 
-활성 설치가 유지되는 동안 최초 설치 전 백업은 덮어쓰지 않습니다. 업데이트 후 앱을 다시 시작하고 새 작업에서 `hwp_runtime_info`를 확인합니다.
+활성 설치가 유지되는 동안 최초 설치 전 백업은 덮어쓰지 않습니다. 수동 업데이트도 새 DLL·레지스트리를 적용하기 직전에 복구용 스냅샷을 추가합니다. 업데이트 후 앱을 다시 시작하고 새 작업에서 `hwp_runtime_info`를 확인합니다.
 
 ## 문제 해결
 

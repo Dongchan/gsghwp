@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+# noqa: E501  # noqa: SIZE_OK — public action schemas and their opaque target store form one boundary.
+
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Annotated, Final, Literal, Protocol, final
 from uuid import uuid4
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
-from hwp_live_contract import MutationResult
+from hwp_color_normalization import canonical_rgb_hex, parse_rgb_color
 from hwp_live_structure_contract import FastPageInspection
+from hwp_live_native_action_models import NativePosition
+from hwp_live_native_format_inputs import TextFormatSpec
+from hwp_live_text_patch_contract import TextPatchRequest, TextPatchTarget
 from hwp_live_values import ContractModel
 from hwp_operation_contract import (
     HwpOperateGuards,
@@ -36,6 +41,18 @@ type PublicFontSize = Annotated[float, Field(ge=1, le=96)]
 type PublicTextColor = Annotated[str, Field(min_length=1, max_length=50)]
 type PublicLineSpacing = Annotated[int, Field(ge=50, le=500)]
 type PublicReplacementText = Annotated[str, Field(max_length=1_000_000)]
+type PublicExpectedText = Annotated[str, Field(max_length=1_000_000)]
+type PublicOperationId = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=128,
+        description=(
+            "호출자가 논리 작업마다 한 번 생성하고 응답 유실 후 재시도할 때 "
+            "그대로 재사용하는 안정 ID. 저널 보존 만료 후에도 다른 작업에 재사용하지 않습니다"
+        ),
+    ),
+]
 
 _NATIVE_CONTROL_KINDS: Final[Mapping[str, PublicObjectKind]] = MappingProxyType(
     {
@@ -77,9 +94,80 @@ class PublicActionExecutor(Protocol):
 class PublicSelectionExecutor(PublicActionExecutor, Protocol):
     async def replace_selected_text(
         self,
-        document_selector: str | None,
+        intent: str,
+        inputs: HwpOperateInputs,
         replacement: str,
-    ) -> MutationResult: ...
+    ) -> OperationResult: ...
+
+    async def patch_text(
+        self,
+        intent: str,
+        inputs: HwpOperateInputs,
+        request: TextPatchRequest,
+    ) -> OperationResult: ...
+
+
+class PublicTextPatchPosition(ContractModel):
+    list_id: int = Field(ge=0)
+    paragraph: int = Field(ge=0)
+    character: int = Field(ge=0)
+
+    def to_native(self) -> NativePosition:
+        return NativePosition(self.list_id, self.paragraph, self.character)
+
+
+class PublicTextPatchTarget(ContractModel):
+    kind: Literal["current", "range", "find", "table_cell"] = "current"
+    start: PublicTextPatchPosition | None = None
+    end: PublicTextPatchPosition | None = None
+    occurrence: int | None = Field(default=None, ge=1, le=1_000_000)
+    match_case: bool = False
+    table_instance_id: str | None = Field(default=None, min_length=1, max_length=100)
+    cell: str | None = Field(default=None, pattern=r"^[A-Za-z]+[1-9][0-9]*$")
+
+    @model_validator(mode="after")
+    def validate_target_fields(self) -> PublicTextPatchTarget:
+        range_fields = self.start is not None or self.end is not None
+        search_fields = self.occurrence is not None or self.match_case
+        cell_fields = self.table_instance_id is not None or self.cell is not None
+        valid = {
+            "current": not range_fields and not search_fields and not cell_fields,
+            "range": self.start is not None
+            and self.end is not None
+            and not search_fields
+            and not cell_fields,
+            "find": not range_fields and not cell_fields,
+            "table_cell": not range_fields
+            and self.table_instance_id is not None
+            and self.cell is not None,
+        }[self.kind]
+        if not valid:
+            raise PydanticCustomError(
+                "public_text_patch_target",
+                "text.patch 대상 종류와 좌표·검색·표 셀 입력 조합이 올바르지 않습니다",
+            )
+        if (
+            self.kind == "range"
+            and self.start is not None
+            and self.end is not None
+            and self.start.list_id != self.end.list_id
+        ):
+            raise PydanticCustomError(
+                "public_text_patch_cross_control",
+                "text.patch 범위는 서로 다른 한컴 컨트롤을 가로지를 수 없습니다",
+            )
+        return self
+
+    def to_live(self) -> TextPatchTarget:
+        return TextPatchTarget(
+            kind=self.kind,
+            start=None if self.start is None else self.start.to_native(),
+            end=None if self.end is None else self.end.to_native(),
+            occurrence=self.occurrence,
+            match_case=self.match_case,
+            table_instance_id=self.table_instance_id,
+            cell_address=None if self.cell is None else self.cell.upper(),
+        )
 
 
 class PublicImageSize(ContractModel):
@@ -103,6 +191,19 @@ class PublicTextFormattingInput(ContractModel):
     text_color: PublicTextColor | None = None
     alignment: PublicTextAlignment = "inherit"
     line_spacing: PublicLineSpacing | None = None
+
+    @field_validator("text_color")
+    @classmethod
+    def normalize_text_color(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = parse_rgb_color(value)
+        if parsed is None:
+            raise PydanticCustomError(
+                "public_text_color",
+                "글자색은 이름, #RRGGBB, rgb(r,g,b), 또는 r,g,b 형식이어야 합니다",
+            )
+        return canonical_rgb_hex(parsed)
 
     @model_validator(mode="after")
     def require_format(self) -> PublicTextFormattingInput:
@@ -140,6 +241,19 @@ class PublicTextFormattingInput(ContractModel):
         if self.line_spacing is not None:
             parameters["line_spacing"] = self.line_spacing
         return parameters
+
+    def to_live(self) -> TextFormatSpec:
+        color = None if self.text_color is None else parse_rgb_color(self.text_color)
+        if self.text_color is not None and color is None:
+            raise RuntimeError("검증된 공개 글자색을 내부 RGB로 변환하지 못했습니다")
+        return TextFormatSpec(
+            self.bold,
+            self.font_name,
+            self.font_size_pt,
+            color,
+            self.alignment,
+            self.line_spacing,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +388,3 @@ class PublicObjectTargetStore:
     def clear(self) -> None:
         self._targets.clear()
         self._inspected_targets.clear()
-
-
-def new_public_request_id() -> str:
-    return f"hwp-public-{uuid4().hex}"

@@ -12,6 +12,7 @@ from hwp_operation_contract import (
     WorkflowMatchKind,
     WorkflowResolution,
 )
+from hwp_operation_descriptor import operation_descriptor
 from hwp_workflow_semantics import (
     WorkflowSemanticFrame,
     compact_workflow_text,
@@ -322,6 +323,16 @@ _DEFINITIONS: Final = (
     ),
 )
 
+def _descriptor_steps(definition: _WorkflowDefinition) -> tuple[str, ...]:
+    descriptor = operation_descriptor(definition.workflow_id)
+    return definition.steps if descriptor is None else descriptor.routing_steps
+
+
+def _descriptor_execution(definition: _WorkflowDefinition) -> WorkflowExecution:
+    descriptor = operation_descriptor(definition.workflow_id)
+    return definition.execution if descriptor is None else descriptor.execution
+
+
 _BY_ID: Final = {definition.workflow_id: definition for definition in _DEFINITIONS}
 _HYBRID_INDEX: Final = WorkflowHybridIndex(
     tuple(
@@ -330,7 +341,7 @@ _HYBRID_INDEX: Final = WorkflowHybridIndex(
             text=" ".join(
                 (
                     definition.description,
-                    *definition.steps,
+                    *_descriptor_steps(definition),
                     *(term for group in definition.groups for term in group),
                     *definition.contexts,
                     *definition.aliases,
@@ -365,23 +376,38 @@ def _candidate(
     return WorkflowCandidate(
         workflow_id=definition.workflow_id,
         description=definition.description,
-        steps=definition.steps,
-        execution=definition.execution,
+        steps=_descriptor_steps(definition),
+        execution=_descriptor_execution(definition),
         confidence=min(1, max(0, confidence)),
         match_kind=match_kind,
     )
 
 
 def _explicit_resolution(query: str, explicit: HwpWorkflowId, started: int) -> WorkflowResolution:
-    definition = _BY_ID[explicit]
-    candidate = _candidate(definition, 1, "explicit")
+    definition = _BY_ID.get(explicit)
+    if definition is None:
+        descriptor = operation_descriptor(explicit)
+        if descriptor is None:
+            raise HwpLiveError(f"등록되지 않은 한컴 operation입니다: {explicit}")
+        candidate = WorkflowCandidate(
+            workflow_id=explicit,
+            description=f"{explicit} descriptor operation",
+            steps=descriptor.routing_steps,
+            execution=descriptor.execution,
+            confidence=1,
+            match_kind="explicit",
+        )
+        steps = descriptor.routing_steps
+    else:
+        candidate = _candidate(definition, 1, "explicit")
+        steps = _descriptor_steps(definition)
     return WorkflowResolution(
         query=query,
         status="resolved",
         lookup_microseconds=(time.perf_counter_ns() - started) // 1_000,
         workflow_id=explicit,
         candidates=(candidate,),
-        steps=definition.steps,
+        steps=steps,
         match_kind="explicit",
     )
 
@@ -534,6 +560,6 @@ def resolve_workflow(
         lookup_microseconds=(time.perf_counter_ns() - started) // 1_000,
         workflow_id=top_definition.workflow_id if resolved else None,
         candidates=visible,
-        steps=top_definition.steps if resolved else (),
+        steps=_descriptor_steps(top_definition) if resolved else (),
         match_kind=top_kind if resolved else None,
     )

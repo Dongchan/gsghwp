@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "enabled": true,
+  "channel": "stable",
+  "manifest_url": "https://github.com/innae1121-bit/gsghwp/releases/latest/download/latest.json",
+  "check_interval_hours": 6,
+  "repository": "https://github.com/innae1121-bit/gsghwp"
+}

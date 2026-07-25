@@ -11,7 +11,7 @@ the bridge. Callback counts, the last publication HRESULT, and ROT cookies are
 mirrored in `Local\\HancomLiveBridgeStatus.<PID>` so startup failures can be
 diagnosed without UI automation, temporary XML, or touching the document.
 
-The batch object exposes protocol version 9. `Snapshot` reads the active
+The batch object exposes protocol version 12. `Snapshot` reads the active
 document, cursor, selection text, current control/cell, paragraph style, and
 character/paragraph formatting in one in-process call. `InspectPage` preserves
 the protocol-v2 response for older clients. `InspectPageV3` reads a requested
@@ -27,10 +27,13 @@ cursor and selection once, walks `HeadCtrl` once, and returns all requested
 page inspections as one HPM1 response. Long table-series work therefore scales
 with document controls plus requested tables instead of multiplying a whole-
 document control walk by every candidate page.
-`SaveReopenVerify` is the sole explicit lifecycle exception: it saves the current
-document in-process, confirms that `IsModified` cleared, discards the in-memory
-document, reopens the same path with `lock:FALSE`, and returns protocol-9
-before/after structural evidence.
+`SaveVerify` is the normal save path. It saves the current document in-process
+without `Clear`, `Open`, closing a tab, or replacing the active document. It
+re-reads the page/control signature, plain-text hash, and full HWP serialization
+hash, so body text, table content, and character formatting must still match
+before it reports success. `SaveReopenVerify` is a separate explicit diagnostic.
+It performs the save/discard/reopen round trip, compares the same fingerprints,
+and restores the captured HWP document block when reopening fails.
 
 `InspectStructure` uses only the official in-process Automation API to return
 page-spanning tables, cell ranges and merges, nested pictures/tables, caption
@@ -76,11 +79,28 @@ client runs native undo/redo one step at a time and stops as soon as the saved
 page/control signature is restored, so one MCP undo reverses one MCP deletion
 batch without allocating a full-document BSTR checkpoint.
 
+Protocol 10 adds `ReferenceLayoutBulk` inside the same `ExecuteActions`
+mutation engine. It receives compressed breakpoints, merges, visible edges,
+style regions, and text anchors; applies `TableCreation.RowHeight/ColWidth`
+arrays once; clears all borders once; uses the official multi-cell zone
+actions for regions and visible edges; performs all merges against one stable
+topology; and rebuilds and verifies the final topology once.
+
+Protocol 11 adds atomic `PATCH_TEXT` targeting the current cursor/selection,
+an exact native range, an unambiguous search result, or a table cell. The
+replacement range remains selected for formatting and operation-specific
+readback.
+
+Protocol 12 separates non-destructive `SaveVerify` from the explicit
+`SaveReopenVerify` diagnostic and adds full text/document fingerprints plus
+failed-reopen session recovery.
+
 Excel/PPT planning stays outside HWP, but the resulting table or report is sent
 to HWP as one ATL call. This keeps source parsing replaceable while all document
-mutation remains in-process. By default the bridge never saves, closes, restarts,
-or opens another copy of the user's active document; only an explicit
-`SaveReopenVerify` call performs the save/discard/reopen lifecycle described above.
+mutation remains in-process. By default the bridge never closes, restarts, or
+opens another copy of the user's active document. `SaveVerify` saves in place;
+only an explicit `SaveReopenVerify` call performs the save/discard/reopen
+lifecycle described above.
 
 Build with Visual Studio C++ for `Release|Win32`. The output uses the static C
 runtime and has no MFC dependency:

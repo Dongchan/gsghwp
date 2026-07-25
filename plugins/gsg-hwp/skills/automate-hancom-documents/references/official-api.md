@@ -19,7 +19,7 @@ Rules:
 - Search exact official identifiers before implementing a call.
 - For an Action, inspect its referenced ParameterSet and item types.
 - For an Automation member, use the documented declaration and account for return and out parameters.
-- Do not route raw `Open`, `Save`, `SaveAs`, `Clear`, `Close`, or `Quit` members from natural language. The only production live lifecycle operation is the certified `document.save_reopen_verify`, and it is available only when the user explicitly requests it. It executes documented `IHwpObject.Save`, `Clear`, and `Open` calls inside one protocol-9 C++/ATL command and rechecks the same path and structure.
+- Do not route raw `Open`, `Save`, `SaveAs`, `Clear`, `Close`, or `Quit` members from natural language. Production exposes two bounded lifecycle operations: `document.save` executes `IHwpObject.Save` without closing or reopening and verifies text plus full HWP fingerprints; `document.save_reopen_verify` is the explicit diagnostic that additionally executes `Clear` and `Open`, verifies the same fingerprints, and restores a captured HWP block if reopening fails.
 - Never substitute Windows UI automation or Python COM document access for an unavailable official operation.
 - Never expose an undocumented ABI as an official Hancom API.
 - Rebuild the catalog only with `tools/build_official_api_catalog.py` and preserve the recorded PDF hashes.

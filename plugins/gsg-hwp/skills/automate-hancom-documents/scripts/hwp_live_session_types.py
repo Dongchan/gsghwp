@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Protocol
 
 from hwp_live_api import LiveHwpApplication
@@ -9,6 +10,12 @@ from hwp_live_rot import HwpDocumentCandidate
 
 
 RoutingContextReader = Callable[[int, int | None], NativePageInspection | None]
+
+
+@dataclass(frozen=True, slots=True)
+class LiveSessionReference:
+    session_id: str
+    selector: str
 
 
 class DocumentCatalog(Protocol):

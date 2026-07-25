@@ -23,8 +23,8 @@ using hancom::dispatch::AsDispatch;
 using hancom::dispatch::AsString;
 using hancom::dispatch::Method;
 using hancom::dispatch::PropertyGet;
-using hancom::official_api::CaptureDocumentState;
-using hancom::official_api::DocumentState;
+using hancom::official_api::CaptureDocumentFingerprint;
+using hancom::official_api::DocumentFingerprint;
 
 HRESULT ReadFullName(IDispatch* const hwp, std::wstring* const path) noexcept {
     CComVariant rawDocuments;
@@ -163,13 +163,120 @@ std::wstring EncodeUtf8Base64(const std::wstring& value) {
     return std::wstring(encoded.data());
 }
 
+bool SameFingerprint(
+    const DocumentFingerprint& before,
+    const DocumentFingerprint& after) noexcept {
+    return before.captured && after.captured &&
+        before.state.pageCount == after.state.pageCount &&
+        before.state.controlCount == after.state.controlCount &&
+        before.state.controlHash == after.state.controlHash &&
+        before.textLength == after.textLength &&
+        before.textHash == after.textHash &&
+        before.documentLength == after.documentLength &&
+        before.documentHash == after.documentHash;
+}
+
+std::uint64_t FileSize(const std::wstring& path) noexcept {
+    WIN32_FILE_ATTRIBUTE_DATA attributes = {};
+    if (!GetFileAttributesExW(
+            path.c_str(),
+            GetFileExInfoStandard,
+            &attributes) ||
+        (attributes.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        return 0;
+    }
+    return
+        (static_cast<std::uint64_t>(attributes.nFileSizeHigh) << 32) |
+        static_cast<std::uint64_t>(attributes.nFileSizeLow);
+}
+
+bool ReadDocumentBlock(
+    IDispatch* const hwp,
+    std::wstring* const documentBlock) noexcept {
+    CComVariant raw;
+    return SUCCEEDED(Method(
+               hwp,
+               L"GetTextFile",
+               {CComVariant(L"HWP"), CComVariant(L"")},
+               &raw)) &&
+        SUCCEEDED(AsString(raw, documentBlock)) &&
+        !documentBlock->empty();
+}
+
+}
+
+std::wstring SaveVerify(IDispatch* const hwp) {
+    const auto started = std::chrono::steady_clock::now();
+    std::wstring path;
+    const HRESULT pathStatus = ReadFullName(hwp, &path);
+    const DocumentFingerprint before = CaptureDocumentFingerprint(hwp);
+
+    HRESULT saveStatus = E_PENDING;
+    LONG saveReturn = -1;
+    LONG postSaveModified = -1;
+    if (FAILED(pathStatus) || path.empty()) {
+        saveStatus = FAILED(pathStatus) ? pathStatus : E_INVALIDARG;
+    } else {
+        CComVariant saveIfDirty;
+        saveIfDirty.vt = VT_BOOL;
+        saveIfDirty.boolVal = VARIANT_TRUE;
+        CComVariant rawSaveReturn;
+        saveStatus = Method(hwp, L"Save", {saveIfDirty}, &rawSaveReturn);
+        saveReturn = BooleanReturn(rawSaveReturn);
+        if (SUCCEEDED(saveStatus)) {
+            postSaveModified = ReadModified(hwp);
+        }
+    }
+
+    std::wstring afterPath;
+    const HRESULT afterPathStatus = ReadFullName(hwp, &afterPath);
+    const DocumentFingerprint after = CaptureDocumentFingerprint(hwp);
+    const std::uint64_t fileSize =
+        SUCCEEDED(afterPathStatus) ? FileSize(afterPath) : 0;
+    const bool saveCompleted = SUCCEEDED(saveStatus) &&
+        postSaveModified == 0 &&
+        (saveReturn == 1 || (before.state.modified == 0 && saveReturn == 0));
+    const bool verified =
+        SUCCEEDED(pathStatus) &&
+        SUCCEEDED(afterPathStatus) &&
+        saveCompleted &&
+        SamePath(path, afterPath) &&
+        SameFingerprint(before, after) &&
+        after.state.modified == 0;
+    const long long elapsedMicroseconds =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started).count();
+
+    std::wostringstream output;
+    output << L"HLS1\t" << (verified ? 1 : 0) << L'\t'
+           << EncodeUtf8Base64(afterPath)
+           << L'\t' << before.state.pageCount
+           << L'\t' << before.state.modified
+           << L'\t' << before.state.controlCount
+           << L'\t' << before.state.controlHash
+           << L'\t' << before.textHash
+           << L'\t' << before.documentHash
+           << L'\t' << saveStatus
+           << L'\t' << saveReturn
+           << L'\t' << postSaveModified
+           << L'\t' << after.state.pageCount
+           << L'\t' << after.state.modified
+           << L'\t' << after.state.controlCount
+           << L'\t' << after.state.controlHash
+           << L'\t' << after.textHash
+           << L'\t' << after.documentHash
+           << L'\t' << fileSize
+           << L'\t' << elapsedMicroseconds;
+    return output.str();
 }
 
 std::wstring SaveReopenVerify(IDispatch* const hwp) {
     const auto started = std::chrono::steady_clock::now();
     std::wstring path;
     const HRESULT pathStatus = ReadFullName(hwp, &path);
-    const DocumentState before = CaptureDocumentState(hwp);
+    const DocumentFingerprint before = CaptureDocumentFingerprint(hwp);
+    std::wstring recoveryBlock;
+    const bool recoveryCaptured = ReadDocumentBlock(hwp, &recoveryBlock);
 
     HRESULT saveStatus = E_PENDING;
     LONG saveReturn = -1;
@@ -178,6 +285,8 @@ std::wstring SaveReopenVerify(IDispatch* const hwp) {
     LONG clearReturn = -1;
     HRESULT openStatus = E_PENDING;
     LONG openReturn = -1;
+    HRESULT recoveryStatus = E_PENDING;
+    LONG recoveryReturn = -1;
     bool saveCompleted = false;
 
     if (FAILED(pathStatus) || path.empty()) {
@@ -193,7 +302,7 @@ std::wstring SaveReopenVerify(IDispatch* const hwp) {
             postSaveModified = ReadModified(hwp);
         }
         saveCompleted = SUCCEEDED(saveStatus) && postSaveModified == 0 &&
-            (saveReturn == 1 || (before.modified == 0 && saveReturn == 0));
+            (saveReturn == 1 || (before.state.modified == 0 && saveReturn == 0));
         if (saveCompleted) {
             CComVariant discard;
             discard.vt = VT_I2;
@@ -210,34 +319,65 @@ std::wstring SaveReopenVerify(IDispatch* const hwp) {
                      CComVariant(L"lock:FALSE")},
                     &rawOpenReturn);
                 openReturn = BooleanReturn(rawOpenReturn);
+                if ((FAILED(openStatus) || openReturn != 1) && recoveryCaptured) {
+                    CComVariant rawRecoveryReturn;
+                    recoveryStatus = Method(
+                        hwp,
+                        L"SetTextFile",
+                        {
+                            CComVariant(recoveryBlock.c_str()),
+                            CComVariant(L"HWP"),
+                            CComVariant(L""),
+                        },
+                        &rawRecoveryReturn);
+                    recoveryReturn = BooleanReturn(rawRecoveryReturn);
+                }
             }
         }
     }
 
     std::wstring afterPath;
     const HRESULT afterPathStatus = ReadFullName(hwp, &afterPath);
-    const DocumentState after = CaptureDocumentState(hwp);
+    const DocumentFingerprint after = CaptureDocumentFingerprint(hwp);
     const std::wstring encodedPath = EncodeUtf8Base64(afterPath);
+    const bool openCompleted = SUCCEEDED(openStatus) && openReturn == 1;
+    const bool recovered = !openCompleted &&
+        SUCCEEDED(recoveryStatus) &&
+        recoveryReturn == 1 &&
+        SameFingerprint(before, after);
     const bool verified = SUCCEEDED(pathStatus) && SUCCEEDED(afterPathStatus) &&
-        saveCompleted && SUCCEEDED(clearStatus) && SUCCEEDED(openStatus) &&
-        before.pageCount >= 0 && before.modified >= 0 &&
-        before.controlCount >= 0 && after.pageCount == before.pageCount &&
-        after.modified == 0 && after.controlCount == before.controlCount &&
-        after.controlHash == before.controlHash && !encodedPath.empty() &&
+        saveCompleted && SUCCEEDED(clearStatus) && openCompleted &&
+        after.state.modified == 0 && SameFingerprint(before, after) &&
+        !encodedPath.empty() &&
         SamePath(path, afterPath);
     const long long elapsedMicroseconds =
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - started).count();
 
     std::wostringstream output;
-    output << L"HCL8\t" << (verified ? 1 : 0) << L'\t' << encodedPath
-           << L'\t' << before.pageCount << L'\t' << before.modified
-           << L'\t' << before.controlCount << L'\t' << before.controlHash
-           << L'\t' << saveStatus << L'\t' << saveReturn
-           << L'\t' << postSaveModified << L'\t' << clearStatus
-           << L'\t' << clearReturn << L'\t' << openStatus << L'\t' << openReturn
-           << L'\t' << after.pageCount << L'\t' << after.modified
-           << L'\t' << after.controlCount << L'\t' << after.controlHash
+    output << L"HCL12\t" << (verified ? 1 : 0) << L'\t' << encodedPath
+           << L'\t' << before.state.pageCount
+           << L'\t' << before.state.modified
+           << L'\t' << before.state.controlCount
+           << L'\t' << before.state.controlHash
+           << L'\t' << before.textHash
+           << L'\t' << before.documentHash
+           << L'\t' << saveStatus
+           << L'\t' << saveReturn
+           << L'\t' << postSaveModified
+           << L'\t' << clearStatus
+           << L'\t' << clearReturn
+           << L'\t' << openStatus
+           << L'\t' << openReturn
+           << L'\t' << (recovered ? 1 : 0)
+           << L'\t' << recoveryStatus
+           << L'\t' << recoveryReturn
+           << L'\t' << after.state.pageCount
+           << L'\t' << after.state.modified
+           << L'\t' << after.state.controlCount
+           << L'\t' << after.state.controlHash
+           << L'\t' << after.textHash
+           << L'\t' << after.documentHash
            << L'\t' << elapsedMicroseconds;
     return output.str();
 }

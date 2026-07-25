@@ -8,6 +8,7 @@ from hwp_live_session_inspection import LiveHwpInspectionSession
 from hwp_live_session_structure import (
     apply_validated_layout,
     insert_validated_table_images,
+    patch_validated_text,
     replace_validated_selection,
     update_validated_table_cells,
 )
@@ -19,6 +20,7 @@ from hwp_live_structure_contract import (
     TableImageUpdate,
     TableUpdateResult,
 )
+from hwp_live_text_patch_contract import TextPatchRequest, TextPatchResult
 
 
 class LiveHwpEditSession(LiveHwpInspectionSession):
@@ -39,6 +41,20 @@ class LiveHwpEditSession(LiveHwpInspectionSession):
             expected_selection,
             expected_text,
             replacement,
+            self._unsafe_selectors,
+            self._guard(candidate, hwp),
+        )
+
+    def patch_text(
+        self,
+        session_id: str,
+        request: TextPatchRequest,
+    ) -> TextPatchResult:
+        candidate, hwp = self._validate(session_id)
+        return patch_validated_text(
+            hwp,
+            candidate,
+            request,
             self._unsafe_selectors,
             self._guard(candidate, hwp),
         )

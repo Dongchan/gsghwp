@@ -6,11 +6,22 @@
 namespace hancom::dispatch {
 namespace {
 
+constexpr HRESULT kRpcCallRejected = static_cast<HRESULT>(0x80010001UL);
+constexpr HRESULT kRpcServerCallRetryLater = static_cast<HRESULT>(0x8001010AUL);
+constexpr HRESULT kRpcServerCallRejected = static_cast<HRESULT>(0x8001010BUL);
+constexpr DWORD kBusyRetryDelays[] = {25, 50, 100};
+
 HRESULT ExceptionStatus(const DWORD code) noexcept {
     return static_cast<HRESULT>(code | FACILITY_NT_BIT);
 }
 
-HRESULT GuardedGetIdsOfNames(
+bool IsComBusy(const HRESULT status) noexcept {
+    return status == kRpcCallRejected
+        || status == kRpcServerCallRetryLater
+        || status == kRpcServerCallRejected;
+}
+
+HRESULT GuardedGetIdsOfNamesOnce(
     IDispatch* const object,
     LPOLESTR* const names,
     const UINT count,
@@ -27,7 +38,23 @@ HRESULT GuardedGetIdsOfNames(
     }
 }
 
-HRESULT GuardedDispatchInvoke(
+HRESULT GuardedGetIdsOfNames(
+    IDispatch* const object,
+    LPOLESTR* const names,
+    const UINT count,
+    DISPID* const members) noexcept {
+    HRESULT status = E_FAIL;
+    for (const DWORD delay : kBusyRetryDelays) {
+        status = GuardedGetIdsOfNamesOnce(object, names, count, members);
+        if (!IsComBusy(status)) {
+            return status;
+        }
+        Sleep(delay);
+    }
+    return GuardedGetIdsOfNamesOnce(object, names, count, members);
+}
+
+HRESULT GuardedDispatchInvokeOnce(
     IDispatch* const object,
     const DISPID member,
     const WORD flags,
@@ -48,6 +75,22 @@ HRESULT GuardedDispatchInvoke(
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return ExceptionStatus(GetExceptionCode());
     }
+}
+
+void ClearExceptionInfo(EXCEPINFO* const exception) noexcept {
+    if (exception == nullptr) {
+        return;
+    }
+    if (exception->bstrSource != nullptr) {
+        SysFreeString(exception->bstrSource);
+    }
+    if (exception->bstrDescription != nullptr) {
+        SysFreeString(exception->bstrDescription);
+    }
+    if (exception->bstrHelpFile != nullptr) {
+        SysFreeString(exception->bstrHelpFile);
+    }
+    *exception = {};
 }
 
 }
@@ -97,26 +140,48 @@ HRESULT Invoke(
     CComVariant localResult;
     EXCEPINFO exception{};
     UINT argumentError = 0;
-    status = GuardedDispatchInvoke(
-        object,
-        member,
-        flags,
-        &parameters,
-        result == nullptr ? nullptr : &localResult,
-        &exception,
-        &argumentError);
+    if (flags == DISPATCH_PROPERTYGET) {
+        for (const DWORD delay : kBusyRetryDelays) {
+            status = GuardedDispatchInvokeOnce(
+                object,
+                member,
+                flags,
+                &parameters,
+                result == nullptr ? nullptr : &localResult,
+                &exception,
+                &argumentError);
+            if (!IsComBusy(status)) {
+                break;
+            }
+            localResult.Clear();
+            ClearExceptionInfo(&exception);
+            argumentError = 0;
+            Sleep(delay);
+        }
+        if (IsComBusy(status)) {
+            status = GuardedDispatchInvokeOnce(
+                object,
+                member,
+                flags,
+                &parameters,
+                result == nullptr ? nullptr : &localResult,
+                &exception,
+                &argumentError);
+        }
+    } else {
+        status = GuardedDispatchInvokeOnce(
+            object,
+            member,
+            flags,
+            &parameters,
+            result == nullptr ? nullptr : &localResult,
+            &exception,
+            &argumentError);
+    }
     for (VARIANTARG& argument : reversed) {
         VariantClear(&argument);
     }
-    if (exception.bstrSource != nullptr) {
-        SysFreeString(exception.bstrSource);
-    }
-    if (exception.bstrDescription != nullptr) {
-        SysFreeString(exception.bstrDescription);
-    }
-    if (exception.bstrHelpFile != nullptr) {
-        SysFreeString(exception.bstrHelpFile);
-    }
+    ClearExceptionInfo(&exception);
     if (SUCCEEDED(status) && result != nullptr) {
         *result = localResult;
     }

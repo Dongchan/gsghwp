@@ -184,6 +184,7 @@ function Get-GsgHwpPaths {
     return [pscustomobject][ordered]@{
         PackageRoot = $root
         ManifestPath = $manifestPath
+        DataRoot = $dataRoot
         SourceDll = Join-Path $root (
             "addon\HancomLiveBridgeNative\bin\{0}\HancomLiveBridge.dll" -f $manifest.native_bridge
         )
@@ -200,6 +201,8 @@ function Get-GsgHwpPaths {
         StateRoot = $stateRoot
         ActiveState = Join-Path $stateRoot "active-install.json"
         BackupsRoot = Join-Path $dataRoot "backups"
+        PackagesRoot = Join-Path $dataRoot "packages"
+        UpdaterRoot = Join-Path $dataRoot "updater"
     }
 }
 
@@ -427,6 +430,7 @@ function Install-GsgHwpNative {
         $backupFile = New-GsgHwpBackup -Paths $Paths -PackageVersion $PackageVersion `
             -ModulesKeyPath $ModulesKeyPath `
             -AutomationModulesKeyPath $AutomationModulesKeyPath
+        $rollbackBackupFile = $backupFile
     }
     else {
         $activeState = Get-Content -LiteralPath $Paths.ActiveState -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -435,6 +439,10 @@ function Install-GsgHwpNative {
             throw "The active installation backup is missing: $backupFile"
         }
         Ensure-GsgHwpSecurityBackup -Paths $Paths -BackupFile $backupFile `
+            -AutomationModulesKeyPath $AutomationModulesKeyPath
+        $rollbackBackupFile = New-GsgHwpBackup -Paths $Paths `
+            -PackageVersion "$PackageVersion-update-rollback" `
+            -ModulesKeyPath $ModulesKeyPath `
             -AutomationModulesKeyPath $AutomationModulesKeyPath
     }
 
@@ -482,15 +490,14 @@ function Install-GsgHwpNative {
         Write-GsgHwpJson -Value $state -Path $Paths.ActiveState
     }
     catch {
-        if ($createdBackup) {
-            Restore-GsgHwpBackup -Paths $Paths -BackupFile $backupFile
-        }
+        Restore-GsgHwpBackup -Paths $Paths -BackupFile $rollbackBackupFile
         throw
     }
 
     return [pscustomobject][ordered]@{
         Changed = $true
         BackupFile = $backupFile
+        RollbackBackupFile = $rollbackBackupFile
         NativeDll = $Paths.NativeDll
         SecurityDll = $Paths.SecurityDll
     }
@@ -530,6 +537,26 @@ function Remove-GsgHwpRuntime {
     }
 }
 
+function Remove-GsgHwpManagedUpdates {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Paths,
+        [switch]$KeepRuntime
+    )
+
+    $targets = @($Paths.PackagesRoot, $Paths.UpdaterRoot)
+    if (-not $KeepRuntime) {
+        $targets += $Paths.RuntimeRoot
+    }
+    foreach ($target in $targets) {
+        Assert-GsgHwpChildPath -Child $target -Parent $Paths.DataRoot
+        if (Test-Path -LiteralPath $target -PathType Container) {
+            Remove-Item -LiteralPath $target -Recurse -Force
+        }
+    }
+}
+
 function Test-GsgHwpStopped {
     return @(Get-Process -Name "Hwp" -ErrorAction SilentlyContinue).Count -eq 0
 }
@@ -537,7 +564,9 @@ function Test-GsgHwpStopped {
 Export-ModuleMember -Function @(
     "Get-GsgHwpPaths",
     "Install-GsgHwpNative",
+    "Remove-GsgHwpManagedUpdates",
     "Remove-GsgHwpRuntime",
+    "Restore-GsgHwpBackup",
     "Restore-GsgHwpNative",
     "Test-GsgHwpPackage",
     "Test-GsgHwpSecurityModule",

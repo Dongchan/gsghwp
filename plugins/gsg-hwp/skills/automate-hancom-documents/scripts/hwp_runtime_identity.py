@@ -19,7 +19,7 @@ class RuntimeBuildInfo(BaseModel):
     distribution: str = Field(min_length=1)
     mcp: str = Field(min_length=1)
     native_bridge: str = Field(min_length=1)
-    protocol: Literal[9]
+    protocol: Literal[9, 10, 11, 12]
 
 
 class RuntimeIdentity(RuntimeBuildInfo):
@@ -37,6 +37,10 @@ class RuntimeStatus(RuntimeIdentity):
     source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     loaded_source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     reload_required: bool
+    worker_state: Literal["idle", "busy", "unknown"] = "idle"
+    reload_state: Literal["not_requested", "reloaded", "deferred", "unknown"] = (
+        "not_requested"
+    )
 
 
 class RuntimeStartupRecord(BaseModel):
@@ -52,9 +56,7 @@ RUNTIME_WATCH_PATHS: Final = (
     PLUGIN_ROOT / "compatibility-manifest.json",
 )
 RUNTIME_IDENTITY: Final = RuntimeIdentity.model_validate_json(
-    (PLUGIN_ROOT / "compatibility-manifest.json").read_text(
-        encoding="utf-8"
-    )
+    (PLUGIN_ROOT / "compatibility-manifest.json").read_text(encoding="utf-8")
 )
 RUNTIME_BUILD_INFO: Final = RuntimeBuildInfo(
     distribution=RUNTIME_IDENTITY.distribution,

@@ -60,6 +60,8 @@ class NativeLifecycleResult:
     before_modified: bool | None
     before_control_count: int | None
     before_control_hash: str | None
+    before_text_hash: str | None
+    before_document_hash: str | None
     save_hresult: int
     save_return: int
     post_save_modified: bool | None
@@ -67,10 +69,38 @@ class NativeLifecycleResult:
     clear_return: int
     open_hresult: int
     open_return: int
+    recovered: bool
+    recovery_hresult: int
+    recovery_return: int
     after_page_count: int | None
     after_modified: bool | None
     after_control_count: int | None
     after_control_hash: str | None
+    after_text_hash: str | None
+    after_document_hash: str | None
+    elapsed_microseconds: int
+
+
+@dataclass(frozen=True, slots=True)
+class NativeSaveResult:
+    verified: bool
+    saved_path: str | None
+    before_page_count: int | None
+    before_modified: bool | None
+    before_control_count: int | None
+    before_control_hash: str | None
+    before_text_hash: str | None
+    before_document_hash: str | None
+    save_hresult: int
+    save_return: int
+    post_save_modified: bool | None
+    after_page_count: int | None
+    after_modified: bool | None
+    after_control_count: int | None
+    after_control_hash: str | None
+    after_text_hash: str | None
+    after_document_hash: str | None
+    file_size: int
     elapsed_microseconds: int
 
 
@@ -210,21 +240,21 @@ def _lifecycle_return(value: str, label: str) -> int:
 
 def decode_lifecycle_result(payload: str) -> NativeLifecycleResult:
     fields = payload.split("\t")
-    if len(fields) != 19 or fields[0] != "HCL8":
+    if len(fields) != 26 or fields[0] != "HCL12":
         raise HwpLiveError("네이티브 저장·재개방 응답 형식이 올바르지 않습니다")
     reopened_path = _decode(fields[2]) or None
     before_page_count = _lifecycle_optional_nonnegative(fields[3], "저장 전 쪽 수")
     before_control_count = _lifecycle_optional_nonnegative(fields[5], "저장 전 개체 수")
-    after_page_count = _lifecycle_optional_nonnegative(fields[14], "재개방 후 쪽 수")
-    after_control_count = _lifecycle_optional_nonnegative(fields[16], "재개방 후 개체 수")
-    elapsed_microseconds = _lifecycle_integer(fields[18], "처리 시간")
+    after_page_count = _lifecycle_optional_nonnegative(fields[19], "재개방 후 쪽 수")
+    after_control_count = _lifecycle_optional_nonnegative(fields[21], "재개방 후 개체 수")
+    elapsed_microseconds = _lifecycle_integer(fields[25], "처리 시간")
     for page_count in (before_page_count, after_page_count):
         if page_count == 0:
             raise HwpLiveError("네이티브 저장·재개방 쪽 수는 1 이상이어야 합니다")
     if elapsed_microseconds < 0:
         raise HwpLiveError("네이티브 저장·재개방 처리 시간이 음수입니다")
     before_control_hash = fields[6] or None
-    after_control_hash = fields[17] or None
+    after_control_hash = fields[22] or None
     if any(
         character in value
         for value in (before_control_hash, after_control_hash)
@@ -232,23 +262,128 @@ def decode_lifecycle_result(payload: str) -> NativeLifecycleResult:
         for character in "\r\n"
     ):
         raise HwpLiveError("네이티브 저장·재개방 개체 해시 형식이 올바르지 않습니다")
-    return NativeLifecycleResult(
+    result = NativeLifecycleResult(
         verified=_lifecycle_boolean(fields[1], "검증 상태"),
         reopened_path=reopened_path,
         before_page_count=before_page_count,
         before_modified=_lifecycle_optional_boolean(fields[4], "저장 전 수정 상태"),
         before_control_count=before_control_count,
         before_control_hash=before_control_hash,
-        save_hresult=_lifecycle_integer(fields[7], "Save HRESULT"),
-        save_return=_lifecycle_return(fields[8], "Save"),
-        post_save_modified=_lifecycle_optional_boolean(fields[9], "저장 직후 수정 상태"),
-        clear_hresult=_lifecycle_integer(fields[10], "Clear HRESULT"),
-        clear_return=_lifecycle_return(fields[11], "Clear"),
-        open_hresult=_lifecycle_integer(fields[12], "Open HRESULT"),
-        open_return=_lifecycle_return(fields[13], "Open"),
+        before_text_hash=_lifecycle_hash(fields[7], "저장 전 본문"),
+        before_document_hash=_lifecycle_hash(fields[8], "저장 전 문서"),
+        save_hresult=_lifecycle_integer(fields[9], "Save HRESULT"),
+        save_return=_lifecycle_return(fields[10], "Save"),
+        post_save_modified=_lifecycle_optional_boolean(fields[11], "저장 직후 수정 상태"),
+        clear_hresult=_lifecycle_integer(fields[12], "Clear HRESULT"),
+        clear_return=_lifecycle_return(fields[13], "Clear"),
+        open_hresult=_lifecycle_integer(fields[14], "Open HRESULT"),
+        open_return=_lifecycle_return(fields[15], "Open"),
+        recovered=_lifecycle_boolean(fields[16], "세션 복구 상태"),
+        recovery_hresult=_lifecycle_integer(fields[17], "복구 HRESULT"),
+        recovery_return=_lifecycle_return(fields[18], "복구"),
         after_page_count=after_page_count,
-        after_modified=_lifecycle_optional_boolean(fields[15], "재개방 후 수정 상태"),
+        after_modified=_lifecycle_optional_boolean(fields[20], "재개방 후 수정 상태"),
         after_control_count=after_control_count,
         after_control_hash=after_control_hash,
+        after_text_hash=_lifecycle_hash(fields[23], "재개방 후 본문"),
+        after_document_hash=_lifecycle_hash(fields[24], "재개방 후 문서"),
         elapsed_microseconds=elapsed_microseconds,
     )
+    fingerprint_matches = (
+        result.before_page_count == result.after_page_count
+        and result.before_control_count == result.after_control_count
+        and result.before_control_hash == result.after_control_hash
+        and result.before_text_hash == result.after_text_hash
+        and result.before_document_hash == result.after_document_hash
+        and result.before_text_hash is not None
+        and result.before_document_hash is not None
+    )
+    if result.verified and not (
+        result.reopened_path is not None
+        and result.save_hresult >= 0
+        and (
+            result.save_return == 1
+            or (result.before_modified is False and result.save_return == 0)
+        )
+        and result.clear_hresult >= 0
+        and result.open_hresult >= 0
+        and result.open_return == 1
+        and result.post_save_modified is False
+        and result.after_modified is False
+        and not result.recovered
+        and fingerprint_matches
+    ):
+        raise HwpLiveError("네이티브 저장·재개방 성공 응답의 readback 근거가 일치하지 않습니다")
+    if result.recovered and not (
+        not result.verified
+        and result.recovery_hresult >= 0
+        and result.recovery_return == 1
+        and fingerprint_matches
+    ):
+        raise HwpLiveError("네이티브 저장·재개방 복구 응답의 문서 지문이 일치하지 않습니다")
+    return result
+
+
+def _lifecycle_hash(value: str, label: str) -> str | None:
+    if value == "0":
+        return None
+    if not value.isdecimal():
+        raise HwpLiveError(f"네이티브 저장 {label} 해시 형식이 올바르지 않습니다")
+    return value
+
+
+def decode_save_result(payload: str) -> NativeSaveResult:
+    fields = payload.split("\t")
+    if len(fields) != 20 or fields[0] != "HLS1":
+        raise HwpLiveError("네이티브 일반 저장 응답 형식이 올바르지 않습니다")
+    before_page_count = _lifecycle_optional_nonnegative(fields[3], "저장 전 쪽 수")
+    before_control_count = _lifecycle_optional_nonnegative(fields[5], "저장 전 개체 수")
+    after_page_count = _lifecycle_optional_nonnegative(fields[12], "저장 후 쪽 수")
+    after_control_count = _lifecycle_optional_nonnegative(fields[14], "저장 후 개체 수")
+    file_size = _lifecycle_integer(fields[18], "파일 크기")
+    elapsed_microseconds = _lifecycle_integer(fields[19], "처리 시간")
+    for page_count in (before_page_count, after_page_count):
+        if page_count == 0:
+            raise HwpLiveError("네이티브 일반 저장 쪽 수는 1 이상이어야 합니다")
+    if file_size < 0 or elapsed_microseconds < 0:
+        raise HwpLiveError("네이티브 일반 저장 크기 또는 처리 시간이 음수입니다")
+    result = NativeSaveResult(
+        verified=_lifecycle_boolean(fields[1], "검증 상태"),
+        saved_path=_decode(fields[2]) or None,
+        before_page_count=before_page_count,
+        before_modified=_lifecycle_optional_boolean(fields[4], "저장 전 수정 상태"),
+        before_control_count=before_control_count,
+        before_control_hash=_lifecycle_hash(fields[6], "저장 전 개체"),
+        before_text_hash=_lifecycle_hash(fields[7], "저장 전 본문"),
+        before_document_hash=_lifecycle_hash(fields[8], "저장 전 문서"),
+        save_hresult=_lifecycle_integer(fields[9], "Save HRESULT"),
+        save_return=_lifecycle_return(fields[10], "Save"),
+        post_save_modified=_lifecycle_optional_boolean(fields[11], "저장 직후 수정 상태"),
+        after_page_count=after_page_count,
+        after_modified=_lifecycle_optional_boolean(fields[13], "저장 후 수정 상태"),
+        after_control_count=after_control_count,
+        after_control_hash=_lifecycle_hash(fields[15], "저장 후 개체"),
+        after_text_hash=_lifecycle_hash(fields[16], "저장 후 본문"),
+        after_document_hash=_lifecycle_hash(fields[17], "저장 후 문서"),
+        file_size=file_size,
+        elapsed_microseconds=elapsed_microseconds,
+    )
+    if result.verified and not (
+        result.saved_path is not None
+        and result.save_hresult >= 0
+        and (
+            result.save_return == 1
+            or (result.before_modified is False and result.save_return == 0)
+        )
+        and result.post_save_modified is False
+        and result.after_modified is False
+        and result.before_page_count == result.after_page_count
+        and result.before_control_count == result.after_control_count
+        and result.before_control_hash == result.after_control_hash
+        and result.before_text_hash is not None
+        and result.before_text_hash == result.after_text_hash
+        and result.before_document_hash is not None
+        and result.before_document_hash == result.after_document_hash
+    ):
+        raise HwpLiveError("네이티브 일반 저장 성공 응답의 readback 근거가 일치하지 않습니다")
+    return result

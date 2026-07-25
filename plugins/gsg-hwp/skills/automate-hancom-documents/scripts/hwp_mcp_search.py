@@ -222,6 +222,11 @@ _INTENT_ALIASES: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
             "저장 후 다시 열기",
             "저장 재개방 검증",
         ),
+        "hwp_save": (
+            "문서 저장",
+            "닫지 않고 저장",
+            "일반 저장",
+        ),
         "hwp_disconnect": ("문서 연결 해제", "세션 해제"),
         "hwp_get_capabilities": ("도구 기능 목록", "MCP 기능 확인"),
         "hwp_search_tools": ("도구 검색", "작업 도구 찾기"),

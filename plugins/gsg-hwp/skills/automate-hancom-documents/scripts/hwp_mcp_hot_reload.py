@@ -19,7 +19,9 @@ from pydantic import JsonValue, TypeAdapter
 
 from hwp_mcp_registry import configured_mcp_profile
 from hwp_mcp_resources import register_guidance_resources
-from hwp_mcp_worker_supervisor import HwpWorkerLaunch, HwpWorkerSupervisor
+from hwp_mcp_worker_protocol import HwpWorkerCallTimeout
+from hwp_mcp_worker_session import HwpWorkerLaunch
+from hwp_mcp_worker_supervisor import HwpWorkerSupervisor
 from hwp_runtime_identity import (
     PLUGIN_ROOT,
     RUNTIME_WATCH_PATHS,
@@ -133,6 +135,8 @@ class ReloadingHwpMCP(FastMCP[None]):
                 "source_hash": worker.source_hash,
                 "loaded_source_hash": worker.loaded_source_hash,
                 "reload_required": (worker.source_hash != worker.loaded_source_hash),
+                "worker_state": worker.worker_state,
+                "reload_state": worker.reload_state,
             }
         )
         return runtime, worker.reloaded
@@ -157,7 +161,10 @@ class ReloadingHwpMCP(FastMCP[None]):
                 payload = _JSON_OBJECT.validate_python(runtime.model_dump(mode="json"))
                 return {"result": payload} if through_gateway else payload
             case None:
-                worker = await self._supervisor.call_tool(name, arguments)
+                try:
+                    worker = await self._supervisor.call_tool(name, arguments)
+                except HwpWorkerCallTimeout as error:
+                    raise ToolError(str(error)) from error
                 await self._notify_if_reloaded(worker.reloaded)
                 result = worker.result
                 if result.isError:

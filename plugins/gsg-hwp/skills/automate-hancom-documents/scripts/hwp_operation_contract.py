@@ -16,6 +16,7 @@ from hwp_operation_route_contract import (
     HwpWorkflowId as HwpWorkflowId,
     OperationRouteMetadata,
 )
+from hwp_operation_descriptor import OperationVerificationMode
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
 from hwp_runtime_identity import RUNTIME_BUILD_INFO, RuntimeBuildInfo
 
@@ -202,6 +203,7 @@ class HwpOperatePolicy(ContractModel):
     fill_blanks_only: bool = False
     allow_row_expansion: bool = False
     ambiguity: Literal["return_candidates", "unsupported"] = "return_candidates"
+    numeric_value_mode: Literal["infer", "display", "base"] = "infer"
     atomic: bool = False
 
 
@@ -242,6 +244,21 @@ class WorkflowTargetCandidate(ContractModel):
     columns: int | None = Field(default=None, ge=1)
     caption: str | None = Field(default=None, max_length=2_000)
     header_preview: tuple[str, ...] = Field(default=(), max_length=100)
+
+
+class TableFormatCandidate(ContractModel):
+    address: str = Field(pattern=r"^[A-Z]+[1-9][0-9]*$")
+    numeric_value_mode: Literal["display", "base"]
+    replacement: str = Field(max_length=200_000)
+    inferred_scale: int = Field(ge=1)
+    evidence: tuple[str, ...] = Field(default=(), max_length=20)
+
+
+class TextMatchCandidate(ContractModel):
+    occurrence: int = Field(ge=1)
+    start: OperationPosition
+    end: OperationPosition
+    matched_text: str = Field(max_length=1_000_000)
 
 
 class HwpOperateInputs(ContractModel):
@@ -317,6 +334,11 @@ class OperationResult(OperationRouteMetadata):
         default=(),
         max_length=3,
     )
+    format_candidates: tuple[TableFormatCandidate, ...] = Field(
+        default=(),
+        max_length=24,
+    )
+    text_candidates: tuple[TextMatchCandidate, ...] = Field(default=(), max_length=24)
     required_inputs: tuple[str, ...] = Field(default=(), max_length=20)
     missing_fields: tuple[str, ...] = Field(default=(), max_length=20)
     routing_context: OperationRoutingContext | None = None
@@ -325,15 +347,11 @@ class OperationResult(OperationRouteMetadata):
     next_arguments: OperationNextArguments | None = None
     message: str = Field(max_length=4_000)
     execution_mode: Literal["native_in_process"] | None = None
-    native_protocol: Literal[9] | None = None
-    verification: Literal[
-        "native_action_result",
-        "native_routing_context",
-        "native_snapshot_before_after",
-        "native_save_reopen_result",
-    ] | None = None
+    native_protocol: Literal[9, 10, 11, 12] | None = None
+    verification: OperationVerificationMode | None = None
     verified: bool | None = None
     commands_executed: int | None = Field(default=None, ge=0)
+    native_actions_executed: int | None = Field(default=None, ge=0)
     native_elapsed_microseconds: int | None = Field(default=None, ge=0)
     caption_profile_elapsed_microseconds: int | None = Field(default=None, ge=0)
     clone_elapsed_microseconds: int | None = Field(default=None, ge=0)
@@ -345,11 +363,14 @@ class OperationResult(OperationRouteMetadata):
     current_page: int | None = Field(default=None, ge=1)
     page_count: int | None = Field(default=None, ge=1)
     modified: bool | None = None
+    saved_path: str | None = Field(default=None, max_length=32_767)
     reopened_path: str | None = Field(default=None, max_length=32_767)
     before_page_count: int | None = Field(default=None, ge=1)
     before_modified: bool | None = None
     before_control_count: int | None = Field(default=None, ge=0)
     before_control_hash: str | None = Field(default=None, max_length=500)
+    before_text_hash: str | None = Field(default=None, pattern=r"^\d{1,20}$")
+    before_document_hash: str | None = Field(default=None, pattern=r"^\d{1,20}$")
     save_hresult: int | None = None
     save_return: int | None = Field(default=None, ge=-1, le=1)
     post_save_modified: bool | None = None
@@ -357,15 +378,22 @@ class OperationResult(OperationRouteMetadata):
     clear_return: int | None = Field(default=None, ge=-1, le=1)
     open_hresult: int | None = None
     open_return: int | None = Field(default=None, ge=-1, le=1)
+    session_recovered: bool | None = None
+    recovery_hresult: int | None = None
+    recovery_return: int | None = Field(default=None, ge=-1, le=1)
     after_page_count: int | None = Field(default=None, ge=1)
     after_modified: bool | None = None
     after_control_count: int | None = Field(default=None, ge=0)
     after_control_hash: str | None = Field(default=None, max_length=500)
+    after_text_hash: str | None = Field(default=None, pattern=r"^\d{1,20}$")
+    after_document_hash: str | None = Field(default=None, pattern=r"^\d{1,20}$")
+    saved_file_size: int | None = Field(default=None, ge=0)
     structure_digest_before: str | None = Field(default=None, max_length=500)
     structure_digest_after: str | None = Field(default=None, max_length=500)
     partial_change: bool = False
     partial_mutation: bool | None = None
     retry_safe: bool | None = None
+    reconcile_required: bool = False
     failed_step: str | None = Field(default=None, max_length=200)
     commands_completed: int | None = Field(default=None, ge=0)
     resolved_target_id: str | None = Field(default=None, max_length=500)

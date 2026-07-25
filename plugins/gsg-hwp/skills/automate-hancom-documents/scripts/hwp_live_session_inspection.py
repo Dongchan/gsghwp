@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import ntpath
+from typing import cast
 
 from hwp_errors import HwpLiveError
 from hwp_live_contract import DocumentStyleList, LiveContext, PreviewResult
 from hwp_live_inspection import inspect_context, inspect_styles
 from hwp_live_native_batch import inspect_native_page
-from hwp_live_preview import render_page
+from hwp_live_preview import PreviewApplication, render_page
 from hwp_live_session_core import LiveHwpSessionCore
 from hwp_live_session_structure import (
     connected_document,
@@ -157,11 +158,15 @@ class LiveHwpInspectionSession(LiveHwpSessionCore):
         dpi: int,
     ) -> PreviewResult:
         candidate, hwp = self._validate(session_id)
-        return render_page(
+        preview_session = self._sessions[session_id].preview_session
+        result = render_page(
             candidate,
-            hwp,
+            cast(PreviewApplication, cast(object, hwp)),
             page,
             dpi,
             session_id,
             self._guard(candidate, hwp),
+            directory=preview_session.directory,
         )
+        preview_session.commit(result.path)
+        return result

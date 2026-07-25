@@ -1,6 +1,6 @@
 [project]
 name = "gsg-hwp-beta"
-version = "0.3.87"
+version = "0.3.89"
 description = "Hancom document automation plugin runtime"
 license = "MIT"
 requires-python = ">=3.12,<3.13"
@@ -11,6 +11,7 @@ dependencies = [
     "pyhwpx==1.6.6",
     "pywin32==312",
     "Pillow==12.2.0",
+    "opencv-contrib-python-headless==4.12.0.88",
     "typer==0.23.1",
     "rich==14.3.2",
     "reportlab==4.4.9",

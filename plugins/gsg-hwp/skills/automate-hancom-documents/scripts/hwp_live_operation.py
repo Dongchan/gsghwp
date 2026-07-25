@@ -8,8 +8,10 @@ from hwp_live_native_action_models import (
     NativeActionRequest,
     NativePosition,
 )
+from hwp_live_native_action_results import NativeActionResult
 from hwp_live_native_batch import execute_native_actions
 from hwp_live_rot import HwpDocumentCandidate
+from hwp_live_safety import require_writable_document, run_layout_mutation
 from hwp_operation_command import plan_operation_command
 from hwp_operation_certification import certified_atomic_action
 from hwp_operation_contract import (
@@ -60,7 +62,7 @@ def operate_validated(
     unsafe_selectors: set[str],
     guard: Callable[[], None],
 ) -> OperationResult:
-    _ = (hwp, unsafe_selectors, guard)
+    _ = hwp
     resolution = resolve_operation(intent_or_operation_id)
     operation = _resolved_operation(resolution)
     if resolution.status == "not_found":
@@ -145,13 +147,26 @@ def operate_validated(
             None if expected_cursor is None else NativePosition(*expected_cursor)
         ),
     )
-    native = execute_native_actions(
-        candidate.window_handle,
-        request,
-        minimum_version=9,
-    )
-    if native is None:
-        raise HwpLiveError("한컴 네이티브 단일 작업 실행기를 사용할 수 없습니다")
+    def execute() -> NativeActionResult:
+        native_result = execute_native_actions(
+            candidate.window_handle,
+            request,
+            minimum_version=9,
+        )
+        if native_result is None:
+            raise HwpLiveError("한컴 네이티브 단일 작업 실행기를 사용할 수 없습니다")
+        return native_result
+
+    if operation.execution_policy == "document_change":
+        require_writable_document(unsafe_selectors, candidate.selector)
+        guard()
+        native = run_layout_mutation(
+            unsafe_selectors,
+            candidate.selector,
+            execute,
+        )
+    else:
+        native = execute()
 
     return OperationResult(
         status="executed",

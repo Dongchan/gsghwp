@@ -11,6 +11,7 @@ from hwp_live_session_structure_inspection import (
 )
 from hwp_live_session_structure_mutation import (
     apply_validated_layout as apply_validated_layout,
+    patch_validated_text as patch_validated_text,
     replace_validated_selection as replace_validated_selection,
 )
 from hwp_live_session_structure_table import (

@@ -22,11 +22,18 @@ from hwp_live_native_action_models import (
     NativeSelection,
     NativeSnapshot,
     ReplaceSelectionCommand,
+    TextPatchCommand,
 )
 from hwp_live_native_batch import execute_native_actions, read_native_snapshot
+from hwp_live_native_format_commands import (
+    TextFormatCommandPlan,
+    build_native_format_commands,
+)
 from hwp_live_native_layout import NativeLayoutContext, build_native_layout_request
 from hwp_live_rot import HwpDocumentCandidate
 from hwp_live_safety import require_writable_document, run_layout_mutation
+from hwp_live_text_format_verification import verify_requested_text_format
+from hwp_live_text_patch_contract import TextPatchRequest, TextPatchResult
 
 
 @dataclass(slots=True)
@@ -117,6 +124,76 @@ def replace_validated_selection(
         current_page=native.snapshot.current_page,
         modified=native.snapshot.modified,
     )
+
+
+def patch_validated_text(
+    hwp: LiveHwpApplication,
+    candidate: HwpDocumentCandidate,
+    request: TextPatchRequest,
+    unsafe_selectors: set[str],
+    guard: Callable[[], None],
+) -> TextPatchResult:
+    _ = hwp
+    if (
+        (request.expected_text is not None and len(request.expected_text) > 1_000_000)
+        or len(request.replacement) > 1_000_000
+    ):
+        raise HwpLiveError("라이브 text.patch 크기 한도를 초과했습니다")
+    if request.target.kind != "current" and request.expected_text is None:
+        raise HwpLiveError("범위·검색·표 셀 text.patch에는 확인할 기존 텍스트가 필요합니다")
+    if not request.replacement and request.formatting is not None:
+        raise HwpLiveError("삭제 결과에는 적용할 텍스트가 없으므로 글자 서식을 함께 요청할 수 없습니다")
+    require_writable_document(unsafe_selectors, candidate.selector)
+    guard()
+    before = read_native_snapshot(candidate.window_handle)
+    if before is None:
+        raise HwpLiveError("text.patch 전 한컴 문서 상태를 읽지 못했습니다")
+    target = request.target
+    commands = (
+        TextPatchCommand(
+            target=target.kind,
+            expected_text=request.expected_text,
+            replacement=request.replacement,
+            start=target.start,
+            end=target.end,
+            occurrence=target.occurrence,
+            match_case=target.match_case,
+            table_instance_id=target.table_instance_id,
+            cell_address=target.cell_address,
+        ),
+        *(
+            ()
+            if request.formatting is None
+            else build_native_format_commands(
+                TextFormatCommandPlan(request.formatting)
+            )
+        ),
+    )
+    native_result = execute_native_actions(
+        candidate.window_handle,
+        NativeActionRequest(
+            document_id=candidate.document.DocumentID,
+            full_name=candidate.document.FullName,
+            commands=commands,
+            expected_cursor=before.cursor,
+            expected_selection=before.selection,
+        ),
+        minimum_version=11,
+    )
+    if native_result is None:
+        raise HwpLiveError("프로토콜 11 네이티브 text.patch를 사용할 수 없습니다")
+    after = read_native_snapshot(candidate.window_handle)
+    if after is None:
+        raise HwpLiveError("text.patch 후 한컴 문서 상태를 읽지 못했습니다")
+    if request.replacement:
+        if not after.selection.selected or after.selected_text != request.replacement:
+            raise HwpLiveError("text.patch 후 변경한 본문 범위를 다시 읽어 확인하지 못했습니다")
+    elif after.selection.selected:
+        raise HwpLiveError("text.patch 삭제 후 선택 영역이 예상대로 접히지 않았습니다")
+    if request.formatting is not None:
+        verify_requested_text_format(request.formatting, after)
+    guard()
+    return TextPatchResult(native_result, before, after)
 
 
 def apply_validated_layout(

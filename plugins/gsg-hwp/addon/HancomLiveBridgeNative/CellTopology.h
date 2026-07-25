@@ -53,6 +53,7 @@ public:
     long Columns() const noexcept;
     const CellTopologyCell* Find(const std::wstring& address) const noexcept;
     const std::vector<CellTopologyCell>& Cells() const noexcept;
+    bool HasSamePhysicalShape(const CellTopology& other) const noexcept;
     std::vector<std::wstring> IntersectingColumn(long physicalColumn) const;
     bool PlanRectangularMerge(
         const std::wstring& first,

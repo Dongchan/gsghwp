@@ -19,7 +19,7 @@ SCRIPTS = (
 sys.path.insert(0, str(SCRIPTS))
 
 from hwp_mcp_hot_reload import build_proxy  # noqa: E402
-from hwp_mcp_worker_supervisor import HwpWorkerLaunch  # noqa: E402
+from hwp_mcp_worker_session import HwpWorkerLaunch  # noqa: E402
 from hwp_runtime_identity import RuntimeStatus, tool_schema_hash  # noqa: E402
 
 
@@ -85,7 +85,8 @@ def test_proxy_refreshes_worker_and_tool_catalog_without_new_client_session(
             first = _runtime_status(await client.call_tool("hwp_runtime_info", {}))
 
             _ = watched_source.write_text("VERSION = 2\n", encoding="utf-8")
-            refreshed = _runtime_status(await client.call_tool("hwp_runtime_info", {}))
+            changed = _runtime_status(await client.call_tool("hwp_runtime_info", {}))
+            refreshed = _runtime_status(await client.call_tool("hwp_reload", {}))
             refreshed_tools = await client.list_tools()
             forced = _runtime_status(await client.call_tool("hwp_reload", {}))
             gateway_reload_result = await client.call_tool(
@@ -107,7 +108,17 @@ def test_proxy_refreshes_worker_and_tool_catalog_without_new_client_session(
 
         names = {tool.name for tool in first_tools.tools}
         assert {"hwp_runtime_info", "hwp_reload", "hwp_execute"} <= names
-        assert first.process_id == refreshed.process_id == forced.process_id
+        assert first.worker_state == "idle"
+        assert first.reload_state == "not_requested"
+        assert changed.worker_state == "idle"
+        assert changed.reload_required is True
+        assert changed.source_hash != changed.loaded_source_hash
+        assert forced.worker_state == "idle"
+        assert forced.reload_state == "reloaded"
+        assert first.process_id == changed.process_id == refreshed.process_id
+        assert refreshed.process_id == forced.process_id
+        assert first.worker_process_id == changed.worker_process_id
+        assert first.generation == changed.generation
         assert first.worker_process_id != refreshed.worker_process_id
         assert refreshed.worker_process_id != forced.worker_process_id
         assert refreshed.generation == first.generation + 1

@@ -15,6 +15,7 @@ from hwp_live_contract import (
     LayoutPlan,
     LayoutResult,
     MutationResult,
+    OpenDocument,
     OpenDocumentList,
     PreviewResult,
     SelectionPosition,
@@ -46,6 +47,19 @@ class McpQaHandlers:
 
     async def hwp_list_open_documents(self) -> OpenDocumentList:
         return await self._dispatcher.run(self._bridge.list_open_documents)
+
+    async def hwp_open_document(
+        self,
+        path: str,
+        reference_selector: str | None = None,
+        new_tab: bool = True,
+    ) -> OpenDocument:
+        return await self._dispatcher.run(
+            self._bridge.open_document,
+            path,
+            reference_selector,
+            new_tab,
+        )
 
     async def hwp_inspect_window_state(self, window_handle: int) -> HancomWindowState:
         return await self._dispatcher.watch(self._bridge.window_state, window_handle)

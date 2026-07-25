@@ -3,7 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from hwp_errors import HwpLiveError
-from hwp_live_bridge_mixin import HancomBridgeMutationRuntime
+from hwp_layout_preflight import LayoutPreflightResult
+from hwp_live_bridge_mixin import HancomBridgeSessionRuntime
 from hwp_live_contract import LayoutPlan
 from hwp_live_native_batch import probe_official_api
 from hwp_official_api_live import (
@@ -24,8 +25,18 @@ from hwp_operation_contract import (
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
 
 
-class HancomBridgeOperationMixin(HancomBridgeMutationRuntime):
+class HancomBridgeOperationMixin(HancomBridgeSessionRuntime):
     __slots__: tuple[str, ...] = ()
+
+    def preflight_layout(
+        self,
+        session_id: str,
+        plan: LayoutPlan,
+    ) -> LayoutPreflightResult:
+        return self._call(
+            lambda: self._bridge_controller().preflight_layout(session_id, plan),
+            session_id=session_id,
+        )
 
     def run_official_api_batch(
         self,
@@ -40,7 +51,8 @@ class HancomBridgeOperationMixin(HancomBridgeMutationRuntime):
                 category,
                 start,
                 limit,
-            )
+            ),
+            session_id=session_id,
         )
 
     def operate(
@@ -89,7 +101,7 @@ class HancomBridgeOperationMixin(HancomBridgeMutationRuntime):
                 }
             )
 
-        return self._call_mutation(invoke)
+        return self._call_mutation(invoke, session_id=session_id)
 
     def probe_official_api_batch(
         self,
@@ -106,7 +118,8 @@ class HancomBridgeOperationMixin(HancomBridgeMutationRuntime):
                 category,
                 start,
                 limit,
-            )
+            ),
+            process_id=self._bridge_process_id(window_handle),
         )
 
     def probe_official_api_payload(
@@ -117,7 +130,8 @@ class HancomBridgeOperationMixin(HancomBridgeMutationRuntime):
         if window_handle < 1:
             raise HwpLiveError("한컴 창 핸들은 1 이상이어야 합니다")
         response = self._call_mutation(
-            lambda: probe_official_api(window_handle, payload)
+            lambda: probe_official_api(window_handle, payload),
+            process_id=self._bridge_process_id(window_handle),
         )
         if response is None:
             raise HwpLiveError("C++/ATL ProbeOfficialApi를 사용할 수 없습니다")

@@ -32,6 +32,7 @@ from hwp_operation_contract import (
     OperationResult,
     WorkflowResolution,
 )
+from hwp_table_format_inference import TableFormatAmbiguity
 
 
 def _has_explicit_table_selector(target: HwpOperateTarget) -> bool:
@@ -218,6 +219,15 @@ def operate_table_fill(
             None,
         )
     try:
+        anchor_paragraph = resolved_table.table.anchor.paragraph
+        surrounding_texts = tuple(
+            paragraph.text
+            for paragraph in before.paragraphs
+            if anchor_paragraph - 4 <= paragraph.index < anchor_paragraph
+            and paragraph.text.strip()
+        )
+        if resolved_table.table.caption is not None:
+            surrounding_texts += (resolved_table.table.caption.text,)
         prepared = prepare_table_fill(
             candidate,
             resolved_table.table,
@@ -225,6 +235,7 @@ def operate_table_fill(
             data,
             policy,
             postconditions,
+            surrounding_texts=surrounding_texts,
         )
     except TableRecordMappingError as error:
         table_candidate = workflow_table_candidate(
@@ -241,6 +252,26 @@ def operate_table_fill(
             ).model_copy(update={"target_candidates": (table_candidate,)}),
             before,
         )
+    except TableFormatAmbiguity as error:
+        table_candidate = workflow_table_candidate(
+            resolved_table.table,
+            resolved_table.table_index,
+            before.page,
+        )
+        return (
+            workflow_result(
+                resolution,
+                "needs_input",
+                str(error),
+                required_inputs=("inputs.policy.numeric_value_mode",),
+            ).model_copy(
+                update={
+                    "target_candidates": (table_candidate,),
+                    "format_candidates": error.candidates,
+                }
+            ),
+            before,
+        )
     if selected_addresses and any(
         address not in selected_addresses for address, _ in prepared.replacements
     ):
@@ -255,10 +286,13 @@ def operate_table_fill(
     native = execute_native_actions(
         candidate.window_handle,
         prepared.request,
-        minimum_version=9,
+        minimum_version=prepared.native_protocol,
     )
     if native is None:
-        raise HwpLiveError("한컴 프로토콜 9 네이티브 표 채움 실행기를 사용할 수 없습니다")
+        raise HwpLiveError(
+            f"한컴 프로토콜 {prepared.native_protocol} 네이티브 표 채움 실행기를 "
+            + "사용할 수 없습니다"
+        )
     state_after = read_native_snapshot(candidate.window_handle)
     if state_after is None:
         raise HwpLiveError("한컴 네이티브 표 채움 후 현재 쪽을 읽지 못했습니다")
@@ -277,12 +311,14 @@ def operate_table_fill(
     result = workflow_result(
         resolution,
         "executed",
-        "기존 표를 찾아 프로토콜 9 C++/ATL 네이티브 배치로 채우고 구조를 검증했습니다",
+        f"기존 표를 찾아 프로토콜 {prepared.native_protocol} C++/ATL "
+        "네이티브 배치로 채우고 구조를 검증했습니다",
     ).model_copy(
         update={
             "execution_mode": "native_in_process",
-            "native_protocol": 9,
+            "native_protocol": prepared.native_protocol,
             "verification": "native_snapshot_before_after",
+            "verified": True,
             "commands_executed": native.commands_executed,
             "native_elapsed_microseconds": native.elapsed_microseconds,
             "current_page": after.page,
