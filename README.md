@@ -13,6 +13,8 @@ GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서
 
 버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록합니다.
 
+배포본 해시 검증, 코드 서명 현황, 백신 오탐 대처는 [docs/release-integrity.md](docs/release-integrity.md)를 참고하십시오.
+
 ### v1.2.0 주요 변경
 
 - 큰 표를 다룰 때 한/글이 응답하지 않던 문제를 해결했습니다. 1,000칸 채우기가 180초 제한을 넘겨
