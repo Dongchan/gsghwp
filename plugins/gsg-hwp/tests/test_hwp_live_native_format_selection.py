@@ -389,7 +389,7 @@ def test_selected_cell_block_merges_without_any_address(
         monkeypatch,
         request,
         before,
-        (_plain_2x3(), _plain_2x3(), _merged_a1_b2()),
+        (_plain_2x3(), _merged_a1_b2()),
     )
 
     # Then: the selection produced the same command an address pair produces.
@@ -416,13 +416,125 @@ def test_selected_cell_block_uses_merged_spans_for_its_corners(
         monkeypatch,
         request,
         before,
-        (_row_merged_2x3(), _row_merged_2x3(), merged),
+        (_row_merged_2x3(), merged),
     )
 
     assert result is not None
     assert result.status == "executed"
     merge_command = native_requests[0].commands[-1]
     assert (merge_command.first, merge_command.second) == ("A1", "C2")
+
+
+def test_merge_start_only_is_completed_from_the_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: the caller named only the start cell, and A1..B2 is selected.
+    request = _request("table.merge_cells", {"start": "A1"})
+    before = _snapshot(start_list_id=101, end_list_id=105)
+
+    result, native_requests = _run(
+        monkeypatch,
+        request,
+        before,
+        (_plain_2x3(), _merged_a1_b2()),
+    )
+
+    # Then: only the omitted end is taken from the selection.
+    assert result is not None
+    assert result.status == "executed"
+    merge_command = native_requests[0].commands[-1]
+    assert (merge_command.first, merge_command.second) == ("A1", "B2")
+
+
+def test_merge_end_only_is_completed_from_the_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: the caller named only the end cell, and A1..B2 is selected.
+    request = _request("table.merge_cells", {"end": "B2"})
+    before = _snapshot(start_list_id=101, end_list_id=105)
+
+    result, native_requests = _run(
+        monkeypatch,
+        request,
+        before,
+        (_plain_2x3(), _merged_a1_b2()),
+    )
+
+    assert result is not None
+    assert result.status == "executed"
+    merge_command = native_requests[0].commands[-1]
+    assert (merge_command.first, merge_command.second) == ("A1", "B2")
+
+
+def test_both_addresses_ignore_a_selection_pointing_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Safety: a request carrying both addresses must keep behaving exactly as
+    # it did before half-address completion existed. C1..C2 is selected and
+    # must change nothing; only two structure reads may happen, the pre-edit
+    # and the post-edit one, with no selection read in front of them.
+    request = _request("table.merge_cells", {"start": "A1", "end": "B2"})
+    before = _snapshot(start_list_id=103, end_list_id=106)
+
+    result, native_requests = _run(
+        monkeypatch,
+        request,
+        before,
+        (_plain_2x3(), _merged_a1_b2()),
+    )
+
+    assert result is not None
+    assert result.status == "executed"
+    assert result.updated_addresses == ("A1", "B2")
+    merge_command = native_requests[0].commands[-1]
+    assert (merge_command.first, merge_command.second) == ("A1", "B2")
+
+
+def test_start_only_selection_outside_the_target_table_is_refused_by_topology(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: target names table-1 while the selection lives in table-2, and
+    # only the start address was supplied.
+    #
+    # The refusal below is NOT a rule written for the selection path. It is
+    # TableTopology.selection_region_by_list_ids in
+    # hwp_live_native_table_topology.py - the same function an explicit
+    # address pair reaches through topology_preflight -> merge_region. The
+    # asserted message is that function's own wording, which is how this test
+    # shows where the decision was made. A second copy of the rule here would
+    # drift from the address path and become the next bug.
+    request = _request(
+        "table.merge_cells",
+        {"start": "A1"},
+        target=HwpOperateTarget(kind="table", control_instance_id="table-1"),
+        page_tables=("table-1", "table-2"),
+        columns=2,
+    )
+    before = _snapshot(start_list_id=201, end_list_id=204, table="table-2")
+
+    result, native_requests = _run(monkeypatch, request, before, (_two_tables(),))
+
+    assert result is not None
+    assert result.status == "schema_conflict"
+    assert result.message == "선택 시작·끝 위치가 대상 표의 실제 셀에 없습니다"
+    assert native_requests == ()
+
+
+def test_start_only_with_the_caret_in_that_same_cell_is_refused_as_one_cell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: start is A1 and the caret sits in A1 with nothing selected, so
+    # the completed pair names a single cell. parse_merge already rejects that
+    # for a caller who sends the same address twice; no new rule is added.
+    request = _request("table.merge_cells", {"start": "A1"})
+    before = _snapshot(start_list_id=101, end_list_id=101)
+
+    result, native_requests = _run(monkeypatch, request, before, (_plain_2x3(),))
+
+    assert result is not None
+    assert result.status == "schema_conflict"
+    assert result.message == "병합할 서로 다른 두 셀을 확인하지 못했습니다"
+    assert native_requests == ()
 
 
 def test_caret_cell_splits_without_any_address(
@@ -443,7 +555,7 @@ def test_caret_cell_splits_without_any_address(
         monkeypatch,
         request,
         before,
-        (_plain_2x3(), _plain_2x3(), _split_a1()),
+        (_plain_2x3(), _split_a1()),
     )
 
     assert result is not None

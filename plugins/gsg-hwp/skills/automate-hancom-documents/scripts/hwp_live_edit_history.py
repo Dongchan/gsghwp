@@ -5,7 +5,7 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import Literal, final
 
 from hwp_errors import HwpLiveError
 from hwp_live_native_action_models import (
@@ -15,7 +15,7 @@ from hwp_live_native_action_models import (
 
 
 type HistoryDirection = Literal["undo", "redo"]
-type HistoryOperation = Literal["control.delete", "document.delete_page"]
+type HistoryOperation = Literal["control.delete", "document.delete_page", "text.patch"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +89,7 @@ def build_capture_document_commands(
     return (SaveDocumentFileCommand(checkpoint_path),)
 
 
+@final
 class LiveEditHistoryStore:
     __slots__ = (
         "_max_bytes",
@@ -186,14 +187,20 @@ class LiveEditHistoryStore:
     def validate_capacity(self, entry: LiveEditHistoryEntry) -> None:
         if isinstance(entry, NativeDocumentEditHistoryEntry):
             if entry.maximum_native_steps < 1 or entry.maximum_native_steps > 100:
-                raise ValueError("grouped native history steps must be between 1 and 100")
+                raise ValueError(
+                    "grouped native history steps must be between 1 and 100"
+                )
             if entry.before_page_count < 1 or entry.after_page_count < 1:
                 raise ValueError("grouped native history page counts must be positive")
             if entry.operation == "control.delete":
                 if entry.page is None or not entry.before_controls:
-                    raise ValueError("control delete history requires its page and controls")
-            elif entry.page is None:
+                    raise ValueError(
+                        "control delete history requires its page and controls"
+                    )
+            elif entry.operation == "document.delete_page" and entry.page is None:
                 raise ValueError("page delete history requires its deleted page")
+            elif entry.operation == "text.patch":
+                raise ValueError("text patch history requires document checkpoints")
             return
         if entry.before.page_count < 1 or entry.after.page_count < 1:
             raise ValueError("document checkpoint page counts must be positive")
@@ -201,19 +208,25 @@ class LiveEditHistoryStore:
             raise ValueError("before and after checkpoints must use different files")
         if entry.operation == "control.delete":
             if entry.page is None or not entry.before_controls:
-                raise ValueError("control delete history requires its page and controls")
+                raise ValueError(
+                    "control delete history requires its page and controls"
+                )
             if len(entry.before_controls) > 100:
                 raise HwpLiveError("한 번의 삭제 복구 대상은 최대 100개입니다")
-        elif entry.page is None:
+        elif entry.operation == "document.delete_page" and entry.page is None:
             raise ValueError("page delete history requires its deleted page")
         required = _entry_bytes(entry)
         if required > self._max_bytes:
-            raise HwpLiveError("문서 체크포인트가 세션의 디스크 이력 한도를 초과했습니다")
+            raise HwpLiveError(
+                "문서 체크포인트가 세션의 디스크 이력 한도를 초과했습니다"
+            )
         for checkpoint in (entry.before, entry.after):
             try:
                 actual = checkpoint.path.stat().st_size
             except OSError as error:
-                raise HwpLiveError("문서 체크포인트 파일을 확인하지 못했습니다") from error
+                raise HwpLiveError(
+                    "문서 체크포인트 파일을 확인하지 못했습니다"
+                ) from error
             if actual < 1 or actual != checkpoint.bytes:
                 raise HwpLiveError("문서 체크포인트 파일 크기가 일치하지 않습니다")
 
@@ -222,7 +235,9 @@ class LiveEditHistoryStore:
         self._clear_stack(self._redo)
         self._undo.append(entry)
         self._total_bytes += _entry_bytes(entry)
-        while len(self._undo) > self._max_entries or self._total_bytes > self._max_bytes:
+        while (
+            len(self._undo) > self._max_entries or self._total_bytes > self._max_bytes
+        ):
             self._drop_entry(self._undo.pop(0))
 
     def commit(

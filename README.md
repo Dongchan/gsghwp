@@ -2,7 +2,7 @@
 
 GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서 현재 열려 있는 HWP 문서를 빠르게 조회하고 네이티브 방식으로 편집·검수하도록 연결하는 로컬 MCP**입니다.
 
-- 배포 버전: **v1.2.1**
+- 배포 버전: **v1.2.2**
 - 원본 소스 버전: `0.5.73-dev.3`
 - MCP 런타임: `0.3.91`
 - C++ 네이티브 브리지: `0.5.124`
@@ -14,6 +14,23 @@ GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서
 버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록합니다.
 
 배포본 해시 검증, 코드 서명 현황, 백신 오탐 대처는 [docs/release-integrity.md](docs/release-integrity.md)를 참고하십시오.
+
+### v1.2.2 주요 변경
+
+- 표 셀의 표시 형식을 **바꾸는 것**이 가능해졌습니다. 종전에는 `EL.+39.3m` 를 `39.3` 으로 바꾸려 해도
+  기존 형식이 다시 씌워져 아무 일도 일어나지 않으면서 "성공"으로 보고됐습니다. 이제 표시 형식 유지와
+  글자 서식(글꼴·크기·색) 유지를 따로 끌 수 있습니다. 아무것도 지정하지 않으면 종전과 동일합니다.
+- 숫자 해석 방식을 직접 지정할 수 있습니다. 종전에는 도구가 "이 값이 표시값인지 기준값인지 정해달라"고
+  물으면서, 정작 그것을 지정할 방법을 주지 않아 같은 자리에서 계속 막혔습니다.
+- 되돌리기가 실제로 되돌렸는지 확인하고 보고합니다. 되돌릴 이력이 없으면 성공이 아니라 "없다"고
+  알립니다. 되돌린 단계 수도 실제 적용된 수로 보고합니다.
+- 변경 여부를 확인하지 못한 상태에서 자동 되돌리기를 실행하던 것을 멈췄습니다. 무관한 이전 편집이
+  사라질 수 있었습니다.
+- 셀 병합에서 시작 칸만 지정해도 나머지를 현재 선택에서 채웁니다.
+- 그림 종류 판정이 경로마다 달라 같은 개체를 어떤 곳은 찾고 어떤 곳은 못 찾던 문제를 고쳤습니다.
+- 다른 이름으로 저장한 뒤 편집이 나갈 때 문서 확인이 무력해지던 경로 두 곳을 마저 고쳤습니다.
+- 바뀐 쪽 범위가 재시도 시 한 쪽으로 줄어들던 문제를 고쳤습니다.
+- 파이썬과 네이티브가 서로 다른 한계·프로토콜 값을 믿던 곳들을 추가로 맞췄습니다.
 
 ### v1.2.1 주요 변경
 
@@ -212,7 +229,7 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 - `uv` 패키지 관리자
 - `uv`가 내려받고 관리하는 Python 3.12를 버전별 `.venv`에 격리하여 사용
 
-배포 ZIP에는 개발자의 `.venv`나 일반 Python 설치본을 넣지 않습니다. `install.ps1`이 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.1\.venv`를 새로 만들며, 시작 스크립트는 그 안의 `Scripts\python.exe`만 실행합니다. PC에 별도로 설치된 시스템 Python 3.12는 선택하거나 수정하지 않습니다.
+배포 ZIP에는 개발자의 `.venv`나 일반 Python 설치본을 넣지 않습니다. `install.ps1`이 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.2\.venv`를 새로 만들며, 시작 스크립트는 그 안의 `Scripts\python.exe`만 실행합니다. PC에 별도로 설치된 시스템 Python 3.12는 선택하거나 수정하지 않습니다.
 
 네이티브 UserAction DLL, 파일 경로 보안 모듈과 Event Bridge는 `Win32`, 런처는 `x64` Release 빌드입니다. 다른 한/글 주버전·비트 조합은 별도 검증 전까지 지원 대상으로 간주하지 않습니다.
 
@@ -251,7 +268,7 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 | 레지스트리 3 | `HKCU\Software\HNC\HwpAutomation\Modules`의 `FilePathCheckerModule` 값 |
 | 원본 백업 | `%LOCALAPPDATA%\GSG_HWP\backups\<시각-식별자>` |
 | 활성 설치 기록 | `%LOCALAPPDATA%\GSG_HWP\state\active-install.json` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.1\.venv` |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.2\.venv` |
 | 자동 업데이트 상태 | `%LOCALAPPDATA%\GSG_HWP\updater` |
 | 내려받은 버전 | `%LOCALAPPDATA%\GSG_HWP\packages\<버전>\gsg-hwp` |
 

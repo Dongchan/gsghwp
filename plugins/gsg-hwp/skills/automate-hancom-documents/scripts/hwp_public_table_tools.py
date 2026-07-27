@@ -171,6 +171,15 @@ class HwpPublicTableTools:
         rows: list[list[str]] | None = None,
         start_cell: str | None = None,
         fill_blanks_only: bool = False,
+        preserve_character_style: Annotated[
+            bool,
+            Field(
+                description=(
+                    "기존 셀의 글자 서식(글꼴·크기·색)을 유지합니다. 확장·채우기는 "
+                    "표시 문자열을 재조립하지 않으므로 준 문자열이 그대로 들어갑니다."
+                )
+            ),
+        ] = True,
     ) -> PublicActionResult:
         requested = PublicTableDataInput(
             target=target,
@@ -189,7 +198,7 @@ class HwpPublicTableTools:
             target=selected.target,
             data=data,
             policy=HwpOperatePolicy(
-                preserve_style=True,
+                preserve_character_style=preserve_character_style,
                 fill_blanks_only=requested.fill_blanks_only,
                 allow_row_expansion=True,
                 ambiguity="return_candidates",
@@ -239,7 +248,10 @@ class HwpPublicTableTools:
             document=document_path,
             operation="table.repeat_template",
             target=operation_target,
-            policy=HwpOperatePolicy(preserve_style=True, ambiguity="return_candidates"),
+            policy=HwpOperatePolicy(
+                preserve_character_style=True,
+                ambiguity="return_candidates",
+            ),
             postconditions=HwpOperatePostconditions(
                 record_count=count,
                 verify_structure=True,
@@ -279,7 +291,10 @@ class HwpPublicTableTools:
             document=resolved.document_path,
             operation="table.build_series",
             target=resolved.target,
-            policy=HwpOperatePolicy(preserve_style=True, ambiguity="return_candidates"),
+            policy=HwpOperatePolicy(
+                preserve_character_style=True,
+                ambiguity="return_candidates",
+            ),
             postconditions=HwpOperatePostconditions(
                 record_count=len(items),
                 verify_structure=True,

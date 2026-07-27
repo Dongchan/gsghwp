@@ -72,7 +72,11 @@ def _candidate() -> HwpDocumentCandidate:
     document = SimpleNamespace(DocumentID=17, FullName="C:/documents/table.hwp")
     return cast(
         HwpDocumentCandidate,
-        SimpleNamespace(document=document),
+        SimpleNamespace(
+            document=document,
+            document_id=17,
+            full_name="C:/documents/table.hwp",
+        ),
     )
 
 

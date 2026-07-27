@@ -4,6 +4,12 @@ from pathlib import Path
 from typing import final
 
 import hwp_public_action_metadata as metadata
+from hwp_object_control_types import (
+    CAPTIONABLE_CONTROL_TYPES,
+    PICTURE_CONTROL_TYPES,
+    is_control_type,
+    is_table_control_type,
+)
 from hwp_operation_contract import (
     HwpOperateAssets,
     HwpOperateInputs,
@@ -70,22 +76,27 @@ class HwpPublicObjectTools:
     ) -> PublicActionResult:
         inspection = await self._executor.inspect_page_fast(document_path, 0, False)
         allowed_types = (
-            frozenset(("gso", "pic", "picture"))
-            if picture_only
-            else frozenset(("tbl", "gso", "pic", "picture"))
+            PICTURE_CONTROL_TYPES if picture_only else CAPTIONABLE_CONTROL_TYPES
         )
         table_index = 0
         candidates: list[PublicTargetCandidate] = []
         for control in inspection.controls:
-            if control.control_type == "tbl":
+            # 표 번호 세기와 후보 선별이 같은 판정 규칙을 써야 한다. 한쪽만
+            # 대소문자를 무시하면 후보로는 뽑히면서 table_index 는 비는 개체가
+            # 생긴다.
+            is_table = is_table_control_type(control.control_type)
+            if is_table:
                 table_index += 1
-            if control.control_type not in allowed_types or not control.instance_id:
+            if (
+                not is_control_type(control.control_type, allowed_types)
+                or not control.instance_id
+            ):
                 continue
             candidates.append(
                 PublicTargetCandidate(
                     target_id=control.instance_id,
                     page=inspection.page,
-                    table_index=table_index if control.control_type == "tbl" else None,
+                    table_index=table_index if is_table else None,
                     rows=control.rows,
                     columns=control.columns,
                 )

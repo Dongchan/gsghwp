@@ -157,7 +157,14 @@ def test_failed_journal_status_keeps_reconciliation_scope(tmp_path: Path) -> Non
     assert result.affected_target_ids == ("table-4",)
 
 
-def test_format_ambiguity_without_candidates_requests_executable_cells() -> None:
+def test_format_ambiguity_without_candidates_names_a_fixable_parameter() -> None:
+    """막힌 필드는 제 이름으로 나가야 한다.
+
+    예전에는 inputs.policy.numeric_value_mode 를 "cells" 로 바꿔 부르고, 안내로
+    "최종 표시 문자열을 직접 지정하세요"를 붙였다. 모델은 그대로 따라 cells 값을
+    지어내 다시 보냈고 같은 자리에서 또 막혔다. 이제는 실제로 바꿀 수 있는
+    파라미터만 가리킨다.
+    """
     # Given
     ambiguity = TableFormatAmbiguity("format is ambiguous")
     operation = OperationResult(
@@ -176,11 +183,15 @@ def test_format_ambiguity_without_candidates_requests_executable_cells() -> None
 
     # Then
     assert ambiguity.candidates == ()
-    assert "cells" in str(ambiguity)
+    assert "최종 표시 문자열을 직접 지정" not in str(ambiguity)
+    assert "preserve_display_format" in str(ambiguity)
     assert result.format_candidates == ()
-    assert result.required_inputs == ("cells",)
+    assert result.required_inputs == ("numeric_value_mode",)
     assert result.input_guidance
     assert all("format_candidates" not in item for item in result.input_guidance)
+    assert all(
+        "최종 표시 문자열을 직접 지정" not in item for item in result.input_guidance
+    )
 
 
 def test_write_descriptions_advertise_continuation_retry_and_bulk_fields() -> None:

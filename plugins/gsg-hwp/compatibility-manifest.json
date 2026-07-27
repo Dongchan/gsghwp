@@ -1,5 +1,5 @@
 {
-  "distribution": "1.2.1",
+  "distribution": "1.2.2",
   "source_version": "0.5.73-dev.3",
   "developer": "inodesign",
   "license": "MIT",
@@ -21,7 +21,7 @@
   "native_sha256": "6e1e3f06131c8f636e7b7aa770e3b0a7274ec2c2b8767c902dd98ab23f04e379",
   "protocol": 12,
   "catalog_hash": "ee7a1cdaa539e705f5ce6fa6357f92847b722e390d02c6160020234508a6394d",
-  "recipe_bundle_hash": "b5b182ef3fae4345e616f9f0a242f196ac666e815248f6f775c60c3d65c56b46",
+  "recipe_bundle_hash": "8accf9570581c2840f954626f1c3c6d48cd425463818ebdaced2cb51da92fbef",
   "official_api_catalog_entries": 1452,
   "official_api_enabled_routes": 1448,
   "official_api_disabled_case_ids": [
@@ -51,7 +51,7 @@
   "tool_catalogs": {
     "worker_tools": {
       "count": 44,
-      "schema_hash": "a35ed7fa8ae6b93c141144c6a7f681453d9ac403e1414fed0f24889ba2de043c",
+      "schema_hash": "fe647286dc4e14da63a63b9dbad385be53929dbb00494d99de84b251a35414b1",
       "names": [
         "hwp_list_open_documents",
         "hwp_open_document",
@@ -108,7 +108,7 @@
     },
     "host_visible_tools": {
       "count": 45,
-      "schema_hash": "7a6002d14cc8f3d5de206041653553cbed8a045dfaa4eeac840e58d220ce0793",
+      "schema_hash": "ef6bd6a905c6b551ed21203b7d9a06862d57075c18d7078489f011b431818f96",
       "names": [
         "hwp_list_open_documents",
         "hwp_open_document",
@@ -159,7 +159,7 @@
     },
     "qa_tools": {
       "count": 62,
-      "schema_hash": "dcd72ccdd79f4ea22a5b7b7844cb96882d6d82f3553708d5b67e9ad3329e6772",
+      "schema_hash": "58db729e8e457567c27f19168df582f2f91536b6f193388ebf4d9231a2bc3f8b",
       "names": [
         "hwp_list_open_documents",
         "hwp_open_document",

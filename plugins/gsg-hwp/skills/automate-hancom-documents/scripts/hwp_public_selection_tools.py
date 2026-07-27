@@ -9,7 +9,7 @@ from hwp_operation_contract import (
     HwpOperatePostconditions,
     HwpOperateTarget,
 )
-from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
+from hwp_priority_recipe_contract import HwpPriorityRecipeInputs, RecipePosition
 from hwp_public_action_contract import (
     SELECTION_INPUT_ALIASES,
     PublicFontName,
@@ -23,6 +23,7 @@ from hwp_public_action_contract import (
     PublicTextAlignment,
     PublicTextColor,
     PublicTextFormattingInput,
+    PublicTextPatchPosition,
     PublicTextPatchTarget,
 )
 from hwp_public_contract import PublicActionResult, to_public_action_result
@@ -30,6 +31,48 @@ from hwp_live_text_patch_contract import TextPatchRequest
 
 
 _REPLACE_SELECTED_TEXT_INTENT: Final = "선택 텍스트 교체"
+
+
+def _text_patch_parameters(
+    target: PublicTextPatchTarget,
+    *,
+    replacement: str | None,
+    expected_text: str | None,
+    formatting: PublicTextFormattingInput | None,
+) -> dict[str, str | int | float | bool]:
+    parameters: dict[str, str | int | float | bool] = {
+        "target_kind": target.kind,
+        "match_case": target.match_case,
+    }
+    if replacement is not None:
+        parameters["replacement"] = replacement
+    if expected_text is not None:
+        parameters["expected_text"] = expected_text
+    if target.occurrence is not None:
+        parameters["occurrence"] = target.occurrence
+    if target.start is not None:
+        parameters.update(
+            {
+                "start_list": target.start.list_id,
+                "start_paragraph": target.start.paragraph,
+                "start_character": target.start.character,
+            }
+        )
+    if target.end is not None:
+        parameters.update(
+            {
+                "end_list": target.end.list_id,
+                "end_paragraph": target.end.paragraph,
+                "end_character": target.end.character,
+            }
+        )
+    if target.table_instance_id is not None:
+        parameters["table_instance_id"] = target.table_instance_id
+    if target.cell is not None:
+        parameters["cell"] = target.cell.upper()
+    if formatting is not None:
+        parameters.update(formatting.to_parameters())
+    return parameters
 
 
 @final
@@ -50,37 +93,12 @@ class HwpPublicSelectionTools:
         document_path: str | None = None,
     ) -> PublicActionResult:
         resolved_target = PublicTextPatchTarget() if target is None else target
-        parameters: dict[str, str | int | float | bool] = {
-            "target_kind": resolved_target.kind,
-            "replacement": replacement,
-            "match_case": resolved_target.match_case,
-        }
-        if expected_text is not None:
-            parameters["expected_text"] = expected_text
-        if resolved_target.occurrence is not None:
-            parameters["occurrence"] = resolved_target.occurrence
-        if resolved_target.start is not None:
-            parameters.update(
-                {
-                    "start_list": resolved_target.start.list_id,
-                    "start_paragraph": resolved_target.start.paragraph,
-                    "start_character": resolved_target.start.character,
-                }
-            )
-        if resolved_target.end is not None:
-            parameters.update(
-                {
-                    "end_list": resolved_target.end.list_id,
-                    "end_paragraph": resolved_target.end.paragraph,
-                    "end_character": resolved_target.end.character,
-                }
-            )
-        if resolved_target.table_instance_id is not None:
-            parameters["table_instance_id"] = resolved_target.table_instance_id
-        if resolved_target.cell is not None:
-            parameters["cell"] = resolved_target.cell.upper()
-        if formatting is not None:
-            parameters.update(formatting.to_parameters())
+        parameters = _text_patch_parameters(
+            resolved_target,
+            replacement=replacement,
+            expected_text=expected_text,
+            formatting=formatting,
+        )
         inputs = HwpOperateInputs(
             request_id=operation_id,
             document=document_path,
@@ -110,22 +128,49 @@ class HwpPublicSelectionTools:
         *,
         operation_id: PublicOperationId,
         replacement: PublicReplacementText,
+        target: PublicTextPatchTarget | None = None,
+        expected_text: PublicExpectedText | None = None,
         document_path: str | None = None,
     ) -> PublicActionResult:
+        resolved_target = PublicTextPatchTarget() if target is None else target
         inputs = HwpOperateInputs(
             request_id=operation_id,
             document=document_path,
-            operation="document.replace_selection",
-            target=HwpOperateTarget(kind="selection", binding="selection"),
-            parameters={"replacement": replacement},
+            operation=(
+                "document.replace_selection"
+                if resolved_target.kind == "current" and expected_text is None
+                else "text.replace"
+            ),
+            target=(
+                HwpOperateTarget(kind="selection", binding="selection")
+                if resolved_target.kind == "current" and expected_text is None
+                else None
+            ),
+            parameters=_text_patch_parameters(
+                resolved_target,
+                replacement=replacement,
+                expected_text=expected_text,
+                formatting=None,
+            ),
             policy=HwpOperatePolicy(ambiguity="return_candidates"),
             postconditions=HwpOperatePostconditions(verify_structure=True),
         )
-        result = await self._executor.replace_selected_text(
-            _REPLACE_SELECTED_TEXT_INTENT,
-            inputs,
-            replacement,
-        )
+        if resolved_target.kind == "current" and expected_text is None:
+            result = await self._executor.replace_selected_text(
+                _REPLACE_SELECTED_TEXT_INTENT,
+                inputs,
+                replacement,
+            )
+        else:
+            result = await self._executor.patch_text(
+                _REPLACE_SELECTED_TEXT_INTENT,
+                inputs,
+                TextPatchRequest(
+                    target=resolved_target.to_live(),
+                    expected_text=expected_text,
+                    replacement=replacement,
+                ),
+            )
         return to_public_action_result(result, (), SELECTION_INPUT_ALIASES)
 
     async def hwp_apply_style(
@@ -133,6 +178,7 @@ class HwpPublicSelectionTools:
         *,
         operation_id: PublicOperationId,
         style_id: PublicStyleId,
+        target_position: PublicTextPatchPosition | None = None,
         document_path: str | None = None,
     ) -> PublicActionResult:
         inputs = HwpOperateInputs(
@@ -140,7 +186,18 @@ class HwpPublicSelectionTools:
             document=document_path,
             operation="style.apply",
             target=HwpOperateTarget(kind="selection", binding="selection"),
-            recipe=HwpPriorityRecipeInputs(style_id=style_id),
+            recipe=HwpPriorityRecipeInputs(
+                style_id=style_id,
+                target_position=(
+                    None
+                    if target_position is None
+                    else RecipePosition(
+                        list_id=target_position.list_id,
+                        paragraph=target_position.paragraph,
+                        character=target_position.character,
+                    )
+                ),
+            ),
             policy=HwpOperatePolicy(ambiguity="return_candidates"),
             postconditions=HwpOperatePostconditions(verify_structure=True),
         )
@@ -157,8 +214,11 @@ class HwpPublicSelectionTools:
         text_color: PublicTextColor | None = None,
         alignment: PublicTextAlignment = "inherit",
         line_spacing: PublicLineSpacing | None = None,
+        target: PublicTextPatchTarget | None = None,
+        expected_text: PublicExpectedText | None = None,
         document_path: str | None = None,
     ) -> PublicActionResult:
+        resolved_target = PublicTextPatchTarget() if target is None else target
         formatting = PublicTextFormattingInput(
             bold=bold,
             font_name=font_name,
@@ -171,10 +231,35 @@ class HwpPublicSelectionTools:
             request_id=operation_id,
             document=document_path,
             operation="text.format",
-            target=HwpOperateTarget(kind="selection", binding="selection"),
-            parameters=dict(formatting.to_parameters()),
+            target=(
+                HwpOperateTarget(kind="selection", binding="selection")
+                if resolved_target.kind == "current" and expected_text is None
+                else None
+            ),
+            parameters=_text_patch_parameters(
+                resolved_target,
+                replacement=None,
+                expected_text=expected_text,
+                formatting=formatting,
+            ),
             policy=HwpOperatePolicy(ambiguity="return_candidates"),
             postconditions=HwpOperatePostconditions(verify_structure=True),
         )
-        result = await self._executor.execute(metadata.FORMAT_TEXT_INTENT, inputs, None)
+        if resolved_target.kind == "current" and expected_text is None:
+            result = await self._executor.execute(
+                metadata.FORMAT_TEXT_INTENT,
+                inputs,
+                None,
+            )
+        else:
+            result = await self._executor.patch_text(
+                metadata.FORMAT_TEXT_INTENT,
+                inputs,
+                TextPatchRequest(
+                    target=resolved_target.to_live(),
+                    expected_text=expected_text,
+                    replacement="" if expected_text is None else expected_text,
+                    formatting=formatting.to_live(),
+                ),
+            )
         return to_public_action_result(result, (), SELECTION_INPUT_ALIASES)

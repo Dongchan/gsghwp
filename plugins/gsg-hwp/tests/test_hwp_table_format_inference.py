@@ -144,7 +144,9 @@ def test_external_unit_context_keeps_unscaled_tokens_out_of_base_candidate() -> 
     )
 
 
-def test_external_unit_context_accepts_display_value_matching_existing_magnitude() -> None:
+def test_external_unit_context_accepts_display_value_matching_existing_magnitude() -> (
+    None
+):
     edits = infer_table_cell_edits(
         _table(header="합계"),
         (("B3", "2,346\n(68)"),),
@@ -228,7 +230,9 @@ def test_native_preserve_flags_are_encoded_only_for_new_commands() -> None:
 
     payload = encode_action_request(request)
 
-    patch_line = next(line for line in payload.splitlines() if line.startswith("PATCH_TEXT"))
+    patch_line = next(
+        line for line in payload.splitlines() if line.startswith("PATCH_TEXT")
+    )
     cell_line = next(
         line for line in payload.splitlines() if line.startswith("SET_CELL_TEXT")
     )
@@ -243,10 +247,12 @@ def test_preserve_style_policy_routes_cell_changes_to_minimal_native_patches() -
         cast(
             object,
             SimpleNamespace(
+                document_id=17,
+                full_name="C:/documents/sample.hwp",
                 document=SimpleNamespace(
                     DocumentID=17,
                     FullName="C:/documents/sample.hwp",
-                )
+                ),
             ),
         ),
     )
@@ -273,8 +279,7 @@ def test_preserve_style_policy_routes_cell_changes_to_minimal_native_patches() -
     assert len(patches) == 2
     assert all(command.preserve_format for command in patches)
     assert not any(
-        isinstance(command, SetCellTextCommand)
-        for command in prepared.request.commands
+        isinstance(command, SetCellTextCommand) for command in prepared.request.commands
     )
 
 
@@ -320,6 +325,8 @@ def test_verified_table_fill_result_survives_operation_verification_gate() -> No
             object,
             SimpleNamespace(
                 window_handle=100,
+                document_id=17,
+                full_name="C:/documents/sample.hwp",
                 document=SimpleNamespace(
                     DocumentID=17,
                     FullName="C:/documents/sample.hwp",

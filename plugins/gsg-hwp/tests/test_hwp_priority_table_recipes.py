@@ -178,7 +178,11 @@ def _inputs(
             operation=workflow,
             target=target,
             data=HwpOperateData(
-                cells={"A1": "replacement"} if no_op else {"A2": "inserted"}
+                cells=(
+                    {"A1": "replacement"}
+                    if no_op
+                    else {"A1": "updated", "A2": "inserted"}
+                )
             ),
             policy=HwpOperatePolicy(
                 allow_row_expansion=True,
@@ -213,7 +217,7 @@ def _snapshots(
         after_text = "wrong" if failed_readback else "inserted"
         after = _snapshot(
             _table(
-                _cell("A1", 0),
+                _cell("A1", 0, text="updated"),
                 _cell("A2", 1, text=after_text),
                 rows=2,
             ),
@@ -283,11 +287,13 @@ async def _run(
     def execute(
         _candidate: HwpDocumentCandidate,
         _request: NativeActionRequest,
+        minimum_version: int,
     ) -> tuple[int, int]:
         nonlocal native_calls
         native_calls += 1
         if no_op:
             raise AssertionError("verified no-op must not execute native commands")
+        assert minimum_version == (12 if workflow == "table.expand_and_fill" else 9)
         return 5, 17
 
     def operate(
@@ -364,6 +370,11 @@ def test_verified_table_recipe_is_committed_and_replayed(
 
     assert tuple(result.status for result in results) == ("executed", "executed")
     assert tuple(result.verified for result in results) == (True, True)
+    expected_protocol = 12 if workflow == "table.expand_and_fill" else 9
+    assert tuple(result.native_protocol for result in results) == (
+        expected_protocol,
+        expected_protocol,
+    )
     assert tuple(result.idempotency_status for result in results) == (
         "committed",
         "replayed",

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCRIPTS = (
@@ -27,6 +28,7 @@ from hwp_operation_contract import (  # noqa: E402
     OperationResult,
     page_growth_evidence,
 )
+from hwp_operation_journal_contract import JournalRecord  # noqa: E402
 from hwp_public_contract import (  # noqa: E402
     PublicActionResult,
     to_public_action_result,
@@ -225,6 +227,28 @@ def test_page_evidence_field_stays_out_of_the_public_operation_schema() -> None:
     assert "affected_pages" not in serialized
     # 그래도 내부에서는 살아 있어야 한다.
     assert operation.changed_pages == (3, 4)
+
+
+def test_journal_round_trip_preserves_changed_page_evidence() -> None:
+    recorded_at = datetime(2026, 7, 27, tzinfo=UTC)
+    operation = _edit_result(current_page=9, changed_pages=(2, 4, 7))
+    record = JournalRecord(
+        request_digest="changed-pages-round-trip",
+        state="committed",
+        started_at=recorded_at,
+        updated_at=recorded_at,
+        heartbeat_at=recorded_at,
+    ).with_result(operation, None)
+
+    replayed = JournalRecord.model_validate_json(record.model_dump_json()).decision(
+        "replay",
+        "document-session",
+        60,
+    )
+
+    assert replayed.result is not None
+    assert replayed.result.changed_pages == (2, 4, 7)
+    assert to_public_action_result(replayed.result, ()).affected_pages == (2, 4, 7)
 
 
 # --- 증거 생산자: 새 네이티브 왕복 없이 이미 조회한 결과에서 뽑는다 ----------

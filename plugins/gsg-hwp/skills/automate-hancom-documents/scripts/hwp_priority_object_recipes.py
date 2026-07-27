@@ -34,6 +34,12 @@ from hwp_live_native_template_repeat import (
 )
 from hwp_live_native_text_format import style_command
 from hwp_live_rot import HwpDocumentCandidate
+from hwp_object_control_types import (
+    CAPTIONABLE_CONTROL_TYPES,
+    PICTURE_CONTROL_TYPES,
+    is_picture_control_type,
+    is_table_control_type,
+)
 from hwp_operation_contract import (
     HwpOperateAssets,
     HwpOperateTarget,
@@ -140,6 +146,7 @@ def operate_object_recipe(
     image_fitted_height_mm: float | None = None
     image_replace_before: NativeDetailedControl | None = None
     image_replace_expectation: PictureReplaceExpectation | None = None
+    resolved_control_page: NativePageInspection | None = None
     style_expected_id: int | None = None
     style_target_position: NativePosition | None = None
     style_verification_scope_sufficient = False
@@ -201,8 +208,9 @@ def operate_object_recipe(
             ControlTargetRequest(
                 routing_page,
                 target,
-                frozenset(("gso", "pic", "picture")),
+                PICTURE_CONTROL_TYPES,
                 _selection_snapshot(candidate, target),
+                candidate.window_handle,
             )
         )
         if image is not None and isinstance(resolved_control, ControlTargetFailure):
@@ -217,11 +225,14 @@ def operate_object_recipe(
             if isinstance(resolved_control, ResolvedObjectControl)
             else None
         )
+        resolved_control_page = (
+            None if resolved_picture is None else resolved_picture.page
+        )
         control_id = None if resolved_picture is None else resolved_picture.instance_id
         target_resolution_basis = (
             None if resolved_picture is None else resolved_picture.basis
         )
-        if image is None or control_id is None:
+        if image is None or control_id is None or resolved_control_page is None:
             return _result(
                 resolution,
                 "needs_input",
@@ -234,7 +245,7 @@ def operate_object_recipe(
         resolved_target_id = control_id
         before_structure = inspect_native_structure(
             candidate.window_handle,
-            routing_page.page,
+            resolved_control_page.page,
         )
         if before_structure is None:
             raise HwpLiveError("네이티브 그림 교체 전 상세 구조를 읽지 못했습니다")
@@ -242,7 +253,7 @@ def operate_object_recipe(
             control
             for control in before_structure.controls
             if control.instance_id == control_id
-            and control.control_type in {"gso", "pic", "picture"}
+            and is_picture_control_type(control.control_type)
         )
         if len(matching) != 1:
             raise HwpLiveError(
@@ -305,8 +316,9 @@ def operate_object_recipe(
             ControlTargetRequest(
                 routing_page,
                 target,
-                frozenset(("tbl", "gso", "pic", "picture")),
+                CAPTIONABLE_CONTROL_TYPES,
                 _selection_snapshot(candidate, target),
+                candidate.window_handle,
             )
         )
         if (
@@ -325,6 +337,9 @@ def operate_object_recipe(
             if isinstance(resolved_control, ResolvedObjectControl)
             else None
         )
+        resolved_control_page = (
+            None if resolved_object is None else resolved_object.page
+        )
         control_id = None if resolved_object is None else resolved_object.instance_id
         target_resolution_basis = (
             None if resolved_object is None else resolved_object.basis
@@ -334,6 +349,7 @@ def operate_object_recipe(
             or recipe_inputs.caption_text is None
             or control_id is None
             or resolved_object is None
+            or resolved_control_page is None
         ):
             return _result(
                 resolution,
@@ -352,10 +368,13 @@ def operate_object_recipe(
                 "캡션 텍스트가 비어 있습니다",
                 required_inputs=("inputs.recipe.caption_text",),
             )
-        if resolved_object.control_type == "tbl":
+        # 후보 집합(CAPTIONABLE_CONTROL_TYPES)과 같은 규칙으로 갈라야 한다.
+        # 여기만 정확 비교로 두면 후보로는 통과한 표가 else 로 떨어져 그림
+        # 캡션 경로를 타게 된다.
+        if is_table_control_type(resolved_object.control_type):
             before_structure = inspect_native_structure(
                 candidate.window_handle,
-                routing_page.page,
+                resolved_control_page.page,
             )
             if before_structure is None:
                 raise HwpLiveError("네이티브 캡션 변경 전 상세 구조를 읽지 못했습니다")
@@ -370,9 +389,9 @@ def operate_object_recipe(
         else:
             picture_targets = tuple(
                 control
-                for control in routing_page.controls
+                for control in resolved_control_page.controls
                 if control.instance_id == control_id
-                and control.control_type in {"gso", "pic", "picture"}
+                and is_picture_control_type(control.control_type)
             )
             if len(picture_targets) != 1:
                 raise HwpLiveError(
@@ -389,7 +408,8 @@ def operate_object_recipe(
                 caption_text=caption_text,
                 anchor=picture_targets[0].anchor,
                 existing_auto_number_count=sum(
-                    control.control_type == "atno" for control in routing_page.controls
+                    control.control_type == "atno"
+                    for control in resolved_control_page.controls
                 ),
                 automatic_prefix=automatic_prefix,
             )
@@ -524,11 +544,11 @@ def operate_object_recipe(
         )
         operation_verified = True
     if workflow == "image.replace" and image_replace_expectation is not None:
-        if image_replace_before is None:
+        if image_replace_before is None or resolved_control_page is None:
             raise HwpLiveError("그림 교체 상세 검증의 기준 개체가 없습니다")
         after_structure = inspect_native_structure(
             candidate.window_handle,
-            routing_page.page,
+            resolved_control_page.page,
         )
         if after_structure is None:
             raise HwpLiveError("네이티브 그림 교체 후 상세 구조를 읽지 못했습니다")
@@ -536,7 +556,7 @@ def operate_object_recipe(
             control
             for control in after_structure.controls
             if control.instance_id == image_replace_expectation.control_id
-            and control.control_type in {"gso", "pic", "picture"}
+            and is_picture_control_type(control.control_type)
         )
         if len(matching) != 1:
             raise HwpLiveError(
@@ -553,14 +573,18 @@ def operate_object_recipe(
         )
         operation_verified = True
     if workflow == "caption.add":
-        if caption_text is None or caption_control_id is None:
+        if (
+            caption_text is None
+            or caption_control_id is None
+            or resolved_control_page is None
+        ):
             raise HwpLiveError(
                 "caption recipe executed without caption verification inputs"
             )
         if picture_caption_expectation is not None:
             after_page = inspect_native_page(
                 candidate.window_handle,
-                routing_page.page,
+                resolved_control_page.page,
                 include_cells=False,
             )
             if after_page is None:
@@ -569,7 +593,7 @@ def operate_object_recipe(
         else:
             after = inspect_native_structure(
                 candidate.window_handle,
-                routing_page.page,
+                resolved_control_page.page,
             )
             if after is None:
                 raise HwpLiveError("네이티브 캡션 변경 후 상세 구조를 읽지 못했습니다")

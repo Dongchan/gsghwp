@@ -8,6 +8,12 @@ from hwp_live_native_action_models import (
     NativePosition,
     NativeSnapshot,
 )
+from hwp_live_native_batch import inspect_native_pages
+from hwp_object_control_types import (
+    KIND_CONTROL_TYPES,
+    KIND_LABELS,
+    is_control_type,
+)
 from hwp_operation_contract import HwpOperateAssets, HwpOperateTarget, OperationStatus
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs, RecipePosition
 
@@ -18,6 +24,7 @@ class ControlTargetRequest:
     target: HwpOperateTarget | None
     control_types: frozenset[str]
     snapshot: NativeSnapshot | None
+    window_handle: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +32,7 @@ class ResolvedObjectControl:
     instance_id: str
     basis: str
     control_type: str
+    page: NativePageInspection
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,17 +58,6 @@ def single_image(assets: HwpOperateAssets | None) -> Path | None:
     return next(iter(assets.images.values()))
 
 
-# Object kinds that name a concrete control type. "document", "page",
-# "selection" and "control" describe where to look rather than what to edit, so
-# they leave the workflow's own candidate types untouched.
-_KIND_CONTROL_TYPES: dict[str, frozenset[str]] = {
-    "table": frozenset(("tbl",)),
-    "picture": frozenset(("gso", "pic", "picture")),
-}
-
-_KIND_LABELS: dict[str, str] = {"table": "표", "picture": "그림"}
-
-
 def _candidate_control_types(
     target: HwpOperateTarget | None,
     control_types: frozenset[str],
@@ -72,9 +69,11 @@ def _candidate_control_types(
     """
     if target is None:
         return control_types
-    restriction = _KIND_CONTROL_TYPES.get(target.kind)
+    restriction = KIND_CONTROL_TYPES.get(target.kind)
     if restriction is None:
         return control_types
+    # 양쪽 모두 hwp_object_control_types 의 표준형(소문자) 집합이므로 교집합이
+    # 대소문자 때문에 비어 버리는 일은 없다.
     narrowed = control_types & restriction
     return narrowed if narrowed else None
 
@@ -82,7 +81,7 @@ def _candidate_control_types(
 def _candidate_label(target: HwpOperateTarget | None) -> str:
     if target is None:
         return "개체"
-    return _KIND_LABELS.get(target.kind, "개체")
+    return KIND_LABELS.get(target.kind, "개체")
 
 
 def resolve_control_target(
@@ -97,49 +96,84 @@ def resolve_control_target(
         return ControlTargetFailure(
             "schema_conflict",
             f"이 작업은 {_candidate_label(target)} 종류의 개체를 편집하지 않습니다 "
-            f"(target.kind={kind})",
+            + f"(target.kind={kind})",
         )
     if target is not None and target.control_instance_id is not None:
         instance_id = target.control_instance_id
+        pages = (page,)
         present = tuple(
-            control for control in page.controls if control.instance_id == instance_id
+            (page, control)
+            for control in page.controls
+            if control.instance_id == instance_id
         )
+        if (
+            not present
+            and target.page_hint is None
+            and request.window_handle is not None
+        ):
+            other_page_numbers = tuple(
+                page_number
+                for page_number in range(1, page.page_count + 1)
+                if page_number != page.page
+            )
+            pages = inspect_native_pages(
+                request.window_handle,
+                other_page_numbers,
+                include_cells=False,
+            )
+            present = tuple(
+                (inspected_page, control)
+                for inspected_page in pages
+                for control in inspected_page.controls
+                if control.instance_id == instance_id
+            )
         if not present:
+            scope = f"{page.page}쪽에" if target.page_hint is not None else "문서에"
             return ControlTargetFailure(
                 "not_found",
-                f"{page.page}쪽에 개체 ID {instance_id}가 없습니다",
+                f"{scope} 개체 ID {instance_id}가 없습니다",
             )
+        if len(present) != 1:
+            return ControlTargetFailure(
+                "schema_conflict",
+                f"문서에서 개체 ID {instance_id}를 하나로 확인하지 못했습니다",
+            )
+        matched_page, matched_control = present[0]
         matching = tuple(
-            control for control in present if control.control_type in control_types
+            control
+            for _, control in present
+            if is_control_type(control.control_type, control_types)
         )
         if not matching:
             return ControlTargetFailure(
                 "schema_conflict",
-                f"개체 ID {instance_id}의 종류는 {present[0].control_type}이며 "
-                f"{_candidate_label(target)} 대상이 아닙니다",
+                f"개체 ID {instance_id}의 종류는 {matched_control.control_type}이며 "
+                + f"{_candidate_label(target)} 대상이 아닙니다",
             )
         return ResolvedObjectControl(
             instance_id,
             "explicit_control_instance_id",
             matching[0].control_type,
+            matched_page,
         )
     if target is not None and target.binding == "selection":
         snapshot = request.snapshot
         if (
             snapshot is not None
-            and snapshot.control_type in control_types
+            and is_control_type(snapshot.control_type, control_types)
             and snapshot.control_instance_id
         ):
             return ResolvedObjectControl(
                 snapshot.control_instance_id,
                 "native.selection",
                 snapshot.control_type,
+                page,
             )
         return None
     matches = tuple(
         control
         for control in page.controls
-        if control.control_type in control_types and control.instance_id
+        if is_control_type(control.control_type, control_types) and control.instance_id
     )
     if target is not None and target.table_index is not None:
         index = target.table_index - 1
@@ -149,12 +183,13 @@ def resolve_control_target(
                 selected.instance_id,
                 "explicit_table_index",
                 selected.control_type,
+                page,
             )
         label = _candidate_label(target)
         return ControlTargetFailure(
             "not_found",
             f"{page.page}쪽의 {label}은 {len(matches)}개이며 "
-            f"{target.table_index}번째 {label}이 없습니다",
+            + f"{target.table_index}번째 {label}이 없습니다",
         )
     if len(matches) != 1:
         return None
@@ -163,6 +198,7 @@ def resolve_control_target(
         selected.instance_id,
         "unique_native_page_control",
         selected.control_type,
+        page,
     )
 
 

@@ -106,7 +106,9 @@ def _record_columns(
         headings = {
             _normalized(cell.text): cell.column
             for cell in table.cells
-            if cell.row == row and cell.owner_address == cell.address and cell.text.strip()
+            if cell.row == row
+            and cell.owner_address == cell.address
+            and cell.text.strip()
         }
         columns: dict[str, int] = {}
         for key in keys:
@@ -122,7 +124,9 @@ def _record_columns(
         if len(columns) == len(keys):
             matches.append((row, columns))
     if len(matches) != 1:
-        raise HwpLiveError("레코드 필드와 일치하는 표 머리글 행을 정확히 하나 찾지 못했습니다")
+        raise HwpLiveError(
+            "레코드 필드와 일치하는 표 머리글 행을 정확히 하나 찾지 못했습니다"
+        )
     return matches[0]
 
 
@@ -132,7 +136,9 @@ def _raw_replacements(
 ) -> dict[str, str]:
     modes = int(bool(data.cells)) + int(bool(data.rows)) + int(bool(data.records))
     if modes != 1:
-        raise HwpLiveError("inputs.data에는 cells, rows, records 중 정확히 하나를 전달하세요")
+        raise HwpLiveError(
+            "inputs.data에는 cells, rows, records 중 정확히 하나를 전달하세요"
+        )
     if data.cells:
         return {address.strip().upper(): value for address, value in data.cells.items()}
     if data.rows:
@@ -173,7 +179,7 @@ def _cell_text_command(
     value: str,
     observed: dict[str, str],
     *,
-    preserve_style: bool,
+    preserve_character_style: bool,
 ) -> SetCellTextCommand:
     """확장·채우기 셀 하나를 쓰는 명령.
 
@@ -183,7 +189,7 @@ def _cell_text_command(
     는 ContextualCellEdit.expected_text 에 `_target_cell(...).text`, 즉 같은
     스냅숏의 소유 셀 텍스트를 넣는다.
     """
-    if not preserve_style:
+    if not preserve_character_style:
         return SetCellTextCommand(address, value)
     expected = observed.get(address)
     if expected is None:
@@ -229,11 +235,20 @@ def prepare_expand_and_fill(
         if existing is not None:
             observed[owner] = existing.text
     ordered = tuple(sorted(replacements.items()))
-    maximum_row = max((_parse_address(address)[0] + 1 for address, _ in ordered), default=0)
+    maximum_row = max(
+        (_parse_address(address)[0] + 1 for address, _ in ordered), default=0
+    )
     rows_added = max(0, maximum_row - table.rows)
     last_row_cells = tuple(cell for cell in table.cells if cell.row == table.rows - 1)
     if rows_added and not last_row_cells:
         raise HwpLiveError("표의 마지막 행을 찾지 못했습니다")
+    command_count = 2 + rows_added + (1 if rows_added else 0) + len(ordered)
+    if command_count > _NATIVE_COMMAND_LIMIT:
+        raise HwpLiveError(
+            f"표 확장·채우기 명령이 네이티브 한계 {_NATIVE_COMMAND_LIMIT}개를 넘었습니다"
+            + f" (명령 {command_count}개, 셀 {len(ordered)}개, 추가 행 {rows_added}개)."
+            + " 데이터를 나눠 여러 번 요청하세요"
+        )
     commands: list[NativeActionCommand] = [
         SelectControlCommand(control_id),
         CaptureTableCommand(),
@@ -241,31 +256,28 @@ def prepare_expand_and_fill(
     if rows_added:
         commands.append(CellCommand(last_row_cells[0].owner_address))
         commands.extend(RunCommand("TableAppendRow") for _ in range(rows_added))
-    # 편집 셀 하나당 명령 하나. preserve_style 은 같은 명령의 형식만 바꾸고
+    # 편집 셀 하나당 명령 하나. 글자 서식 보존은 같은 명령의 형식만 바꾸고
     # 명령 수는 늘리지 않으므로 아래 20_000 예산 계산은 종전 그대로다.
+    # 확장·채우기는 표시 문자열 재조립을 하지 않는다. 그래서 여기서 보는 것은
+    # preserve_character_style 하나뿐이고, preserve_display_format 은 이 경로와
+    # 무관하다.
     commands.extend(
         _cell_text_command(
             address,
             value,
             observed,
-            preserve_style=policy.preserve_style,
+            preserve_character_style=policy.preserve_character_style,
         )
         for address, value in ordered
     )
-    if len(commands) > _NATIVE_COMMAND_LIMIT:
-        raise HwpLiveError(
-            f"표 확장·채우기 명령이 네이티브 한계 {_NATIVE_COMMAND_LIMIT}개를 넘었습니다"
-            + f" (명령 {len(commands)}개, 셀 {len(ordered)}개, 추가 행 {rows_added}개)."
-            + " 데이터를 나눠 여러 번 요청하세요"
-        )
     preserving = any(
         isinstance(command, SetCellTextCommand) and command.preserve_style
         for command in commands
     )
     return ExpandedTablePlan(
         NativeActionRequest(
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             commands=tuple(commands),
         ),
         ordered,

@@ -140,7 +140,7 @@ class HwpPublicVisibilityTools:
             operation="table.build_series",
             target=template.target,
             policy=HwpOperatePolicy(
-                preserve_style=True,
+                preserve_character_style=True,
                 preserve_existing_images=False,
                 ambiguity="return_candidates",
                 atomic=False,

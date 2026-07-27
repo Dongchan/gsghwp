@@ -3,6 +3,7 @@
 #include "ComError.h"
 #include "ComState.h"
 #include "DispatchInvoke.h"
+#include "ParagraphText.h"
 #include "TableInspection.h"
 
 #include <atlbase.h>
@@ -42,6 +43,7 @@ using hancom::dispatch::AsString;
 using hancom::dispatch::Method;
 using hancom::dispatch::PropertyGet;
 using hancom::dispatch::PropertyPut;
+using hancom::text::SameParagraphText;
 
 struct ResolvedOperation {
     const CellOperation* operation = nullptr;
@@ -716,7 +718,7 @@ bool VerifyExpectedText(
     if (!ReadSelectedText(hwp, operation.address, &currentText, result)) {
         return false;
     }
-    if (currentText != operation.expectedText) {
+    if (!SameParagraphText(currentText, operation.expectedText)) {
         return SetError(
             result,
             L"STALE_CELL",

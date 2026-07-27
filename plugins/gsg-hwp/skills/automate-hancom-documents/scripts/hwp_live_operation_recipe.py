@@ -19,7 +19,6 @@ from hwp_live_layout import prepare_layout_assets
 from hwp_live_native_action_contract import (
     NativeActionFailure,
     NativeActionFailureEvidence,
-    encode_action_request,
 )
 from hwp_live_native_action_models import NativePosition
 from hwp_live_native_action_results import NativeActionResult, NativeSnapshot
@@ -429,7 +428,6 @@ def operate_layout(
         ),
         atomic=atomic,
     )
-    _ = encode_action_request(request)
     execution = build_native_layout_execution_plan(request)
     native_protocol = (
         10

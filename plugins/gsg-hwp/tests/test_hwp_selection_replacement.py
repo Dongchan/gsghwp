@@ -114,7 +114,7 @@ def _selected_context(document: OpenDocument) -> LiveContext:
     )
 
 
-def test_production_replacement_tool_accepts_only_current_selection_and_text() -> None:
+def test_production_replacement_tool_accepts_explicit_text_target() -> None:
     server = build_server(LiveHwpController(), profile="production")
     tools = anyio.run(server.list_tools)
     schemas = {
@@ -128,6 +128,8 @@ def test_production_replacement_tool_accepts_only_current_selection_and_text() -
         (
             "operation_id",
             "replacement",
+            "target",
+            "expected_text",
             "document_path",
             "document_selector",
         )

@@ -3,9 +3,11 @@ from __future__ import annotations
 # pyright: reportPrivateUsage=false
 
 import sys
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar, cast, final
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import anyio
 import pytest
@@ -42,6 +44,7 @@ from hwp_mcp import build_server  # noqa: E402
 from hwp_mcp_operation_executor import _text_match_candidates  # noqa: E402
 from hwp_operation_contract import OperationResult  # noqa: E402
 from hwp_public_action_contract import (  # noqa: E402
+    PublicSelectionExecutor,
     PublicTextPatchPosition,
     PublicTextPatchTarget,
     PublicTextFormattingInput,
@@ -51,7 +54,9 @@ from hwp_live_text_patch_contract import (  # noqa: E402
     TextPatchRequest,
     TextPatchResult,
     TextPatchTarget,
+    text_patch_minimum_protocol,
 )
+from hwp_public_selection_tools import HwpPublicSelectionTools  # noqa: E402
 
 
 class _InputSchema(BaseModel):
@@ -211,6 +216,57 @@ def test_public_patch_target_rejects_incomplete_or_mixed_coordinates() -> None:
             cell="A1",
         )
 
+    scoped = PublicTextPatchTarget(
+        kind="find",
+        table_instance_id="table-1",
+        cell="b2",
+        occurrence=2,
+    )
+    assert scoped.to_live() == TextPatchTarget(
+        kind="find",
+        occurrence=2,
+        table_instance_id="table-1",
+        cell_address="B2",
+    )
+
+
+def test_scoped_find_encodes_table_cell_filter_and_requires_protocol_12() -> None:
+    command = TextPatchCommand(
+        target="find",
+        expected_text="old",
+        replacement="new",
+        occurrence=2,
+        match_case=True,
+        table_instance_id="table-1",
+        cell_address="B2",
+    )
+    request = TextPatchRequest(
+        target=TextPatchTarget(
+            kind="find",
+            occurrence=2,
+            match_case=True,
+            table_instance_id="table-1",
+            cell_address="B2",
+        ),
+        expected_text="old",
+        replacement="new",
+    )
+
+    payload = encode_action_request(_request(command))
+
+    assert "PATCH_TEXT\tFIND\tdGFibGUtMQ==\tB2\t2\t1\tb2xk\tbmV3\n" in payload
+    assert text_patch_minimum_protocol(request) == 12
+    assert (
+        text_patch_minimum_protocol(
+            TextPatchRequest(
+                target=TextPatchTarget(kind="find"),
+                expected_text="old",
+                replacement="new",
+            )
+        )
+        == 11
+    )
+
 
 def test_ambiguous_text_patch_returns_exact_candidates() -> None:
     candidates = _text_match_candidates(
@@ -280,6 +336,63 @@ def test_production_exposes_one_atomic_text_patch_tool() -> None:
             "document_path",
             "document_selector",
         )
+    )
+    format_schema = schemas["hwp_format_text"]
+    assert {"target", "expected_text"} <= set(format_schema.properties)
+    style_schema = schemas["hwp_apply_style"]
+    assert "target_position" in style_schema.properties
+
+
+def test_explicit_text_format_target_routes_through_atomic_patch() -> None:
+    execute = AsyncMock(side_effect=AssertionError("selection path used"))
+    replace_selected_text = AsyncMock(
+        side_effect=AssertionError("selection replacement path used")
+    )
+    patch_text = AsyncMock(
+        return_value=OperationResult(
+            status="executed",
+            changed=True,
+            query="format text",
+            registry_entries=1,
+            lookup_microseconds=0,
+            message="ok",
+            verified=True,
+            modified=True,
+            retry_safe=True,
+        )
+    )
+    executor = cast(
+        PublicSelectionExecutor,
+        SimpleNamespace(
+            execute=execute,
+            replace_selected_text=replace_selected_text,
+            patch_text=patch_text,
+        ),
+    )
+    tools = HwpPublicSelectionTools(executor)
+    target = PublicTextPatchTarget(
+        kind="table_cell",
+        table_instance_id="table-1",
+        cell="B2",
+    )
+
+    _ = anyio.run(
+        partial(
+            tools.hwp_format_text,
+            operation_id="format-table-cell",
+            bold=True,
+            target=target,
+            expected_text="기존",
+        )
+    )
+
+    patch_text.assert_awaited_once()
+    patch_request = patch_text.await_args.args[2]
+    assert patch_request == TextPatchRequest(
+        target=target.to_live(),
+        expected_text="기존",
+        replacement="기존",
+        formatting=PublicTextFormattingInput(bold=True).to_live(),
     )
 
 

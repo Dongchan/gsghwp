@@ -52,8 +52,8 @@ type PublicStyleId = Annotated[int, Field(ge=0, le=4_095)]
 # hwp_priority_recipe_contract.py:29-30 의 picture_width_mm / picture_height_mm
 # (역시 250 / 350)로 그대로 넘긴다. 여기만 풀면 스키마 거부가 도구 안쪽의
 # ValidationError 로 바뀔 뿐이라 상황이 더 나빠진다. 두 곳을 함께 올려야 한다.
-type PublicImageWidth = Annotated[float, Field(ge=1, le=250)]
-type PublicImageHeight = Annotated[float, Field(ge=1, le=350)]
+type PublicImageWidth = Annotated[float, Field(ge=1, le=1_000)]
+type PublicImageHeight = Annotated[float, Field(ge=1, le=1_000)]
 type PublicFontName = Annotated[str, Field(min_length=1, max_length=100)]
 type PublicFontSize = Annotated[float, Field(ge=1, le=96)]
 type PublicTextColor = ColorInput
@@ -88,8 +88,8 @@ OBJECT_INPUT_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
 SELECTION_INPUT_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "inputs.parameters": "formatting",
-        "inputs.recipe.target_position": "current_selection",
-        "inputs.target": "current_selection",
+        "inputs.recipe.target_position": "target_position",
+        "inputs.target": "target",
     }
 )
 DOCUMENT_INPUT_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
@@ -162,7 +162,11 @@ class PublicTextPatchTarget(ContractModel):
             and self.end is not None
             and not search_fields
             and not cell_fields,
-            "find": not range_fields and not cell_fields,
+            "find": not range_fields
+            and (
+                not cell_fields
+                or (self.table_instance_id is not None and self.cell is not None)
+            ),
             "table_cell": not range_fields
             and self.table_instance_id is not None
             and self.cell is not None,

@@ -33,6 +33,17 @@ class TextPatchRequest:
     formatting: TextFormatSpec | None = None
 
 
+def text_patch_minimum_protocol(request: TextPatchRequest) -> Literal[11, 12]:
+    target = request.target
+    if (
+        target.kind == "find"
+        and target.table_instance_id is not None
+        and target.cell_address is not None
+    ):
+        return 12
+    return 11
+
+
 @dataclass(frozen=True, slots=True)
 class TextPatchResult:
     native: NativeActionResult

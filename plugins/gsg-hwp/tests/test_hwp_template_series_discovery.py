@@ -310,15 +310,50 @@ def test_partially_damaged_series_signature_fails_closed(
     )
     calls = _wire_pages(monkeypatch, source, {2: page_two})
 
-    with pytest.raises(discovery.AmbiguousTableSeriesError, match="라벨 일부"):
+    with pytest.raises(discovery.InvalidTableSeriesError, match="일부 라벨"):
         _ = discovery.discover_table_series(
             101,
             _plan(TemplateTableBlock(), TemplateTableBlock()),
         )
-    assert not any(call == "detailed_pages" for call, _value in calls)
+    assert ("detailed_pages", ((2,), True)) in calls
 
 
-def test_priority_recipe_returns_public_needs_target_for_series_ambiguity(
+def test_partial_page_labels_distributed_across_unrelated_tables_are_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _page(
+        1,
+        (_control("source-table", paragraph=0),),
+        _series_cells("source-table"),
+        page_count=2,
+    )
+    first = _control("unrelated-a", paragraph=1)
+    second = _control("unrelated-b", paragraph=2)
+    first_cells = _series_cells(
+        first.instance_id,
+        missing=frozenset({"표고(m)", "가시권분석", "현황사진", "분석결과"}),
+    )
+    second_cells = _series_cells(
+        second.instance_id,
+        missing=frozenset({"구분", "조망위치", "이격거리", "현황사진", "분석결과"}),
+    )
+    page_two = _page(
+        2,
+        (first, second),
+        (*first_cells, *second_cells),
+        page_count=2,
+    )
+    _ = _wire_pages(monkeypatch, source, {2: page_two})
+
+    found = discovery.discover_table_series(
+        101,
+        _plan(TemplateTableBlock(), TemplateTableBlock()),
+    )
+
+    assert tuple(item.control.instance_id for item in found) == ("source-table",)
+
+
+def test_priority_recipe_reports_series_ambiguity_as_schema_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -383,7 +418,8 @@ def test_priority_recipe_returns_public_needs_target_for_series_ambiguity(
     public = to_public_action_result(result, ())
 
     assert calls == ["sync"]
-    assert result.status == "ambiguous"
+    assert result.status == "schema_conflict"
     assert result.changed is False
-    assert public.status == "needs_target"
-    assert public.retry_safe is True
+    assert public.status == "failed"
+    assert public.required_inputs == ()
+    assert public.retry_safe is False

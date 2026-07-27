@@ -28,7 +28,11 @@ from hwp_operation_contract import (
     HwpOperatePostconditions,
     HwpOperateTarget,
 )
-from hwp_table_format_inference import infer_table_cell_edits
+from hwp_table_format_inference import (
+    FormatRevertedCell,
+    infer_table_cell_edits as infer_table_cell_edits,
+    plan_table_cell_edits,
+)
 
 
 _ADDRESS = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
@@ -76,6 +80,9 @@ class PreparedWorkflowTableFill:
     replacements: tuple[tuple[str, str], ...]
     native_protocol: Literal[9, 12]
     command_groups: tuple[tuple[NativeActionCommand, ...], ...] = ()
+    # 표시 형식 재조립이 요청값을 원래 값으로 되돌려 사라진 셀. 비어 있지
+    # 않은데 replacements 가 비면 "이미 같았다"가 아니라 "형식이 되돌렸다"다.
+    format_reverted: tuple[FormatRevertedCell, ...] = ()
 
 
 def _cell_map(table: StructureTable) -> dict[str, StructureCell]:
@@ -258,13 +265,17 @@ def prepare_table_fill(
         if _normalized_cell_text(_owner_cell(cells, address).text)
         != _normalized_cell_text(value)
     )
-    if policy.preserve_style:
-        edits = infer_table_cell_edits(
+    format_reverted: tuple[FormatRevertedCell, ...] = ()
+    if policy.preserve_display_format:
+        plan = plan_table_cell_edits(
             table,
             replacements,
             numeric_value_mode=policy.numeric_value_mode,
             surrounding_texts=surrounding_texts,
+            scale_conflict=policy.scale_conflict,
         )
+        edits = plan.edits
+        format_reverted = plan.format_reverted
         replacements = tuple((edit.address, edit.replacement) for edit in edits)
         command_groups = tuple(
             (
@@ -273,7 +284,7 @@ def prepare_table_fill(
                         edit.address,
                         edit.replacement,
                         expected_text=edit.expected_text,
-                        preserve_style=True,
+                        preserve_style=policy.preserve_character_style,
                     ),
                 )
                 if not edit.expected_text
@@ -286,7 +297,7 @@ def prepare_table_fill(
                         match_case=True,
                         table_instance_id=control_id,
                         cell_address=edit.address,
-                        preserve_format=True,
+                        preserve_format=policy.preserve_character_style,
                     )
                     for patch in edit.patches
                 )
@@ -295,6 +306,23 @@ def prepare_table_fill(
         )
         edit_commands = tuple(command for group in command_groups for command in group)
         native_protocol: Literal[9, 12] = 12
+    elif policy.preserve_character_style:
+        # 표시 문자열은 준 그대로 쓰되 글꼴·크기·색은 살린다. 이 조합이
+        # `EL.+39.3m` 을 `39.3` 으로 바꾸면서 서식을 잃지 않는 경로다.
+        # expected_text 를 실어 STALE_CELL_TEXT 검사도 그대로 남긴다.
+        command_groups = tuple(
+            (
+                SetCellTextCommand(
+                    address,
+                    value,
+                    expected_text=_owner_cell(cells, address).text,
+                    preserve_style=True,
+                ),
+            )
+            for address, value in replacements
+        )
+        edit_commands = tuple(group[0] for group in command_groups)
+        native_protocol = 12
     else:
         command_groups = tuple(
             (SetCellTextCommand(address, value),) for address, value in replacements
@@ -308,8 +336,8 @@ def prepare_table_fill(
     )
     return PreparedWorkflowTableFill(
         request=NativeActionRequest(
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             commands=commands,
         ),
         table_index=table_index,
@@ -317,6 +345,7 @@ def prepare_table_fill(
         replacements=replacements,
         native_protocol=native_protocol,
         command_groups=command_groups,
+        format_reverted=format_reverted,
     )
 
 

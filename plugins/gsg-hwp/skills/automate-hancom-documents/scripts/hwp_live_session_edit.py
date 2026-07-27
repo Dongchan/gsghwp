@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from hwp_errors import HwpLiveError
-from hwp_live_contract import LayoutPlan, LayoutResult, MutationResult, SelectionPosition
+from hwp_live_contract import (
+    LayoutPlan,
+    LayoutResult,
+    MutationResult,
+    SelectionPosition,
+)
+from hwp_live_edit_history_runtime import execute_managed_text_patch
 from hwp_live_layout import prepare_layout_assets
 from hwp_live_native_table_snapshot import retain_table_result_snapshot
 from hwp_live_session_inspection import LiveHwpInspectionSession
 from hwp_live_session_structure import (
     apply_validated_layout,
     insert_validated_table_images,
-    patch_validated_text,
     replace_validated_selection,
     update_validated_table_cells,
 )
@@ -51,9 +56,10 @@ class LiveHwpEditSession(LiveHwpInspectionSession):
         request: TextPatchRequest,
     ) -> TextPatchResult:
         candidate, hwp = self._validate(session_id)
-        return patch_validated_text(
+        return execute_managed_text_patch(
             hwp,
             candidate,
+            self._live_edit_history,
             request,
             self._unsafe_selectors,
             self._guard(candidate, hwp),

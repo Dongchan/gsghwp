@@ -4,16 +4,16 @@
 해시가 일치하면 **내려받은 파일이 게시된 것과 같다**는 뜻입니다. 코드 서명처럼 **누가 만들었는지**를
 증명하지는 못합니다. 그 차이를 알고 쓰시기 바랍니다.
 
-## v1.2.1 바이너리 SHA-256
+## v1.2.2 바이너리 SHA-256
 
 | 파일 | SHA-256 |
 |---|---|
-| `gsg-hwp-plugin-v1.2.1.zip` | `663f51c3f4461a28870028caee036bb709291e83a9369a865289ed61aa7824aa` |
+| `gsg-hwp-plugin-v1.2.2.zip` | `7e4c19e73a0ab5826887e74a40888279af8ae2601a7c5edb82d27d06cf5ef2de` |
 | `addon\HancomMcpLauncher\bin\Release\HancomMcpLauncher.exe` | `69c5109c2e4027c4e2ecb915926a00c64c1ad63e16673267f2232e29cae70fbb` |
 | `addon\HancomEventBridge\bin\Release\HancomEventBridge.exe` | `50611c5e6a5607b830dc5274bbd0f1fb4485bcf66590efaf4f770eb82eeb9f0d` |
 | `addon\HancomLiveBridgeNative\bin\0.5.124\HancomLiveBridge.dll` | `6e1e3f06131c8f636e7b7aa770e3b0a7274ec2c2b8767c902dd98ab23f04e379` |
 
-실행 파일 3개(런처·이벤트 브리지·네이티브 DLL)는 v1.2.0과 동일합니다. v1.2.1은 파이썬
+실행 파일 3개(런처·이벤트 브리지·네이티브 DLL)는 v1.2.0과 동일합니다. v1.2.2는 파이썬
 소스만 바뀌었으므로 세 값이 그대로입니다.
 
 런처와 네이티브 DLL의 값은 배포본 `compatibility-manifest.json`의
@@ -25,7 +25,7 @@
 ### 1. 내려받은 ZIP
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\gsg-hwp-plugin-v1.2.1.zip
+Get-FileHash -Algorithm SHA256 .\gsg-hwp-plugin-v1.2.2.zip
 ```
 
 ### 2. 압축을 푼 뒤 실행 파일 3개
@@ -133,7 +133,7 @@ Windows Defender에서 격리된 항목을 복원합니다.
 | 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.124\HancomLiveBridge.dll` |
 | 파일 경로 보안 DLL | `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll` |
 | 레지스트리 | `HKCU\Software\HNC\HwpUserAction\Modules`, `HKCU\Software\HNC\HwpAutomation\Modules` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.1\.venv` |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.2\.venv` |
 
 `FilePathCheckerModule.dll`은 잠금된 `pyhwpx==1.6.6` 환경에 포함된 것을 쓰며,
 설치기가 SHA-256을 확인한 뒤 복사합니다.

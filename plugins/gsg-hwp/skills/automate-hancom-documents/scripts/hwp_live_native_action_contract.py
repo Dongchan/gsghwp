@@ -3,7 +3,7 @@ from __future__ import annotations
 from base64 import b64decode, b64encode
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import assert_never
+from typing import Final, assert_never
 
 from hwp_errors import HwpLiveError
 from hwp_live_native_action_models import (
@@ -62,6 +62,9 @@ from hwp_live_native_action_models import (
 )
 
 
+NATIVE_ACTION_PAYLOAD_LIMIT: Final = 8_000_000
+
+
 @dataclass(frozen=True, slots=True)
 class NativeActionFailureEvidence:
     code: str
@@ -97,9 +100,7 @@ class NativeActionFailure(HwpLiveError):
         self.structure_digest_before = evidence.structure_digest_before
         self.structure_digest_after = evidence.structure_digest_after
         suffix = f" {evidence.location}" if evidence.location else ""
-        super().__init__(
-            f"네이티브 액션 {evidence.code}{suffix}: {evidence.message}"
-        )
+        super().__init__(f"네이티브 액션 {evidence.code}{suffix}: {evidence.message}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +127,9 @@ def _decode(value: str) -> str:
     try:
         return b64decode(value, validate=True).decode("utf-8")
     except (UnicodeDecodeError, ValueError) as error:
-        raise HwpLiveError("네이티브 실시간 응답 문자열을 해석하지 못했습니다") from error
+        raise HwpLiveError(
+            "네이티브 실시간 응답 문자열을 해석하지 못했습니다"
+        ) from error
 
 
 def _plain(value: str, label: str) -> str:
@@ -143,7 +146,9 @@ def _integer(value: str, label: str) -> int:
     try:
         return int(value)
     except ValueError as error:
-        raise HwpLiveError(f"네이티브 실시간 {label} 숫자가 올바르지 않습니다") from error
+        raise HwpLiveError(
+            f"네이티브 실시간 {label} 숫자가 올바르지 않습니다"
+        ) from error
 
 
 def _boolean(value: str, label: str) -> bool:
@@ -197,7 +202,9 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                 or item.index >= array_counts[item.name]
                 for item in array_values
             ):
-                raise HwpLiveError("네이티브 파라미터 배열 인덱스는 0부터 배열 크기 미만입니다")
+                raise HwpLiveError(
+                    "네이티브 파라미터 배열 인덱스는 0부터 배열 크기 미만입니다"
+                )
             lines = [
                 f"ACTION\t{_plain(action, '액션 이름')}\t"
                 + _plain(parameter_set, "파라미터셋 이름")
@@ -256,7 +263,9 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
             expected_page_count=expected_page_count,
         ):
             if expected_page_count < 1:
-                raise HwpLiveError("네이티브 복원 문서의 예상 쪽 수는 1 이상이어야 합니다")
+                raise HwpLiveError(
+                    "네이티브 복원 문서의 예상 쪽 수는 1 이상이어야 합니다"
+                )
             return (
                 "RESTORE_DOCUMENT_FILE\t"
                 + f"{_encode(_absolute_path(path))}\t{expected_page_count}",
@@ -281,9 +290,7 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
         case InsertTextCommand(text=text):
             return (f"INSERT_TEXT\t{_encode(text)}",)
         case ReplaceSelectionCommand(expected_text=expected, replacement=replacement):
-            return (
-                f"REPLACE_SELECTION\t{_encode(expected)}\t{_encode(replacement)}",
-            )
+            return (f"REPLACE_SELECTION\t{_encode(expected)}\t{_encode(replacement)}",)
         case TextPatchCommand(
             target=target,
             expected_text=expected,
@@ -307,7 +314,9 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                         cell_address,
                     )
                 ):
-                    raise HwpLiveError("현재 위치 text.patch 대상에 범위·검색·셀 입력을 함께 쓸 수 없습니다")
+                    raise HwpLiveError(
+                        "현재 위치 text.patch 대상에 범위·검색·셀 입력을 함께 쓸 수 없습니다"
+                    )
                 return (
                     "\t".join(
                         (
@@ -321,7 +330,9 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                     ),
                 )
             if expected is None:
-                raise HwpLiveError("범위·검색·표 셀 text.patch에는 확인할 기존 텍스트가 필요합니다")
+                raise HwpLiveError(
+                    "범위·검색·표 셀 text.patch에는 확인할 기존 텍스트가 필요합니다"
+                )
             if target == "range":
                 if (
                     start is None
@@ -353,13 +364,30 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
             if occurrence_value < 0:
                 raise HwpLiveError("text.patch 검색 순번은 1 이상이어야 합니다")
             if target == "find":
-                if (
-                    start is not None
-                    or end is not None
-                    or table_instance_id is not None
-                    or cell_address is not None
-                ):
-                    raise HwpLiveError("문서 검색 text.patch 대상에 범위·셀 입력을 함께 쓸 수 없습니다")
+                if start is not None or end is not None:
+                    raise HwpLiveError(
+                        "검색 text.patch 대상에 범위 입력을 함께 쓸 수 없습니다"
+                    )
+                if (table_instance_id is None) != (cell_address is None):
+                    raise HwpLiveError(
+                        "표 범위 검색에는 표 ID와 셀 주소가 함께 필요합니다"
+                    )
+                if table_instance_id is not None and cell_address is not None:
+                    return (
+                        "\t".join(
+                            (
+                                "PATCH_TEXT",
+                                "FIND",
+                                _encode(table_instance_id),
+                                _plain(cell_address, "셀 주소").upper(),
+                                str(occurrence_value),
+                                "1" if match_case else "0",
+                                _encode(expected),
+                                _encode(replacement),
+                            )
+                            + (("1",) if preserve_format else ())
+                        ),
+                    )
                 return (
                     "\t".join(
                         (
@@ -380,7 +408,9 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                     or not table_instance_id
                     or not cell_address
                 ):
-                    raise HwpLiveError("표 셀 text.patch에는 표 ID와 셀 주소가 필요합니다")
+                    raise HwpLiveError(
+                        "표 셀 text.patch에는 표 ID와 셀 주소가 필요합니다"
+                    )
                 return (
                     "\t".join(
                         (
@@ -399,7 +429,9 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
             raise HwpLiveError("지원하지 않는 text.patch 대상입니다")
         case InsertPictureCommand(path=path, width_mm=width, height_mm=height):
             if (width is None) != (height is None):
-                raise HwpLiveError("네이티브 그림 배치 영역의 가로와 세로가 함께 필요합니다")
+                raise HwpLiveError(
+                    "네이티브 그림 배치 영역의 가로와 세로가 함께 필요합니다"
+                )
             if width is None or height is None:
                 return (f"INSERT_PICTURE\t{_encode(_absolute_path(path))}",)
             if width <= 0 or height <= 0:
@@ -421,7 +453,9 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                     f"SET_CELL_TEXT\t{_plain(address, '셀 주소').upper()}\t{_encode(text)}",
                 )
             if expected is None:
-                raise HwpLiveError("서식 보존 셀 교체에는 확인할 기존 텍스트가 필요합니다")
+                raise HwpLiveError(
+                    "서식 보존 셀 교체에는 확인할 기존 텍스트가 필요합니다"
+                )
             return (
                 "\t".join(
                     (
@@ -496,9 +530,7 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
     assert_never(command)
 
 
-def encode_action_request(request: NativeActionRequest) -> str:
-    if request.document_id < 0 or not request.commands:
-        raise HwpLiveError("네이티브 실시간 문서 식별값 또는 명령이 올바르지 않습니다")
+def _request_prefix_lines(request: NativeActionRequest) -> list[str]:
     lines = ["HCA1", f"DOC\t{request.document_id}\t{_encode(request.full_name)}"]
     if request.atomic:
         lines.append("POLICY\tATOMIC\t1")
@@ -523,11 +555,32 @@ def encode_action_request(request: NativeActionRequest) -> str:
                 )
             )
         )
+    return lines
+
+
+def action_command_payload_characters(command: NativeActionCommand) -> int:
+    return sum(len(line) + 1 for line in _command_lines(command))
+
+
+def action_request_payload_overhead(request: NativeActionRequest) -> int:
+    return len("\n".join((*_request_prefix_lines(request), "END")))
+
+
+def action_request_payload_length(request: NativeActionRequest) -> int:
+    return action_request_payload_overhead(request) + sum(
+        action_command_payload_characters(command) for command in request.commands
+    )
+
+
+def encode_action_request(request: NativeActionRequest) -> str:
+    if request.document_id < 0 or not request.commands:
+        raise HwpLiveError("네이티브 실시간 문서 식별값 또는 명령이 올바르지 않습니다")
+    lines = _request_prefix_lines(request)
     for command in request.commands:
         lines.extend(_command_lines(command))
     lines.append("END")
     payload = "\n".join(lines)
-    if len(payload) > 8_000_000:
+    if len(payload) > NATIVE_ACTION_PAYLOAD_LIMIT:
         raise HwpLiveError("네이티브 실시간 요청이 8MB 제한을 초과했습니다")
     return payload
 
@@ -536,15 +589,15 @@ def _native_error(fields: list[str]) -> None:
     if len(fields) == 5 and fields[:2] == ["HCA1", "ERROR"]:
         location = _decode(fields[3])
         suffix = f" {location}" if location else ""
-        raise HwpLiveError(
-            f"네이티브 액션 {fields[2]}{suffix}: {_decode(fields[4])}"
-        )
+        raise HwpLiveError(f"네이티브 액션 {fields[2]}{suffix}: {_decode(fields[4])}")
     if len(fields) == 11 and fields[:2] == ["HCA2", "ERROR"]:
         commands_completed = _integer(fields[5], "완료 명령 건수")
         partial_mutation = _boolean(fields[7], "부분 변경")
         retry_safe = _boolean(fields[8], "재시도 안전성")
         if commands_completed < 0 or (partial_mutation and retry_safe):
-            raise HwpLiveError("네이티브 액션 실패 응답의 재시도 증거가 올바르지 않습니다")
+            raise HwpLiveError(
+                "네이티브 액션 실패 응답의 재시도 증거가 올바르지 않습니다"
+            )
         raise NativeActionFailure(
             NativeActionFailureEvidence(
                 code=_plain(fields[2], "실패 코드"),
@@ -575,9 +628,13 @@ def _decode_call_results(payload: str) -> tuple[NativeCallResult, ...]:
         if kind == "V" and len(fields) == 2:
             results.append(NativeVoidCallResult(method))
         elif kind == "B" and len(fields) == 3:
-            results.append(NativeBooleanCallResult(method, _boolean(fields[2], "CALL 반환")))
+            results.append(
+                NativeBooleanCallResult(method, _boolean(fields[2], "CALL 반환"))
+            )
         elif kind == "I" and len(fields) == 3:
-            results.append(NativeIntegerCallResult(method, _integer(fields[2], "CALL 반환")))
+            results.append(
+                NativeIntegerCallResult(method, _integer(fields[2], "CALL 반환"))
+            )
         elif kind == "S" and len(fields) == 3:
             results.append(NativeTextCallResult(method, _decode(fields[2])))
         else:
@@ -604,14 +661,18 @@ def decode_action_result(payload: str) -> NativeActionResult:
         raise HwpLiveError("네이티브 액션 성공 응답에 음수가 있습니다")
     ids = _decode(fields[7])
     call_results = _decode_call_results(_decode(fields[8])) if current or timed else ()
-    image_timings = tuple(
-        _integer(value, label)
-        for value, label in zip(
-            fields[9:12],
-            ("그림 타이밍 건수", "그림 최대 시간", "그림 총 시간"),
-            strict=True,
+    image_timings = (
+        tuple(
+            _integer(value, label)
+            for value, label in zip(
+                fields[9:12],
+                ("그림 타이밍 건수", "그림 최대 시간", "그림 총 시간"),
+                strict=True,
+            )
         )
-    ) if timed else (0, 0, 0)
+        if timed
+        else (0, 0, 0)
+    )
     if timed and (
         min(image_timings) < 0
         or image_timings[0] != counts[3]
@@ -702,18 +763,12 @@ def decode_snapshot(payload: str) -> NativeSnapshot:
     selected_end = NativePosition(
         *(
             _integer(value, "선택 끝")
-            for value in selection[
-                selection_position + 3 : selection_position + 6
-            ]
+            for value in selection[selection_position + 3 : selection_position + 6]
         )
     )
-    selected_mode = (
-        0 if legacy_selection else _integer(selection[2], "선택 모드")
-    )
+    selected_mode = 0 if legacy_selection else _integer(selection[2], "선택 모드")
     selected_error = (
-        _decode(selection[10])
-        if diagnostic_selection or logical_selection
-        else ""
+        _decode(selection[10]) if diagnostic_selection or logical_selection else ""
     )
     if logical_selection:
         selected = _DecodedNativeSelection(
@@ -813,7 +868,9 @@ def decode_page_inspection(payload: str) -> NativePageInspection:
         if len(fields) == 10 and fields[0] == "CTRL_FORMAT":
             instance_id = _decode(fields[1])
             if not instance_id or instance_id in control_formats:
-                raise HwpLiveError("네이티브 쪽 개체 앵커 형식 레코드가 중복되거나 비어 있습니다")
+                raise HwpLiveError(
+                    "네이티브 쪽 개체 앵커 형식 레코드가 중복되거나 비어 있습니다"
+                )
             control_formats[instance_id] = (
                 _integer(fields[2], "개체 앵커 스타일"),
                 NativeParagraphFormat(
@@ -899,7 +956,9 @@ def decode_page_inspection_batch(payload: str) -> tuple[NativePageInspection, ..
             or page.full_name != pages[0].full_name
             or page.page_count != pages[0].page_count
         ):
-            raise HwpLiveError("네이티브 다중 쪽 구조 응답의 문서 정보가 일치하지 않습니다")
+            raise HwpLiveError(
+                "네이티브 다중 쪽 구조 응답의 문서 정보가 일치하지 않습니다"
+            )
         seen.add(page.page)
         pages.append(page)
     if not pages:
@@ -937,7 +996,9 @@ def decode_detailed_inspection(payload: str) -> NativeDetailedInspection:
             page_start = _integer(fields[7], "개체 시작 쪽")
             page_end = _integer(fields[8], "개체 끝 쪽")
             if page_start < 1 or page_end < page_start:
-                raise HwpLiveError("네이티브 상세 구조 개체 쪽 범위가 올바르지 않습니다")
+                raise HwpLiveError(
+                    "네이티브 상세 구조 개체 쪽 범위가 올바르지 않습니다"
+                )
             controls.append(
                 NativeDetailedControl(
                     control_type=_decode(fields[1]),
@@ -992,7 +1053,9 @@ def decode_detailed_inspection(payload: str) -> NativeDetailedInspection:
             page_start = _integer(fields[6], "캡션 시작 쪽")
             page_end = _integer(fields[7], "캡션 끝 쪽")
             if page_start < 1 or page_end < page_start:
-                raise HwpLiveError("네이티브 상세 구조 캡션 쪽 범위가 올바르지 않습니다")
+                raise HwpLiveError(
+                    "네이티브 상세 구조 캡션 쪽 범위가 올바르지 않습니다"
+                )
             captions.append(
                 NativeDetailedCaption(
                     table_instance_id=_decode(fields[1]),

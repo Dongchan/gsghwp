@@ -40,7 +40,7 @@ from hwp_operation_contract import (
     OperationResult,
     WorkflowResolution,
 )
-from hwp_table_format_inference import TableFormatAmbiguity
+from hwp_table_format_inference import FORMAT_ESCAPE_HINT, TableFormatAmbiguity
 
 
 _PRE_MUTATION_MARKER: Final = "; mutation_started=false"
@@ -615,6 +615,31 @@ def operate_table_fill(
         chunks = table_fill_chunks(prepared, resolved_table.table)
     except HwpLiveError as error:
         raise _pre_mutation_error(error) from error
+    if not prepared.replacements and prepared.format_reverted:
+        # 편집이 0건인데 요청값과 셀 값은 달랐다. 표시 형식 재조립이 요청을
+        # 원래 값으로 되돌렸다는 뜻이다. 이것을 executed 로 보고하면 모델은
+        # 성공했다고 믿고 넘어가고 사용자는 나중에 안 바뀐 것을 발견한다.
+        table_candidate = workflow_table_candidate(
+            resolved_table.table,
+            resolved_table.table_index,
+            before.page,
+        )
+        reverted = ", ".join(
+            f"{cell.address}: 요청 {cell.requested!r} → 표시 형식 적용 후 "
+            + f"{cell.rebuilt!r} (기존 값과 같음)"
+            for cell in prepared.format_reverted[:8]
+        )
+        return (
+            workflow_result(
+                resolution,
+                "needs_input",
+                "기존 셀의 표시 형식(접두어·부호·단위·괄호·자릿수)이 요청값에 다시 "
+                + f"붙어 결과가 원래 값과 같아졌습니다. 편집하지 않았습니다 — {reverted}. "
+                + FORMAT_ESCAPE_HINT,
+                required_inputs=("inputs.policy.preserve_display_format",),
+            ).model_copy(update={"target_candidates": (table_candidate,)}),
+            before,
+        )
     if not prepared.replacements:
         _verify_table_fill_readback(
             before,
@@ -759,11 +784,24 @@ def operate_table_fill(
             ),
             after,
         )
+    # 일부만 되돌려진 경우다. 실행 자체는 했으니 executed 가 맞지만, 어떤 셀이
+    # 빠졌는지 말하지 않으면 그 셀은 조용한 무편집으로 남는다.
+    reverted_note = (
+        ""
+        if not prepared.format_reverted
+        else (
+            " 다만 "
+            + ", ".join(cell.address for cell in prepared.format_reverted[:8])
+            + " 셀은 표시 형식이 요청값을 원래 값으로 되돌려 편집하지 않았습니다. "
+            + FORMAT_ESCAPE_HINT
+        )
+    )
     result = workflow_result(
         resolution,
         "executed",
         f"기존 표를 찾아 프로토콜 {prepared.native_protocol} C++/ATL "
-        + f"네이티브 호출 {len(chunks)}회로 채우고 구조를 검증했습니다",
+        + f"네이티브 호출 {len(chunks)}회로 채우고 구조를 검증했습니다"
+        + reverted_note,
     ).model_copy(
         update={
             "changed": bool(prepared.replacements),

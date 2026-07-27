@@ -39,6 +39,8 @@ from hwp_live_table_contract import (  # noqa: E402
 @dataclass(frozen=True, slots=True)
 class _WindowCandidate:
     window_handle: int
+
+
 from hwp_mcp_registry import search_tool_specs, tool_names  # noqa: E402
 from hwp_operation_contract import HwpOperateInputs  # noqa: E402
 
@@ -103,7 +105,9 @@ def test_production_mcp_exposes_live_delete_and_history_tools() -> None:
     assert HwpOperateInputs(operation="control.delete").operation == "control.delete"
 
 
-def test_tool_search_routes_page_control_rollback_and_redo_without_catalog_detour() -> None:
+def test_tool_search_routes_page_control_rollback_and_redo_without_catalog_detour() -> (
+    None
+):
     cases = (
         ("54쪽 빈 페이지 삭제", "hwp_delete_page"),
         ("잘못 만든 독립 표 개체 삭제", "hwp_delete_control"),
@@ -137,16 +141,10 @@ def test_live_edit_command_plans_use_bounded_official_native_actions() -> None:
     }
 
     assert build_native_history_payload("undo") == (
-        "HCV1\n"
-        "AUTOMATION\tIXHwpDocument\tUndo\tmethod\n"
-        "ARG\tI4\t1\n"
-        "END"
+        "HCV1\nAUTOMATION\tIXHwpDocument\tUndo\tmethod\nARG\tI4\t1\nEND"
     )
     assert build_native_history_payload("redo") == (
-        "HCV1\n"
-        "AUTOMATION\tIXHwpDocument\tRedo\tmethod\n"
-        "ARG\tI4\t1\n"
-        "END"
+        "HCV1\nAUTOMATION\tIXHwpDocument\tRedo\tmethod\nARG\tI4\t1\nEND"
     )
     table = NativePageControl("tbl", "table-1", NativePosition(0, 4, 2), 2, 2)
     picture = NativePageControl("gso", "picture-2", NativePosition(3, 1, 0), None, None)
@@ -241,13 +239,17 @@ def test_grouped_native_history_stops_at_verified_operation_boundary(
     matches = iter((False, False, True))
     calls: list[str] = []
 
-    def fake_history(_window_handle: int, direction: str, steps: int) -> SimpleNamespace:
+    def fake_history(
+        _window_handle: int, direction: str, steps: int
+    ) -> SimpleNamespace:
         calls.append(direction)
         assert steps == 1
-        return SimpleNamespace(elapsed_microseconds=7)
+        return SimpleNamespace(elapsed_microseconds=7, applied=1)
 
     monkeypatch.setattr(runtime, "execute_native_history", fake_history)
-    monkeypatch.setattr(runtime, "_matches_expected_state", lambda *args, **kwargs: next(matches))
+    monkeypatch.setattr(
+        runtime, "_matches_expected_state", lambda *args, **kwargs: next(matches)
+    )
 
     executed, elapsed = runtime._execute_native_history_until_state(
         _WindowCandidate(window_handle=17),
@@ -271,3 +273,60 @@ def test_document_history_capture_uses_disk_checkpoint_command(
     assert build_capture_document_commands(checkpoint_path) == (
         SaveDocumentFileCommand(checkpoint_path),
     )
+
+
+def test_text_patch_is_recorded_as_document_checkpoint_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hwp_live_edit_history_runtime as runtime  # noqa: PLC0415
+    from hwp_live_edit_history import (  # noqa: PLC0415
+        DocumentCheckpoint,
+        LiveEditHistoryStore,
+    )
+
+    candidate = SimpleNamespace(
+        window_handle=17,
+        document_id=41,
+        full_name=str(tmp_path / "sample.hwp"),
+    )
+    snapshot = SimpleNamespace(page_count=3, current_page=2)
+    expected_result = object()
+    patch_calls: list[object] = []
+
+    def fake_capture(
+        _candidate: object,
+        _document_id: int,
+        _full_name: str,
+        path: Path,
+        page_count: int,
+    ) -> tuple[DocumentCheckpoint, int]:
+        path.write_bytes(b"checkpoint")
+        return DocumentCheckpoint(path, 10, page_count), 5
+
+    def fake_patch(*args: object) -> object:
+        patch_calls.append(args)
+        return expected_result
+
+    monkeypatch.setattr(runtime, "read_native_snapshot", lambda _handle: snapshot)
+    monkeypatch.setattr(runtime, "_capture_checkpoint", fake_capture)
+    monkeypatch.setattr(runtime, "patch_validated_text", fake_patch)
+
+    store = LiveEditHistoryStore(temp_parent=tmp_path)
+    result = runtime.execute_managed_text_patch(
+        object(),
+        candidate,
+        store,
+        SimpleNamespace(),
+        set(),
+        lambda: None,
+    )
+
+    assert result is expected_result
+    assert len(patch_calls) == 1
+    entry = store.peek("undo", 41, candidate.full_name)
+    assert entry is not None
+    assert entry.operation == "text.patch"
+    assert entry.page == 2
+    assert store.available("undo", 41, candidate.full_name) == 1
+    store.cleanup()

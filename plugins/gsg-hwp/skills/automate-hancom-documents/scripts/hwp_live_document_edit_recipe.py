@@ -49,6 +49,15 @@ from hwp_operation_registry import operation_registry
 _WORKFLOWS = frozenset[HwpWorkflowId](
     ("document.delete_page", "document.undo", "document.redo", "control.delete")
 )
+_EXHAUSTED_MESSAGES: dict[HwpWorkflowId, str] = {
+    "document.undo": (
+        "되돌릴 한컴 실행 이력이 없습니다. 이력 끝이므로 문서를 변경하지 않았습니다"
+    ),
+    "document.redo": (
+        "다시 실행할 한컴 실행 이력이 없습니다. 이력 끝이므로 문서를 변경하지 "
+        "않았습니다"
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +106,9 @@ def _page_commands(
             required_inputs=("inputs.target.page_hint",),
         )
     if target.page_hint > request.routing_page.page_count:
-        return _result(request, "not_found", "삭제할 쪽이 현재 문서 범위를 벗어났습니다")
+        return _result(
+            request, "not_found", "삭제할 쪽이 현재 문서 범위를 벗어났습니다"
+        )
     if request.routing_page.page_count == 1:
         return _result(
             request,
@@ -116,7 +127,10 @@ def _control_commands(
             request,
             "needs_input",
             "개체가 있는 쪽과 빠른 구조 조회에서 얻은 개체 ID를 전달하세요",
-            required_inputs=("inputs.target.page_hint", "inputs.target.control_instance_ids"),
+            required_inputs=(
+                "inputs.target.page_hint",
+                "inputs.target.control_instance_ids",
+            ),
         )
     if target.control_instance_id is not None and target.control_instance_ids:
         return _result(
@@ -134,13 +148,16 @@ def _control_commands(
             "빠른 구조 조회에서 얻은 개체 ID를 하나 이상 전달하세요",
             required_inputs=("inputs.target.control_instance_ids",),
         )
-    visible = {control.instance_id: control for control in request.routing_page.controls}
+    visible = {
+        control.instance_id: control for control in request.routing_page.controls
+    }
     missing = tuple(value for value in instance_ids if value not in visible)
     if missing:
         return _result(
             request,
             "not_found",
-            "현재 쪽 구조에서 삭제 대상 개체 ID를 찾지 못했습니다: " + ", ".join(missing),
+            "현재 쪽 구조에서 삭제 대상 개체 ID를 찾지 못했습니다: "
+            + ", ".join(missing),
         )
     controls = tuple(visible[value] for value in instance_ids)
     return controls, instance_ids, target.page_hint
@@ -168,15 +185,22 @@ def operate_native_document_edit(
     if workflow not in _WORKFLOWS:
         return None
     if request.resolve_only:
-        return _result(request, "resolved", "인증된 실시간 문서 편집 recipe를 확정했습니다")
+        return _result(
+            request, "resolved", "인증된 실시간 문서 편집 recipe를 확정했습니다"
+        )
     if not request.allow_document_change:
-        return _result(request, "confirmation_required", "문서 내용을 변경하는 작업입니다")
+        return _result(
+            request, "confirmation_required", "문서 내용을 변경하는 작업입니다"
+        )
 
     page_target: int | None = None
     control_ids: tuple[str, ...] = ()
     control_targets: tuple[NativePageControl, ...] = ()
     commands: tuple[NativeActionCommand, ...] = ()
     history: tuple[HistoryDirection, int] | None = None
+    native_applied_steps: int | None = None
+    native_requested_steps: int | None = None
+    native_content_changed = False
     if workflow == "document.delete_page":
         prepared = _page_commands(request)
         if isinstance(prepared, OperationResult):
@@ -296,7 +320,21 @@ def operate_native_document_edit(
                 direction,
                 steps,
             )
-            commands_executed = steps
+            if history_result.applied == 0:
+                # The engine reports an empty history stack. Nothing was
+                # executed and nothing changed, so this is neither a success
+                # nor a failure — report the fact and stop before the
+                # before/after comparison, which would find no change and
+                # raise as if something had gone wrong.
+                return _result(
+                    request,
+                    "unsupported",
+                    _EXHAUSTED_MESSAGES[workflow],
+                )
+            native_applied_steps = history_result.applied
+            native_requested_steps = history_result.steps
+            native_content_changed = history_result.content_changed
+            commands_executed = history_result.applied
             elapsed_microseconds = history_result.elapsed_microseconds
         else:
             commands_executed = custom_result.commands_executed
@@ -314,10 +352,20 @@ def operate_native_document_edit(
             request.routing_page.page,
             after.page_count,
         )
-        verify_history_structure_change(
-            history_structure_before,
-            history_structure_after,
-        )
+        if not native_content_changed:
+            # The routing page state token covers that page's body text,
+            # paragraphs, controls and table cell text, and it is taken from an
+            # inspection that restores the caret and selection, so a selection
+            # that merely got dropped cannot move it. An unchanged token with no
+            # native content evidence therefore means no restored edit was
+            # observed anywhere we can see, and claiming success is not allowed.
+            verify_history_structure_change(
+                history_structure_before,
+                history_structure_after,
+            )
+        # Otherwise the native before/after state already proved that page,
+        # control count or control hash changed. The edit was restored outside
+        # the inspected page, so an unchanged token here is not a failure.
     if managed_history and workflow == "document.undo":
         restored_entry = request.history.peek(
             "redo",
@@ -337,13 +385,37 @@ def operate_native_document_edit(
             after.page_count,
         )
 
+    applied = (
+        commands_executed if native_applied_steps is None else native_applied_steps
+    )
     messages = {
         "document.delete_page": "지정한 쪽을 삭제하고 페이지 수 감소를 확인했습니다",
-        "document.undo": "한컴 실행 이력을 지정한 단계만큼 되돌렸습니다",
-        "document.redo": "취소한 한컴 실행 이력을 지정한 단계만큼 다시 실행했습니다",
+        "document.undo": f"한컴 실행 이력을 {applied}단계 되돌렸습니다",
+        "document.redo": f"취소한 한컴 실행 이력을 {applied}단계 다시 실행했습니다",
         "control.delete": "지정한 기존 개체를 삭제하고 빠른 구조에서 제거를 확인했습니다",
     }
-    if managed_history and workflow == "document.undo":
+    if (
+        native_applied_steps is not None
+        and native_requested_steps is not None
+        and native_applied_steps < native_requested_steps
+    ):
+        # Report the number that actually applied, not the number requested.
+        messages[workflow] = (
+            f"{messages[workflow]}. 요청한 {native_requested_steps}단계 중 "
+            f"{native_applied_steps}단계에서 한컴 실행 이력이 끝나 "
+            "나머지는 실행하지 않았습니다"
+        )
+    if managed_history and not custom_history and commands_executed == 0:
+        # The grouped native path found the document already at the recorded
+        # operation boundary and ran no Undo/Redo at all. The bookkeeping entry
+        # moved, but saying "되돌렸습니다" here would be the same lie as
+        # reporting a step count that never ran.
+        messages[workflow] = (
+            "문서가 이미 이 MCP 작업 단위의 경계 상태여서 한컴 실행 이력을 "
+            "추가로 실행하지 않았습니다. 문서 내용은 이 호출로 바뀌지 "
+            "않았습니다"
+        )
+    elif managed_history and workflow == "document.undo":
         messages[workflow] = (
             "MCP 문서 체크포인트를 같은 탭에 복구하고 빠른 구조로 확인했습니다"
             if custom_history
@@ -355,9 +427,10 @@ def operate_native_document_edit(
             if custom_history
             else "취소한 MCP 작업 단위를 한컴 이력으로 다시 실행하고 빠른 구조로 확인했습니다"
         )
+    changed = not (managed_history and not custom_history and commands_executed == 0)
     return _result(request, "executed", messages[workflow]).model_copy(
         update={
-            "changed": True,
+            "changed": changed,
             "execution_mode": "native_in_process",
             "native_protocol": 9,
             "verification": "native_snapshot_before_after",

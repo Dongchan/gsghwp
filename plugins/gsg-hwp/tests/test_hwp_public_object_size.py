@@ -50,6 +50,7 @@ from hwp_operation_contract import (  # noqa: E402
     WorkflowResolution,
 )
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs  # noqa: E402
+from hwp_public_action_contract import PublicImageSize  # noqa: E402
 from hwp_public_object_tools import HwpPublicObjectTools  # noqa: E402
 
 
@@ -142,6 +143,22 @@ def test_replace_image_rejects_one_sided_fit_box() -> None:
                 target_id="native-picture-7",
                 width_mm=40.0,
             )
+        )
+
+
+def test_public_and_recipe_picture_boxes_match_native_1000mm_limit() -> None:
+    assert PublicImageSize(width_mm=1_000, height_mm=1_000).width_mm == 1_000
+    recipe = HwpPriorityRecipeInputs(
+        picture_width_mm=1_000,
+        picture_height_mm=1_000,
+    )
+    assert recipe.picture_height_mm == 1_000
+    with pytest.raises(ValidationError):
+        _ = PublicImageSize(width_mm=1_000.1, height_mm=1_000)
+    with pytest.raises(ValidationError):
+        _ = HwpPriorityRecipeInputs(
+            picture_width_mm=1_000,
+            picture_height_mm=1_000.1,
         )
 
 

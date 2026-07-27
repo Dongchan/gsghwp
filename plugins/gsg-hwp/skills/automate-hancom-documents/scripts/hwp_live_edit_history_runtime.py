@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 import os
 from pathlib import Path
 from typing import Protocol
 
 from hwp_errors import HwpLiveError
+from hwp_live_api import LiveHwpApplication
 from hwp_live_document_edit_commands import build_delete_control_commands
 from hwp_live_edit_history import (
     DocumentCheckpoint,
@@ -33,6 +35,8 @@ from hwp_live_native_batch import (
 )
 from hwp_live_native_history import execute_native_history
 from hwp_live_rot import HwpDocumentCandidate
+from hwp_live_session_structure_mutation import patch_validated_text
+from hwp_live_text_patch_contract import TextPatchRequest, TextPatchResult
 
 
 _MAX_CHECKPOINT_SOURCE_FILE_BYTES = 192 * 1024 * 1024
@@ -108,7 +112,9 @@ def _capture_checkpoint(
         minimum_version=9,
     )
     if native is None:
-        raise HwpLiveError("한컴 프로토콜 9 문서 체크포인트 저장기를 사용할 수 없습니다")
+        raise HwpLiveError(
+            "한컴 프로토콜 9 문서 체크포인트 저장기를 사용할 수 없습니다"
+        )
     try:
         size = path.stat().st_size
     except OSError as error:
@@ -127,7 +133,9 @@ def _restore_checkpoint(
     try:
         actual_size = checkpoint.path.stat().st_size
     except OSError as error:
-        raise HwpLiveError("복구할 문서 체크포인트 파일을 확인하지 못했습니다") from error
+        raise HwpLiveError(
+            "복구할 문서 체크포인트 파일을 확인하지 못했습니다"
+        ) from error
     if actual_size != checkpoint.bytes:
         raise HwpLiveError("복구할 문서 체크포인트 파일 크기가 변경되었습니다")
     native = execute_native_actions(
@@ -155,7 +163,9 @@ def _restore_checkpoint(
         os.path.normcase(os.path.abspath(snapshot.full_name)),
     )
     if actual_key != expected_key or snapshot.page_count != checkpoint.page_count:
-        raise HwpLiveError("체크포인트 적용 후 문서 식별값 또는 페이지 수가 바뀌었습니다")
+        raise HwpLiveError(
+            "체크포인트 적용 후 문서 식별값 또는 페이지 수가 바뀌었습니다"
+        )
     return native.commands_executed, native.elapsed_microseconds
 
 
@@ -296,8 +306,7 @@ def execute_prepared_control_deletion(
     prepared: PreparedDocumentEdit,
 ) -> LiveEditHistoryExecution:
     commands = tuple(
-        DeleteControlCommand(instance_id)
-        for instance_id in prepared.target_control_ids
+        DeleteControlCommand(instance_id) for instance_id in prepared.target_control_ids
     )
     try:
         native = execute_native_actions(
@@ -359,6 +368,57 @@ def execute_prepared_page_deletion(
     )
 
 
+def execute_managed_text_patch(
+    hwp: LiveHwpApplication,
+    candidate: HwpDocumentCandidate,
+    history: LiveEditHistoryStore,
+    request: TextPatchRequest,
+    unsafe_selectors: set[str],
+    guard: Callable[[], None],
+) -> TextPatchResult:
+    snapshot = read_native_snapshot(candidate.window_handle)
+    if snapshot is None:
+        raise HwpLiveError("text.patch 이력 저장 전 문서 상태를 읽지 못했습니다")
+    before_path = history.new_checkpoint_path()
+    after_path = history.new_checkpoint_path()
+    try:
+        before, elapsed = _capture_checkpoint(
+            candidate,
+            candidate.document_id,
+            candidate.full_name,
+            before_path,
+            snapshot.page_count,
+        )
+    except (HwpLiveError, OSError, ValueError):
+        _remove_path(before_path)
+        _remove_path(after_path)
+        raise
+    prepared = PreparedDocumentEdit(
+        document_id=candidate.document_id,
+        full_name=candidate.full_name,
+        operation="text.patch",
+        before=before,
+        after_path=after_path,
+        page=snapshot.current_page,
+        before_controls=(),
+        target_control_ids=(),
+        capture_elapsed_microseconds=elapsed,
+    )
+    try:
+        result = patch_validated_text(
+            hwp,
+            candidate,
+            request,
+            unsafe_selectors,
+            guard,
+        )
+        _ = _record_completed_edit(candidate, history, prepared)
+    except (HwpLiveError, OSError, ValueError):
+        _restore_prepared_before_failure(candidate, prepared)
+        raise
+    return result
+
+
 def _matches_expected_state(
     candidate: WindowHandleCandidate,
     *,
@@ -400,6 +460,15 @@ def _execute_native_history_until_state(
     for step in range(1, maximum_steps + 1):
         result = execute_native_history(candidate.window_handle, direction, 1)
         elapsed += result.elapsed_microseconds
+        if result.applied == 0:
+            # The history stack ran out before the MCP operation boundary was
+            # reached. The document is left partway, so this stays an error —
+            # but it now says how far it actually got instead of blaming the
+            # requested step count.
+            raise HwpLiveError(
+                f"한컴 {direction} 이력이 {step - 1}단계에서 끝나 "
+                + "MCP 작업 경계 상태를 복구하지 못했습니다"
+            )
         if _matches_expected_state(
             candidate,
             page_count=page_count,
@@ -421,7 +490,9 @@ def execute_grouped_native_control_deletion(
     page_count: int,
     target_controls: tuple[NativePageControl, ...],
 ) -> LiveEditHistoryExecution:
-    inspected_before = inspect_native_page(candidate.window_handle, page, include_cells=True)
+    inspected_before = inspect_native_page(
+        candidate.window_handle, page, include_cells=True
+    )
     if inspected_before is None:
         raise HwpLiveError("개체 삭제 전 대상 쪽의 상세 구조를 읽지 못했습니다")
     before_controls = _control_state(inspected_before.controls)
@@ -439,7 +510,9 @@ def execute_grouped_native_control_deletion(
         commands_executed = native.commands_executed
         native_elapsed = native.elapsed_microseconds
         snapshot_after = read_native_snapshot(candidate.window_handle)
-        inspected_after = inspect_native_page(candidate.window_handle, page, include_cells=True)
+        inspected_after = inspect_native_page(
+            candidate.window_handle, page, include_cells=True
+        )
         if snapshot_after is None or inspected_after is None:
             raise HwpLiveError("개체 삭제 후 문서 구조를 읽지 못했습니다")
         entry = NativeDocumentEditHistoryEntry(
@@ -539,14 +612,18 @@ def verify_history_entry_state(
         page_count = checkpoint.page_count
     controls = None
     if entry.operation == "control.delete":
-        controls = entry.before_controls if direction == "undo" else entry.after_controls
+        controls = (
+            entry.before_controls if direction == "undo" else entry.after_controls
+        )
     if not _matches_expected_state(
         candidate,
         page_count=page_count,
         page=entry.page,
         controls=controls,
     ):
-        raise HwpLiveError("복구한 문서의 페이지 수 또는 대상 개체 구조가 이력과 다릅니다")
+        raise HwpLiveError(
+            "복구한 문서의 페이지 수 또는 대상 개체 구조가 이력과 다릅니다"
+        )
 
 
 def execute_document_edit_history(
@@ -575,12 +652,16 @@ def execute_document_edit_history(
         if isinstance(entry, NativeDocumentEditHistoryEntry):
             checkpoint_history = False
             target_page_count = (
-                entry.before_page_count if direction == "undo" else entry.after_page_count
+                entry.before_page_count
+                if direction == "undo"
+                else entry.after_page_count
             )
             target_controls = None
             if entry.operation == "control.delete":
                 target_controls = (
-                    entry.before_controls if direction == "undo" else entry.after_controls
+                    entry.before_controls
+                    if direction == "undo"
+                    else entry.after_controls
                 )
             executed, duration = _execute_native_history_until_state(
                 candidate,

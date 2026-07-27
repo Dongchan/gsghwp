@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Annotated, Final, Protocol, final
+from typing import Annotated, Final, Literal, Protocol, final
 from pydantic import Field
 
 from hwp_live_structure_contract import DocumentStructure
@@ -38,7 +38,6 @@ _FILL_TABLE_INTENT: Final = "기존 표 채우기"
 _FILL_TABLE_INPUT_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "inputs.target": "target_id",
-        "inputs.policy.numeric_value_mode": "cells",
     }
 )
 
@@ -105,6 +104,46 @@ class HwpPublicTools:
         ] = (),
         table_index: int | None = None,
         target_id: str | None = None,
+        preserve_display_format: Annotated[
+            bool,
+            Field(
+                description=(
+                    "기존 셀의 표시 문자열 골격(접두어·부호·단위·괄호·소수 자릿수)을 "
+                    "새 값에 다시 씌웁니다. false면 준 문자열이 그대로 들어갑니다. "
+                    "`EL.+39.3m` 셀을 `39.3`으로 바꾸려면 false로 지정하세요. "
+                    "글꼴·크기·색은 preserve_character_style이 따로 유지합니다."
+                )
+            ),
+        ] = True,
+        preserve_character_style: Annotated[
+            bool,
+            Field(
+                description=(
+                    "셀의 글자 서식(글꼴·크기·색)을 유지합니다. 표시 문자열과 무관하며 "
+                    "preserve_display_format=false와 함께 써도 서식은 남습니다."
+                )
+            ),
+        ] = True,
+        numeric_value_mode: Annotated[
+            Literal["infer", "display", "base"],
+            Field(
+                description=(
+                    "표시 배율이 있는 열에서 준 숫자가 이미 표시값인지(display) "
+                    "기준 단위 값인지(base) 지정합니다. infer는 둘을 구분하지 못하면 "
+                    "format_candidates를 돌려주고 멈춥니다."
+                )
+            ),
+        ] = "infer",
+        scale_conflict: Annotated[
+            Literal["reject", "ignore_scale"],
+            Field(
+                description=(
+                    "셀 주변에서 서로 다른 표시 배율이 함께 보일 때의 처리. "
+                    "reject는 1000배 틀린 값을 막기 위해 편집을 멈춥니다. "
+                    "ignore_scale은 배율 추론을 포기하고 준 숫자를 그대로 표시값으로 씁니다."
+                )
+            ),
+        ] = "reject",
     ) -> PublicActionResult:
         target = PublicTableTarget(
             document_path=document_path,
@@ -189,9 +228,12 @@ class HwpPublicTools:
             target=selected.target,
             data=data,
             policy=HwpOperatePolicy(
-                preserve_style=True,
+                preserve_display_format=preserve_display_format,
+                preserve_character_style=preserve_character_style,
                 fill_blanks_only=requested.fill_blanks_only,
                 ambiguity="return_candidates",
+                numeric_value_mode=numeric_value_mode,
+                scale_conflict=scale_conflict,
             ),
             postconditions=HwpOperatePostconditions(
                 record_count=record_count,

@@ -27,12 +27,14 @@ class HwpPriorityRecipeInputs(ContractModel):
     target_position: RecipePosition | None = None
     style_copy_type: Literal[0, 1, 2, 3, 4] = 2
     style_id: int | None = Field(default=None, ge=0, le=4_095)
-    picture_width_mm: float | None = Field(default=None, ge=1, le=250)
-    picture_height_mm: float | None = Field(default=None, ge=1, le=350)
+    picture_width_mm: float | None = Field(default=None, ge=1, le=1_000)
+    picture_height_mm: float | None = Field(default=None, ge=1, le=1_000)
     picture_embed: bool = True
 
     @model_validator(mode="after")
     def validate_picture_size(self) -> HwpPriorityRecipeInputs:
         if (self.picture_width_mm is None) != (self.picture_height_mm is None):
-            raise PriorityRecipeValidationError("picture width and height must be provided together")
+            raise PriorityRecipeValidationError(
+                "picture width and height must be provided together"
+            )
         return self

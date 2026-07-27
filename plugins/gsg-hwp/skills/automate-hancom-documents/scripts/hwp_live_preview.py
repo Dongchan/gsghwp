@@ -17,9 +17,10 @@ from hwp_live_native_action_models import NativeDetailedInspection
 from hwp_live_native_batch import inspect_native_structure, read_native_snapshot
 from hwp_live_native_format_inputs import table_cell_coordinate
 from hwp_live_native_table_topology import table_topology
-
-
-_VISIBLE_OBJECT_CONTROL_TYPES = frozenset({"gso", "pic", "picture"})
+from hwp_object_control_types import (
+    is_picture_control_type,
+    is_table_control_type,
+)
 
 
 class PreviewDocument(Protocol):
@@ -124,7 +125,7 @@ def _capture_cell_selection(
         raise HwpLiveError(snapshot.selection.cell_address_error)
     if (
         snapshot.selection.mode != selection_mode
-        or snapshot.control_type != "tbl"
+        or not is_table_control_type(snapshot.control_type)
         or not snapshot.control_instance_id
         or len(snapshot.selection.cell_addresses) < 2
     ):
@@ -299,7 +300,7 @@ def _page_has_visible_structure(detail: NativeDetailedInspection) -> bool:
         )
         or any(
             control.page_start <= page <= control.page_end
-            and control.control_type.casefold() in _VISIBLE_OBJECT_CONTROL_TYPES
+            and is_picture_control_type(control.control_type)
             for control in detail.controls
         )
     )

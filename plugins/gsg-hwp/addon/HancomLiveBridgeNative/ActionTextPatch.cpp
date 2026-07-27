@@ -1,4 +1,5 @@
 #include "ActionExecutorInternal.h"
+#include "ParagraphText.h"
 
 #include <algorithm>
 #include <map>
@@ -9,6 +10,9 @@
 #include <vector>
 
 namespace hancom::actions::detail {
+
+using hancom::text::NormalizeParagraphText;
+using hancom::text::SameParagraphText;
 
 bool FormatLongProperty(
     IDispatch* const object,
@@ -226,28 +230,6 @@ bool ApplyAndVerifyTextFormat(
             L"TEXT_FORMAT_READBACK",
             location,
             L"character or paragraph format changed after text replacement");
-}
-
-std::wstring NormalizeParagraphText(const std::wstring& value) {
-    std::wstring normalized;
-    normalized.reserve(value.size());
-    for (size_t index = 0; index < value.size(); ++index) {
-        if (value[index] == L'\r') {
-            normalized.push_back(L'\n');
-            if (index + 1 < value.size() && value[index + 1] == L'\n') {
-                ++index;
-            }
-        } else {
-            normalized.push_back(value[index]);
-        }
-    }
-    return normalized;
-}
-
-bool SameParagraphText(
-    const std::wstring& left,
-    const std::wstring& right) {
-    return NormalizeParagraphText(left) == NormalizeParagraphText(right);
 }
 
 bool SetCellText(Context* const context, const Command& command) {
@@ -1011,12 +993,27 @@ bool PatchText(Context* const context, const Command& command) {
         return false;
     }
     if (command.name == L"FIND") {
+        LONG listFilter = -1;
+        std::wstring location = L"text.find";
+        if (!command.tableInstanceId.empty()) {
+            if (command.cellAddress.empty() ||
+                !SelectTableForCellPatch(context, command.tableInstanceId) ||
+                !GoToCell(context, command.cellAddress)) {
+                return false;
+            }
+            Position cell;
+            if (!GetPosition(context->hwp, &cell, context->result)) {
+                return false;
+            }
+            listFilter = cell.list;
+            location = NormalizeAddress(command.cellAddress);
+        }
         return PatchSearchedText(
             context,
             command,
-            -1,
+            listFilter,
             original,
-            L"text.find");
+            location);
     }
     if (command.name == L"CELL") {
         if (!SelectTableForCellPatch(context, command.tableInstanceId) ||
@@ -1042,16 +1039,38 @@ bool PatchText(Context* const context, const Command& command) {
         L"unsupported text.patch target");
 }
 
-bool IsTableTextFillBatch(const Request& request) {
+enum class TableTextBatchKind {
+    None,
+    Fill,
+    Expand,
+};
+
+TableTextBatchKind ClassifyTableTextBatch(const Request& request) {
     if (request.commands.size() < 3 ||
         request.commands[0].kind != CommandKind::SelectControl ||
         request.commands[1].kind != CommandKind::CaptureTable) {
-        return false;
+        return TableTextBatchKind::None;
     }
     const std::wstring& selectedTableId = request.commands[0].first;
     bool hasTextMutation = false;
+    bool hasExpansionAnchor = false;
+    bool hasAppendRow = false;
     for (size_t index = 2; index < request.commands.size(); ++index) {
         const Command& command = request.commands[index];
+        if (!hasTextMutation && !hasExpansionAnchor && index == 2 &&
+            command.kind == CommandKind::Cell) {
+            hasExpansionAnchor = true;
+            continue;
+        }
+        if (!hasTextMutation && hasExpansionAnchor &&
+            command.kind == CommandKind::Run &&
+            command.name == L"TableAppendRow") {
+            hasAppendRow = true;
+            continue;
+        }
+        if (hasExpansionAnchor && !hasAppendRow) {
+            return TableTextBatchKind::None;
+        }
         if (command.kind == CommandKind::SetCellText) {
             hasTextMutation = true;
             continue;
@@ -1062,9 +1081,12 @@ bool IsTableTextFillBatch(const Request& request) {
             hasTextMutation = true;
             continue;
         }
-        return false;
+        return TableTextBatchKind::None;
     }
-    return hasTextMutation;
+    if (!hasTextMutation) {
+        return TableTextBatchKind::None;
+    }
+    return hasAppendRow ? TableTextBatchKind::Expand : TableTextBatchKind::Fill;
 }
 
 bool ValidateCellTextPatchLimit(
@@ -1198,10 +1220,10 @@ bool PreflightTableTextCommands(
     if (!ValidateCellTextPatchLimit(context->result, request)) {
         return false;
     }
-    const bool isTableTextFillBatch = IsTableTextFillBatch(request);
+    const TableTextBatchKind batchKind = ClassifyTableTextBatch(request);
     reusableTableTextFillRequest =
-        isTableTextFillBatch ? &request : nullptr;
-    if (!isTableTextFillBatch) {
+        batchKind == TableTextBatchKind::Fill ? &request : nullptr;
+    if (batchKind == TableTextBatchKind::None) {
         return true;
     }
     Position cursor;
@@ -1226,6 +1248,17 @@ bool PreflightTableTextCommands(
     bool validated = true;
     for (size_t index = 2; index < request.commands.size(); ++index) {
         const Command& command = request.commands[index];
+        if (command.kind == CommandKind::Cell ||
+            command.kind == CommandKind::Run) {
+            continue;
+        }
+        if (batchKind == TableTextBatchKind::Expand &&
+            command.kind == CommandKind::SetCellText &&
+            !command.hasExpectedText) {
+            // TableAppendRow creates these cells later. Existing cells with
+            // expected text are still checked before any row is appended.
+            continue;
+        }
         context->result->failedStep = CommandStep(command);
         const std::wstring tableId =
             command.kind == CommandKind::TextPatch

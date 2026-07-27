@@ -16,6 +16,7 @@ from hwp_operation_contract import TableFormatCandidate
 
 
 NumericValueMode = Literal["infer", "display", "base"]
+ScaleConflictPolicy = Literal["reject", "ignore_scale"]
 
 _NUMBER = re.compile(
     r"(?<!\d)[+-]?(?:(?:\d{1,3}(?:[,\u00a0 ]\d{3})+)|\d+)(?:\.\d+)?" + r"(?![\d,.])"
@@ -70,6 +71,36 @@ class ContextualCellEdit:
     evidence: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class FormatRevertedCell:
+    """표시 형식 재조립이 요청값을 원래 값으로 되돌려 편집이 사라진 셀.
+
+    `EL.+39.3m` 셀에 `39.3` 을 요청하면 접두어·부호·단위가 다시 붙어
+    `EL.+39.3m` 이 된다. 요청과 결과가 달랐다는 사실을 여기 남기지 않으면
+    호출부는 "원래 같은 값이었다"와 구별할 수 없다.
+    """
+
+    address: str
+    requested: str
+    existing: str
+    rebuilt: str
+
+
+@dataclass(frozen=True, slots=True)
+class TableCellEditPlan:
+    edits: tuple[ContextualCellEdit, ...]
+    format_reverted: tuple[FormatRevertedCell, ...] = ()
+
+
+# 값을 지어내라고 시키지 않는다. 표시 형식 재조립을 끄는 것이 실제로 고칠 수
+# 있는 유일한 손잡이이므로 그것만 알려준다.
+FORMAT_ESCAPE_HINT = (
+    "기존 표시 형식을 버리고 준 문자열을 그대로 쓰려면 "
+    "preserve_display_format=false 로 다시 요청하세요 "
+    "(글꼴·크기·색은 preserve_character_style 이 따로 유지합니다)"
+)
+
+
 class TableFormatAmbiguity(HwpLiveError):
     candidates: tuple[TableFormatCandidate, ...]
 
@@ -78,14 +109,7 @@ class TableFormatAmbiguity(HwpLiveError):
         reason: str,
         candidates: tuple[TableFormatCandidate, ...] = (),
     ) -> None:
-        message = (
-            reason
-            if candidates
-            else (
-                f"{reason}. cells의 해당 주소에 단위·괄호·줄바꿈을 포함한 "
-                "최종 표시 문자열을 직접 지정하세요"
-            )
-        )
+        message = reason if candidates else f"{reason}. {FORMAT_ESCAPE_HINT}"
         super().__init__(message)
         self.candidates = candidates
 
@@ -257,6 +281,7 @@ def _inferred_scale(
     table: StructureTable,
     target: StructureCell,
     surrounding_texts: tuple[str, ...],
+    scale_conflict: ScaleConflictPolicy = "reject",
 ) -> tuple[int | None, tuple[str, ...]]:
     found: defaultdict[int, list[str]] = defaultdict(list)
     for cell in _context_sources(table, target):
@@ -268,6 +293,11 @@ def _inferred_scale(
     if not found:
         return None, ()
     if len(found) > 1:
+        # 서로 다른 배율이 동시에 보인다. 어느 쪽을 고르든 1000배 틀린 값을
+        # 쓸 수 있으므로 기본값은 멈춘다. 호출자가 명시로 껐을 때만
+        # 배율 추론 자체를 포기하고 준 숫자를 표시값으로 본다.
+        if scale_conflict == "ignore_scale":
+            return None, ()
         summary = ", ".join(
             f"{factor} ({', '.join(values[:3])})"
             for factor, values in sorted(found.items())
@@ -505,8 +535,28 @@ def infer_table_cell_edits(
     *,
     numeric_value_mode: NumericValueMode,
     surrounding_texts: tuple[str, ...] = (),
+    scale_conflict: ScaleConflictPolicy = "reject",
 ) -> tuple[ContextualCellEdit, ...]:
+    """실제로 실행할 편집만 돌려준다. 되돌려진 셀도 알아야 하면 plan 을 써라."""
+    return plan_table_cell_edits(
+        table,
+        replacements,
+        numeric_value_mode=numeric_value_mode,
+        surrounding_texts=surrounding_texts,
+        scale_conflict=scale_conflict,
+    ).edits
+
+
+def plan_table_cell_edits(
+    table: StructureTable,
+    replacements: tuple[tuple[str, str], ...],
+    *,
+    numeric_value_mode: NumericValueMode,
+    surrounding_texts: tuple[str, ...] = (),
+    scale_conflict: ScaleConflictPolicy = "reject",
+) -> TableCellEditPlan:
     edits: list[ContextualCellEdit] = []
+    reverted: list[FormatRevertedCell] = []
     for address, requested in replacements:
         target = _target_cell(table, address)
         if target.address != address:
@@ -521,6 +571,7 @@ def infer_table_cell_edits(
             table,
             target,
             surrounding_texts,
+            scale_conflict,
         )
         evidence = list(_format_evidence(table, target))
         if magnitude := _magnitude_evidence(table, target):
@@ -587,6 +638,16 @@ def infer_table_cell_edits(
             else requested
         )
         if replacement == target.text:
+            # 요청값과 셀 값은 달랐는데 재조립이 원래 값으로 되돌렸다. 조용히
+            # 넘기면 호출부가 "이미 같았다"로 잘못 보고한다.
+            reverted.append(
+                FormatRevertedCell(
+                    address=address,
+                    requested=requested,
+                    existing=target.text,
+                    rebuilt=replacement,
+                )
+            )
             continue
         edits.append(
             ContextualCellEdit(
@@ -597,4 +658,4 @@ def infer_table_cell_edits(
                 evidence=evidence_tuple,
             )
         )
-    return tuple(edits)
+    return TableCellEditPlan(edits=tuple(edits), format_reverted=tuple(reverted))

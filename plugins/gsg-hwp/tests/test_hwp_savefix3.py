@@ -526,7 +526,9 @@ def test_executor_public_save_evidence_rejects_each_broken_proof_condition(
     assert public.verified is False
     assert public.save_evidence is not None
     assert public.save_evidence.fingerprint_stable is True
-    assert public.save_evidence.fingerprint_changed is expected_changed
+    assert public.save_evidence.fingerprint_changed is (
+        False if expected_changed is False else None
+    )
     assert public.save_evidence.fingerprint_verified is False
     assert public.save_evidence.disk_persistence_verified is False
 
@@ -1315,7 +1317,7 @@ def test_changed_fingerprint_without_native_completion_is_not_called_success(
     assert public.save_evidence is not None
     assert public.save_evidence.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
     assert public.save_evidence.fingerprint_stable is True
-    assert public.save_evidence.fingerprint_changed is True
+    assert public.save_evidence.fingerprint_changed is None
     assert public.save_evidence.fingerprint_verified is False
     assert public.save_evidence.disk_persistence_verified is False
 

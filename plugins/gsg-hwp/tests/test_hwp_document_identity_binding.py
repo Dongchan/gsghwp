@@ -448,13 +448,16 @@ def test_table_image_recipe_request_keeps_session_identity_after_save_as() -> No
     )
     snapshots = iter((before, after))
     captured: list[NativeActionRequest] = []
+    minimum_versions: list[int] = []
 
     def execute(
         _candidate: HwpDocumentCandidate,
         request: NativeActionRequest,
+        minimum_version: int,
     ) -> tuple[int, int]:
         captured.append(request)
-        return 2, 9
+        minimum_versions.append(minimum_version)
+        return 2, minimum_version
 
     with (
         patch.object(
@@ -491,6 +494,7 @@ def test_table_image_recipe_request_keeps_session_identity_after_save_as() -> No
     assert len(captured) == 1
     assert captured[0].document_id == 1
     assert captured[0].full_name == _ORIGINAL
+    assert minimum_versions == [9]
     assert counter.log == []
 
 

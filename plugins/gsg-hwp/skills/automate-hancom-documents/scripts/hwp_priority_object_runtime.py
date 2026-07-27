@@ -20,6 +20,7 @@ from hwp_live_native_action_models import (
 from hwp_live_native_batch import execute_native_actions, read_native_snapshot
 from hwp_live_native_text_format import style_command
 from hwp_live_rot import HwpDocumentCandidate
+from hwp_object_control_types import is_picture_control_type
 from hwp_operation_certification import certified_recipe
 from hwp_operation_contract import (
     OperationResult,
@@ -29,7 +30,6 @@ from hwp_operation_contract import (
 from hwp_operation_registry import operation_registry
 
 
-_PICTURE_CONTROL_TYPES: Final = frozenset(("gso", "pic", "picture"))
 _HWPUNITS_PER_MILLIMETER: Final = 7_200 / 25.4
 _BRACKETED_PICTURE_CAPTION: Final = re.compile(
     r"^(?P<prefix>\s*(?:\(\s*그림\b[^)\r\n]*\)"
@@ -89,7 +89,7 @@ def _picture_controls(
     return {
         control.instance_id: control
         for control in controls
-        if control.control_type in _PICTURE_CONTROL_TYPES and control.instance_id
+        if is_picture_control_type(control.control_type) and control.instance_id
     }
 
 
@@ -245,8 +245,8 @@ def verify_replaced_picture(
     expectation: PictureReplaceExpectation,
 ) -> VerifiedPicture:
     if (
-        before.control_type not in _PICTURE_CONTROL_TYPES
-        or after.control_type not in _PICTURE_CONTROL_TYPES
+        not is_picture_control_type(before.control_type)
+        or not is_picture_control_type(after.control_type)
         or before.instance_id != expectation.control_id
         or after.instance_id != expectation.control_id
         or after.anchor != before.anchor
@@ -279,7 +279,7 @@ def verify_picture_caption(
         control
         for control in after.controls
         if control.instance_id == expectation.control_id
-        and control.control_type in _PICTURE_CONTROL_TYPES
+        and is_picture_control_type(control.control_type)
     )
     if len(targets) != 1 or targets[0].anchor != expectation.anchor:
         raise HwpLiveError("그림 캡션 대상의 개체 ID와 앵커를 다시 확인하지 못했습니다")

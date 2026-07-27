@@ -371,6 +371,21 @@ bool ParseRequest(
                 command.hasExpectedText = true;
             } else if (fields[0] == L"PATCH_TEXT" &&
                 (fields.size() == 8 || fields.size() == 9) &&
+                fields[1] == L"FIND" &&
+                DecodeUtf8Base64(fields[2], &command.tableInstanceId) &&
+                !command.tableInstanceId.empty() && !fields[3].empty() &&
+                ParseLong(fields[4], &command.occurrence) &&
+                ParseBoolean(fields[5], &command.matchCase) &&
+                DecodeUtf8Base64(fields[6], &command.first) && !command.first.empty() &&
+                DecodeUtf8Base64(fields[7], &command.second) &&
+                (fields.size() == 8 ||
+                 ParseBoolean(fields[8], &command.preserveFormat))) {
+                command.kind = CommandKind::TextPatch;
+                command.name = fields[1];
+                command.cellAddress = fields[3];
+                command.hasExpectedText = true;
+            } else if (fields[0] == L"PATCH_TEXT" &&
+                (fields.size() == 8 || fields.size() == 9) &&
                 fields[1] == L"CELL" &&
                 DecodeUtf8Base64(fields[2], &command.tableInstanceId) &&
                 !command.tableInstanceId.empty() && !fields[3].empty() &&

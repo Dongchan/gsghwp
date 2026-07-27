@@ -4,7 +4,10 @@ from hwp_errors import HwpLiveError
 from hwp_live_native_batch import read_native_snapshot
 from hwp_live_rot import HwpDocumentCandidate
 from hwp_live_template_repeat import repeat_table_template
-from hwp_live_template_series_discovery import AmbiguousTableSeriesError
+from hwp_live_template_series_discovery import (
+    AmbiguousTableSeriesError,
+    InvalidTableSeriesError,
+)
 from hwp_live_template_series_sync import sync_table_template_series
 from hwp_operation_contract import (
     HwpOperatePostconditions,
@@ -52,10 +55,10 @@ def operate_table_series_recipe(
     if recipe_inputs.reconcile_existing:
         try:
             repeated = sync_table_template_series(candidate.window_handle, plan)
-        except AmbiguousTableSeriesError as exc:
+        except (AmbiguousTableSeriesError, InvalidTableSeriesError) as exc:
             return priority_recipe_result(
                 resolution,
-                "ambiguous",
+                "schema_conflict",
                 str(exc),
             )
     else:
@@ -89,11 +92,7 @@ def operate_table_series_recipe(
     # 표 복제와 내용 적용이 끝났는데 operation_failed 를 주면 모델은 되돌리고 다시 시도한다.
     # 그게 1 분이면 끝날 일을 몇 분으로 늘렸다. 번호 미확인은 message 로 알리면 충분하다.
     status = (
-        "executed"
-        if verified
-        else "partial_change"
-        if changed
-        else "operation_failed"
+        "executed" if verified else "partial_change" if changed else "operation_failed"
     )
     message = (
         (

@@ -225,19 +225,21 @@ def _required_inputs(
                 return ("target.occurrence",)
             return (input_aliases.get("inputs.target", "target.target_id"),)
         case "needs_input":
+            # 막힌 필드는 반드시 제 이름으로 알려준다. 예전에는
+            # inputs.policy.numeric_value_mode 를 "cells" 로 바꿔 불렀고,
+            # 모델은 고칠 수 없는 필드 대신 cells 값을 지어내 다시 보내다가
+            # 같은 자리에서 또 막혔다. 아래 이름은 모두 실제 도구 파라미터다.
             aliases = {
                 "inputs.data": "records | cells | rows",
                 "inputs.data.start_cell": "start_cell",
                 "inputs.target": "target",
+                "inputs.policy.numeric_value_mode": "numeric_value_mode",
+                "inputs.policy.preserve_display_format": "preserve_display_format",
+                "inputs.policy.scale_conflict": "scale_conflict",
                 **input_aliases,
             }
             return tuple(
-                (
-                    "cells"
-                    if value == "inputs.policy.numeric_value_mode"
-                    and not result.format_candidates
-                    else aliases.get(value, value.removeprefix("inputs."))
-                )
+                aliases.get(value, value.removeprefix("inputs."))
                 for value in result.required_inputs
             )
         case _ as unreachable if not _is_terminal_status(unreachable):
@@ -269,22 +271,38 @@ def _public_message(result: OperationResult) -> str:
     )
 
 
+# 값을 지어내라고 시키는 문구를 여기에 두지 마라. 안내는 호출자가 실제로 바꿀
+# 수 있는 파라미터만 가리켜야 한다. 예전 문구("cells의 해당 주소에 단위·괄호·
+# 줄바꿈을 포함한 최종 표시 문자열을 직접 지정하세요")는 그대로 따라 해도 같은
+# 재조립을 거쳐 다시 실패했다.
+_DISPLAY_FORMAT_GUIDANCE: Final = (
+    "preserve_display_format=false: 기존 셀의 접두어·단위·괄호·자릿수를 되살리지 "
+    "않고 준 문자열을 그대로 씁니다. 글꼴·크기·색은 preserve_character_style이 "
+    "따로 유지하므로 서식은 잃지 않습니다."
+)
+_NUMERIC_MODE_WITH_CANDIDATES_GUIDANCE: Final = (
+    "numeric_value_mode: format_candidates의 각 항목이 그 값으로 실행했을 때의 "
+    "replacement를 보여줍니다. 원하는 결과를 낸 항목의 numeric_value_mode를 "
+    "display 또는 base로 그대로 지정하세요."
+)
+
+
 def _input_guidance(
     status: PublicActionStatus,
     result: OperationResult,
 ) -> tuple[str, ...]:
-    if (
-        status != "needs_input"
-        or "inputs.policy.numeric_value_mode" not in result.required_inputs
-    ):
+    if status != "needs_input":
+        return ()
+    required = frozenset(result.required_inputs)
+    if "inputs.policy.preserve_display_format" in required:
+        return (_DISPLAY_FORMAT_GUIDANCE,)
+    if "inputs.policy.numeric_value_mode" not in required:
         return ()
     if result.format_candidates:
-        return (
-            "cells: format_candidates의 address별 replacement 중 확인한 최종 표시값을 지정하세요.",
-        )
-    return (
-        "cells: 각 주소에 단위·괄호·줄바꿈을 포함한 최종 표시 문자열을 직접 지정하세요.",
-    )
+        return (_NUMERIC_MODE_WITH_CANDIDATES_GUIDANCE,)
+    # 고를 후보가 없다. 표시 형식 추론이 값을 안전하게 옮길 수 없다고 판단한
+    # 경우이므로, 실제로 통하는 손잡이는 재조립을 끄는 것 하나다.
+    return (_DISPLAY_FORMAT_GUIDANCE,)
 
 
 _MAXIMUM_AFFECTED_PAGES = 500
@@ -410,7 +428,12 @@ def to_public_action_result(
             file_mtime_ns=result.saved_file_mtime_ns,
             sha256=result.saved_file_sha256,
             fingerprint_stable=result.save_fingerprint_stable,
-            fingerprint_changed=result.save_fingerprint_changed,
+            fingerprint_changed=(
+                None
+                if result.save_fingerprint_changed is True
+                and result.save_fingerprint_verified is not True
+                else result.save_fingerprint_changed
+            ),
             fingerprint_verified=result.save_fingerprint_verified,
             live_state_preserved_after_save=(result.live_state_preserved_after_save),
             disk_persistence_verified=result.disk_persistence_verified,

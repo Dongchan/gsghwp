@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # noqa: E501  # noqa: SIZE_OK — native format state machine; splitting obscures mutation ordering
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from hwp_errors import HwpLiveError
 from hwp_live_api import HwpComApplication
@@ -47,6 +47,7 @@ from hwp_live_native_format_prepare import (
     prepare_native_format_operation,
 )
 from hwp_live_native_table_topology import (
+    TableTopology,
     table_formula_selection_region,
     table_topology,
     verify_merge_transition,
@@ -62,6 +63,12 @@ from hwp_live_text_format_verification import verify_text_format
 from hwp_operation_certification import certified_recipe
 from hwp_operation_contract import OperationResult, OperationStatus
 from hwp_operation_registry import operation_registry
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectionResolvedRequest:
+    request: NativeFormatRecipeRequest
+    before_detail: NativeDetailedInspection
 
 
 def _result(
@@ -162,8 +169,9 @@ def _verify_structural_plan(
             raise HwpLiveError("표 구조 변경 전 대상 표의 실제 셀 구조가 없습니다")
         before_topology = table_topology(before_detail, table.instance_id)
         # Only a CellTopology we actually read back proves this call mutated the
-        # table. Without that proof the Undo below may have reverted an earlier,
-        # unrelated edit instead, so no "unchanged" claim may be made.
+        # table. Undo(1) reverts the newest history entry whatever it is, so
+        # without that proof it would revert an earlier, unrelated edit instead.
+        after_topology: TableTopology | None = None
         observed_mutation = False
         try:
             detail = inspect_native_structure(window_handle, after_page)
@@ -185,6 +193,22 @@ def _verify_structural_plan(
             else:
                 verify_split_transition(before_topology, after_topology, plan.split)
         except HwpLiveError as verification_error:
+            if not observed_mutation:
+                # Nothing recovers here, and that is deliberate: the caller has
+                # to know an automatic recovery was declined, and that a
+                # partial change of this call may still be in the document.
+                raise HwpLiveError(
+                    f"{verification_error}. "
+                    + (
+                        "작업 후 대상 표 구조를 읽지 못했습니다"
+                        if after_topology is None
+                        else "작업 후 대상 표의 CellTopology가 작업 전과 같습니다"
+                    )
+                    + ". 이 호출이 표를 바꿨다는 네이티브 증거가 없어 자동 Undo를"
+                    + " 실행하지 않았습니다(실행하면 무관한 이전 편집을 되돌립니다)."
+                    + " 자동 복구를 하지 않았으므로 문서가 작업 전 상태인지는"
+                    + " 확정할 수 없습니다"
+                ) from verification_error
             try:
                 _ = execute_native_history(window_handle, "undo", 1)
                 restored = inspect_native_structure(window_handle, table.page)
@@ -199,14 +223,15 @@ def _verify_structural_plan(
                 raise HwpLiveError(
                     f"{verification_error}. 자동 Undo 복구 검증에도 실패했습니다: {rollback_error}"
                 ) from rollback_error
-            if not observed_mutation:
-                raise HwpLiveError(
-                    f"{verification_error}. 자동 Undo를 실행했지만 이 호출이 표를"
-                    " 바꿨다는 네이티브 증거가 없어 변경 여부를 확정하지 못했습니다"
-                ) from verification_error
+            # The evidence is one CellTopology comparison: grid, spans and the
+            # cell text the native layer returns. Cell formatting and anything
+            # outside this table were never read, so the claim stops here
+            # instead of declaring the whole document pre-edit state.
             raise HwpLiveError(
-                f"{verification_error}. 자동 Undo로 작업 전 표 구조를 복구했습니다"
-                "; mutation_started=false; 문서는 작업 전 상태입니다",
+                f"{verification_error}. 자동 Undo로 복구했습니다: 대상 표의"
+                + " CellTopology(격자·span·셀 텍스트)가 작업 전과 같습니다."
+                + " 셀 서식과 이 표 밖 문서 내용은 확인하지 않았습니다"
+                + "; mutation_started=false",
                 mutation_started=False,
             ) from verification_error
         return
@@ -216,7 +241,7 @@ def _verify_structural_plan(
 def _selected_structure_addresses(
     request: NativeFormatRecipeRequest,
     before: NativeSnapshot,
-) -> tuple[str, ...] | InputFailure:
+) -> tuple[tuple[str, ...], NativeDetailedInspection | None] | InputFailure:
     """Cell addresses the live selection covers inside the target table.
 
     This resolves, it does not validate. The only judgement is made by
@@ -243,18 +268,21 @@ def _selected_structure_addresses(
     if isinstance(resolved, TargetFailure):
         # prepare_native_format_operation resolves the same target and reports
         # this failure itself, so it is not duplicated here.
-        return ()
+        return (), None
     detail = inspect_native_structure(request.candidate.window_handle, resolved.page)
     if detail is None:
-        return ()
+        return (), None
     selection = before.selection
     try:
-        return table_topology(
+        return (
+            table_topology(
+                detail,
+                resolved.instance_id,
+            ).selection_region_by_list_ids(
+                selection.start.list_id,
+                selection.end.list_id,
+            ),
             detail,
-            resolved.instance_id,
-        ).selection_region_by_list_ids(
-            selection.start.list_id,
-            selection.end.list_id,
         )
     except HwpLiveError as error:
         return InputFailure("schema_conflict", str(error))
@@ -264,38 +292,53 @@ def _request_with_selected_cells(
     workflow: NativeFormatWorkflow,
     request: NativeFormatRecipeRequest,
     before: NativeSnapshot,
-) -> NativeFormatRecipeRequest | InputFailure:
+) -> NativeFormatRecipeRequest | _SelectionResolvedRequest | InputFailure:
     """Fill omitted merge/split cell addresses from the live cell selection.
 
-    Addresses the caller supplied are never touched, so a request that carries
-    them takes byte-identical parameters into
-    ``prepare_native_format_operation``.
+    Only names the caller left out are filled in. Addresses the caller supplied
+    are never touched, so a request that carries every address takes
+    byte-identical parameters into ``prepare_native_format_operation`` and
+    never reads the selection at all.
+
+    A merge that named one corner and left the other out used to be sent on
+    unchanged, and the missing-input failure that came back is exactly what
+    made models invent the second address. The completed pair is validated by
+    ``merge_region`` like any other pair; there is no rule that applies only
+    because an address came from the selection.
     """
     if workflow == "table.merge_cells":
-        if "start" in request.parameters or "end" in request.parameters:
-            return request
+        missing = tuple(
+            name for name in ("start", "end") if name not in request.parameters
+        )
     elif workflow == "table.split_cells":
-        if "cell" in request.parameters:
-            return request
+        missing = () if "cell" in request.parameters else ("cell",)
     else:
         return request
-    region = _selected_structure_addresses(request, before)
-    if isinstance(region, InputFailure):
-        return region
+    if not missing:
+        return request
+    selected = _selected_structure_addresses(request, before)
+    if isinstance(selected, InputFailure):
+        return selected
+    region, before_detail = selected
     if not region:
         return request
     if workflow == "table.merge_cells":
-        # A caret with no cell block resolves to one cell, so start equals end
-        # and parse_merge rejects it exactly as it rejects a caller that sent
-        # the same address twice.
-        added = {"start": region[0], "end": region[-1]}
+        # A caret with no cell block resolves to one cell, so a pair completed
+        # from it names the same cell twice and parse_merge rejects it exactly
+        # as it rejects a caller that sent the same address twice.
+        corners = {"start": region[0], "end": region[-1]}
+        added = {name: corners[name] for name in missing}
     elif len(region) == 1:
         added = {"cell": region[0]}
     else:
         # A multi-cell selection does not name the one cell a split applies to.
         # Nothing is injected, so parse_split reports the missing input.
         return request
-    return replace(request, parameters={**request.parameters, **added})
+    assert before_detail is not None
+    return _SelectionResolvedRequest(
+        replace(request, parameters={**request.parameters, **added}),
+        before_detail,
+    )
 
 
 def _normalized_merge_plan(
@@ -865,6 +908,7 @@ def _execute_prepared(
     request: NativeFormatRecipeRequest,
     before: NativeSnapshot,
     prepared: PreparedFormatOperation,
+    before_detail: NativeDetailedInspection | None = None,
 ) -> OperationResult:
     plan = prepared.plan
     detail_page: int | None = None
@@ -887,11 +931,11 @@ def _execute_prepared(
             detail_page = plan.table.page
         case TextFormatCommandPlan():
             pass
-    before_detail = (
-        inspect_native_structure(request.candidate.window_handle, detail_page)
-        if detail_page is not None
-        else None
-    )
+    if before_detail is None and detail_page is not None:
+        before_detail = inspect_native_structure(
+            request.candidate.window_handle,
+            detail_page,
+        )
     if detail_page is not None and before_detail is None:
         raise HwpLiveError("표 구조 변경 전 대상 표의 실제 셀 구조를 읽지 못했습니다")
     if isinstance(plan, TableFormatCommandPlan) and not plan.cells:
@@ -1032,8 +1076,13 @@ def operate_native_format_recipe(
     selected = _request_with_selected_cells(workflow, request, before)
     if isinstance(selected, InputFailure):
         return _failure_result(request, selected)
-    request = selected
+    before_detail: NativeDetailedInspection | None = None
+    if isinstance(selected, _SelectionResolvedRequest):
+        request = selected.request
+        before_detail = selected.before_detail
+    else:
+        request = selected
     prepared = prepare_native_format_operation(workflow, request, before)
     if isinstance(prepared, (InputFailure, TargetFailure)):
         return _failure_result(request, prepared)
-    return _execute_prepared(request, before, prepared)
+    return _execute_prepared(request, before, prepared, before_detail)

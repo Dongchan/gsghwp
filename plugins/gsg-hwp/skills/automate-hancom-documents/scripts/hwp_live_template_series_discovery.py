@@ -39,6 +39,10 @@ class AmbiguousTableSeriesError(HwpLiveError):
     pass
 
 
+class InvalidTableSeriesError(HwpLiveError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class DiscoveredSeriesTable:
     page: NativePageInspection
@@ -184,17 +188,10 @@ def discover_table_series(
     for page_number in range(plan.source_page + 1, last_page + 1):
         page_text = page_texts.get(page_number, "")
         page_labels = _series_labels(page_text)
-        if len(page_labels) == len(_SERIES_LABELS):
+        if len(page_labels) >= _MIN_SERIES_SIGNATURE_LABELS:
             candidate_pages.append(page_number)
             consecutive_misses = 0
-            if len(candidate_pages) >= len(plan.blocks) - 1:
-                break
             continue
-        if len(page_labels) >= _MIN_SERIES_SIGNATURE_LABELS:
-            raise AmbiguousTableSeriesError(
-                f"{page_number}쪽에서 시리즈 라벨 일부만 확인되어 기존 표 여부를 "
-                + "확정할 수 없습니다"
-            )
         consecutive_misses += 1
         if consecutive_misses >= _MAX_CONSECUTIVE_MISSES:
             break
@@ -227,7 +224,22 @@ def discover_table_series(
             and len(_table_series_labels(detailed, control.instance_id))
             >= _MIN_SERIES_SIGNATURE_LABELS
         )
-        if len(controls) > 1 or partial_controls:
+        if len(controls) > 1:
+            control_ids = ", ".join(
+                control.instance_id
+                for control in sorted(
+                    controls,
+                    key=lambda item: (
+                        item.anchor.paragraph,
+                        item.anchor.character,
+                    ),
+                )
+            )
+            raise AmbiguousTableSeriesError(
+                f"{detailed.page}쪽에서 시리즈 표 후보를 하나로 확정할 수 없습니다: "
+                + control_ids
+            )
+        if partial_controls:
             ambiguous_controls = (*controls, *partial_controls)
             control_ids = ", ".join(
                 control.instance_id
@@ -239,15 +251,19 @@ def discover_table_series(
                     ),
                 )
             )
-            raise AmbiguousTableSeriesError(
-                f"{detailed.page}쪽에서 시리즈 표 후보를 하나로 확정할 수 없습니다: "
+            raise InvalidTableSeriesError(
+                f"{detailed.page}쪽의 시리즈 표 구조가 일부 라벨만 포함합니다: "
                 + control_ids
             )
         if not controls:
-            raise AmbiguousTableSeriesError(
-                f"{detailed.page}쪽 본문에서 시리즈 라벨을 찾았지만 어느 표에 "
-                + "속하는지 확정할 수 없습니다"
-            )
+            if len(_series_labels(page_texts.get(detailed.page, ""))) == len(
+                _SERIES_LABELS
+            ):
+                raise InvalidTableSeriesError(
+                    f"{detailed.page}쪽 본문에서 전체 시리즈 라벨을 찾았지만 어느 표에 "
+                    + "속하는지 확인하지 못했습니다"
+                )
+            continue
         found.extend(
             DiscoveredSeriesTable(detailed, control)
             for control in sorted(

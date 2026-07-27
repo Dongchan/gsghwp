@@ -5,6 +5,7 @@
 #include <atlcomcli.h>
 
 #include "../BridgeStatus.h"
+#include "../ParagraphText.h"
 #include "../TableInspection.h"
 #include "FakeParameterArrayDispatch.h"
 
@@ -146,6 +147,18 @@ bool CellTopologyOwnerIndexSmoke() {
         addressAt(topology, 1, 1) == L"A1" &&
         addressAt(topology, 1, 2) == L"B1" &&
         topology.OwnerAt(2, 1) == nullptr;
+}
+
+bool ParagraphTextNormalizationSmoke() {
+    return hancom::text::SameParagraphText(
+               L"first\nsecond",
+               L"first\r\nsecond") &&
+        hancom::text::SameParagraphText(
+               L"first\nsecond",
+               L"first\rsecond") &&
+        !hancom::text::SameParagraphText(
+            L"first\nsecond",
+            L"first\nchanged");
 }
 
 struct IHncUserActionModule {
@@ -4808,6 +4821,7 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     }
 
     const bool cellTopologyOwnerIndex = CellTopologyOwnerIndexSmoke();
+    const bool paragraphTextNormalization = ParagraphTextNormalizationSmoke();
     HMODULE const library = LoadLibraryW(arguments[1]);
     if (library == nullptr) {
         std::wcerr << L"LoadLibraryW failed: " << GetLastError() << L'\n';
@@ -5157,6 +5171,14 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         L"SELECT_CONTROL\tcmVmZXJlbmNlLXRhYmxl\n"
         L"CAPTURE_TABLE\n"
         L"SET_CELL_TEXT\tA2\t \tZmlyc3Q=\t1\n"
+        L"SET_CELL_TEXT\tB2\tc3RhbGU=\tZGFuZ2Vy\t1\nEND";
+    constexpr wchar_t expandCellTextPreflightPayload[] =
+        L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+        L"SELECT_CONTROL\tcmVmZXJlbmNlLXRhYmxl\n"
+        L"CAPTURE_TABLE\n"
+        L"CELL\tA2\n"
+        L"RUN\tTableAppendRow\n"
+        L"SET_CELL_TEXT\tA3\tbmV3\n"
         L"SET_CELL_TEXT\tB2\tc3RhbGU=\tZGFuZ2Vy\t1\nEND";
     constexpr wchar_t selectionCompatibleTableTextPayload[] =
         L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
@@ -5766,6 +5788,19 @@ END)REF";
         SafeStaleCellPreflightFailed(allTargetCellTextPreflightResponse) &&
         dispatch->AllTargetCellTextPreflightPreserved();
     dispatch->RestoreReferenceLayoutFixture();
+    dispatch->PrepareAllTargetCellTextPreflightFixture();
+    std::wstring expandCellTextPreflightResponse;
+    const bool expandCellTextPreflightInvoked =
+        SUCCEEDED(dispatchStatus) && batch != nullptr &&
+        InvokeString(
+            batch,
+            L"ExecuteActions",
+            expandCellTextPreflightPayload,
+            &expandCellTextPreflightResponse);
+    const bool expandCellTextPreflightPassed =
+        SafeStaleCellPreflightFailed(expandCellTextPreflightResponse) &&
+        dispatch->AllTargetCellTextPreflightPreserved();
+    dispatch->RestoreReferenceLayoutFixture();
     dispatch->PrepareTableTextPreflightSelectionFixture(false, false);
     std::wstring strictCellSelectionPreflightResponse;
     const bool strictCellSelectionPreflightInvoked =
@@ -6010,7 +6045,7 @@ END)REF";
         unscopedStructure.rfind(L"HDS1\n", 0) == 0 &&
         dispatch->PreservedUnscopedForwardInspection();
     dispatch->RestoreScopedInspectionFixture();
-    if (!cellTopologyOwnerIndex ||
+    if (!cellTopologyOwnerIndex || !paragraphTextNormalization ||
         FAILED(dispatchStatus) || !ReadProtocolVersion(batch) ||
         !dynamicDocumentActivationWorked ||
         !saveVerifyInvoked || !saveVerifyMatched ||
@@ -6056,6 +6091,8 @@ END)REF";
         !multilineCellTextPassed ||
         !allTargetCellTextPreflightInvoked ||
         !allTargetCellTextPreflightPassed ||
+        !expandCellTextPreflightInvoked ||
+        !expandCellTextPreflightPassed ||
         !strictCellSelectionPreflightInvoked ||
         !strictCellSelectionPreflightPassed ||
         !tableControlSelectionPreflightInvoked ||
@@ -6365,6 +6402,10 @@ END)REF";
             << allTargetCellTextPreflightResponse
             << L"\n  all-target-cell-text-preflight-passed="
             << allTargetCellTextPreflightPassed
+            << L"\n  expand-cell-text-preflight="
+            << expandCellTextPreflightResponse
+            << L"\n  expand-cell-text-preflight-passed="
+            << expandCellTextPreflightPassed
             << L"\n  strict-cell-selection-preflight="
             << strictCellSelectionPreflightResponse
             << L"\n  strict-cell-selection-preflight-passed="
@@ -6428,6 +6469,8 @@ END)REF";
             << referenceLayoutDroppedEdgesRejected
             << L"\n  cell-topology-owner-index="
             << cellTopologyOwnerIndex
+            << L"\n  paragraph-text-normalization="
+            << paragraphTextNormalization
             << L"\n  selected-control-patch=" << selectedControlPatchRequest
             << L"\n  selected-control-patch-rejected=" << selectedControlPatchRejected
             << L"\n  selected-control-patch-insertions=" << selectedControlPatchInsertions

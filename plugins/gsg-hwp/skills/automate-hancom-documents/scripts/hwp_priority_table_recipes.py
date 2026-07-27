@@ -32,7 +32,12 @@ from hwp_priority_table_series import operate_table_series_recipe
 
 
 _TABLE_WORKFLOWS = frozenset[HwpWorkflowId](
-    ("table.repeat_template", "table.build_series", "table.expand_and_fill", "table.insert_images")
+    (
+        "table.repeat_template",
+        "table.build_series",
+        "table.expand_and_fill",
+        "table.insert_images",
+    )
 )
 
 
@@ -61,14 +66,17 @@ def _resolved_table(
 def _execute(
     candidate: HwpDocumentCandidate,
     request: NativeActionRequest,
+    minimum_version: int,
 ) -> tuple[int, int]:
     native = execute_native_actions(
         candidate.window_handle,
         request,
-        minimum_version=9,
+        minimum_version=minimum_version,
     )
     if native is None:
-        raise HwpLiveError("한컴 프로토콜 9 네이티브 표 recipe를 사용할 수 없습니다")
+        raise HwpLiveError(
+            f"한컴 프로토콜 {minimum_version} 네이티브 표 recipe를 사용할 수 없습니다"
+        )
     return native.commands_executed, native.elapsed_microseconds
 
 
@@ -124,9 +132,13 @@ def operate_table_recipe(
     if workflow not in _TABLE_WORKFLOWS:
         return None
     if resolve_only:
-        return _result(resolution, "resolved", "인증된 프로토콜 9 표 recipe를 확정했습니다")
+        return _result(
+            resolution, "resolved", "인증된 프로토콜 9 표 recipe를 확정했습니다"
+        )
     if not allow_document_change:
-        return _result(resolution, "confirmation_required", "표 구조나 내용을 변경하는 작업입니다")
+        return _result(
+            resolution, "confirmation_required", "표 구조나 내용을 변경하는 작업입니다"
+        )
     if workflow in {"table.repeat_template", "table.build_series"}:
         return operate_table_series_recipe(
             candidate,
@@ -135,19 +147,41 @@ def operate_table_recipe(
             postconditions,
         )
     if target is None or target.kind != "table":
-        return _result(resolution, "needs_input", "고유한 표 대상이 필요합니다", required_inputs=("inputs.target",))
+        return _result(
+            resolution,
+            "needs_input",
+            "고유한 표 대상이 필요합니다",
+            required_inputs=("inputs.target",),
+        )
     page = workflow_page(target)
     before = inspect_candidate_structure(hwp, candidate, page, lambda: None)
     table, failed = _resolved_table(before, target)
     if table is None:
         assert failed is not None
-        return failed.model_copy(update={"query": resolution.query, "workflow_candidates": resolution.candidates})
+        return failed.model_copy(
+            update={
+                "query": resolution.query,
+                "workflow_candidates": resolution.candidates,
+            }
+        )
     expansion_plan: ExpandedTablePlan | None = None
     if workflow == "table.expand_and_fill":
         if data is None or not (data.cells or data.rows or data.records):
-            return _result(resolution, "needs_input", "확장 후 채울 표 데이터가 필요합니다", required_inputs=("inputs.data",))
-        if postconditions.record_count is not None and postconditions.record_count != data_record_count(data):
-            return _result(resolution, "schema_conflict", "record_count와 입력 레코드 수가 다릅니다")
+            return _result(
+                resolution,
+                "needs_input",
+                "확장 후 채울 표 데이터가 필요합니다",
+                required_inputs=("inputs.data",),
+            )
+        if (
+            postconditions.record_count is not None
+            and postconditions.record_count != data_record_count(data)
+        ):
+            return _result(
+                resolution,
+                "schema_conflict",
+                "record_count와 입력 레코드 수가 다릅니다",
+            )
         expansion_plan = prepare_expand_and_fill(candidate, table, data, policy)
         if not expansion_plan.replacements and expansion_plan.rows_added == 0:
             return _result(
@@ -167,12 +201,25 @@ def operate_table_recipe(
                     "modified": False,
                 }
             )
-        commands_executed, elapsed = _execute(candidate, expansion_plan.request)
+        native_protocol = expansion_plan.native_protocol
+        commands_executed, elapsed = _execute(
+            candidate,
+            expansion_plan.request,
+            native_protocol,
+        )
         updated_addresses = tuple(address for address, _ in expansion_plan.replacements)
     else:
+        native_protocol = 9
         if assets is None or not assets.images:
-            return _result(resolution, "needs_input", "셀 주소별 그림 경로가 필요합니다", required_inputs=("inputs.assets.images",))
-        commands, updated_addresses = prepare_table_image_commands(table, assets, policy)
+            return _result(
+                resolution,
+                "needs_input",
+                "셀 주소별 그림 경로가 필요합니다",
+                required_inputs=("inputs.assets.images",),
+            )
+        commands, updated_addresses = prepare_table_image_commands(
+            table, assets, policy
+        )
         if not updated_addresses:
             return _result(
                 resolution,
@@ -194,6 +241,7 @@ def operate_table_recipe(
         commands_executed, elapsed = _execute(
             candidate,
             NativeActionRequest(candidate.document_id, candidate.full_name, commands),
+            native_protocol,
         )
     after = inspect_candidate_structure(hwp, candidate, before.page, lambda: None)
     if workflow == "table.expand_and_fill":
@@ -204,15 +252,28 @@ def operate_table_recipe(
         control_id = table.control_instance_id
         assert control_id is not None
         cells = {cell.address: cell for cell in _table_after(after, control_id).cells}
-        if any(address not in cells or not cells[address].has_picture for address in updated_addresses):
-            raise HwpLiveError("표 그림 삽입 결과를 네이티브 구조에서 확인하지 못했습니다")
-    return _result(resolution, "executed", "프로토콜 9 C++/ATL 네이티브 표 recipe를 실행하고 검증했습니다").model_copy(
+        if any(
+            address not in cells or not cells[address].has_picture
+            for address in updated_addresses
+        ):
+            raise HwpLiveError(
+                "표 그림 삽입 결과를 네이티브 구조에서 확인하지 못했습니다"
+            )
+    return _result(
+        resolution,
+        "executed",
+        f"프로토콜 {native_protocol} C++/ATL 네이티브 표 recipe를 실행하고 검증했습니다",
+    ).model_copy(
         update={
-            "execution_mode": "native_in_process", "native_protocol": 9,
-            "verification": "native_snapshot_before_after", "verified": True,
+            "execution_mode": "native_in_process",
+            "native_protocol": native_protocol,
+            "verification": "native_snapshot_before_after",
+            "verified": True,
             "commands_executed": commands_executed,
-            "native_elapsed_microseconds": elapsed, "current_page": after.page,
-            "page_count": after.page_count, "modified": True,
+            "native_elapsed_microseconds": elapsed,
+            "current_page": after.page,
+            "page_count": after.page_count,
+            "modified": True,
             "updated_addresses": updated_addresses,
         }
     )

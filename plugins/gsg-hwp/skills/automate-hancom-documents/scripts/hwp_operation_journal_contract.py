@@ -58,12 +58,24 @@ class JournalSnapshot(JournalAttemptSnapshot):
     previous_attempts: tuple[JournalAttemptSnapshot, ...] = ()
 
     def preserve_result_evidence(self, result: OperationResult) -> OperationResult:
-        if self.structure_digest_before is not None and result.structure_digest_before is None:
-            result = result.model_copy(update={"structure_digest_before": self.structure_digest_before})
-        if self.structure_digest_after is not None and result.structure_digest_after is None:
-            result = result.model_copy(update={"structure_digest_after": self.structure_digest_after})
+        if (
+            self.structure_digest_before is not None
+            and result.structure_digest_before is None
+        ):
+            result = result.model_copy(
+                update={"structure_digest_before": self.structure_digest_before}
+            )
+        if (
+            self.structure_digest_after is not None
+            and result.structure_digest_after is None
+        ):
+            result = result.model_copy(
+                update={"structure_digest_after": self.structure_digest_after}
+            )
         if self.partial_mutation is not None and result.partial_mutation is None:
-            result = result.model_copy(update={"partial_mutation": self.partial_mutation})
+            result = result.model_copy(
+                update={"partial_mutation": self.partial_mutation}
+            )
         if self.retry_safe is not None and result.retry_safe is None:
             result = result.model_copy(update={"retry_safe": self.retry_safe})
         if self.failed_step is not None and result.failed_step is None:
@@ -128,6 +140,7 @@ class JournalRecord(ContractModel):
     failure_code: str | None = Field(default=None, min_length=1, max_length=200)
     previous_attempts: tuple[JournalAttemptSnapshot, ...] = ()
     result: OperationResult | None = None
+    result_changed_pages: tuple[int, ...] = Field(default=(), max_length=20_000)
     result_digest: str | None = None
     structure_digest_before: str | None = Field(default=None, max_length=500)
     structure_digest_after: str | None = Field(default=None, max_length=500)
@@ -146,6 +159,7 @@ class JournalRecord(ContractModel):
         return self.model_copy(
             update={
                 "result": result,
+                "result_changed_pages": result.changed_pages,
                 "result_digest": result_digest,
                 "structure_digest_before": result.structure_digest_before,
                 "structure_digest_after": result.structure_digest_after,
@@ -201,6 +215,13 @@ class JournalRecord(ContractModel):
         document_session: str,
         stale_after_seconds: int,
     ) -> JournalDecision:
+        result = (
+            None
+            if self.result is None
+            else self.result.model_copy(
+                update={"changed_pages": self.result_changed_pages}
+            )
+        )
         return JournalDecision(
             kind=kind,
             document_session=document_session,
@@ -211,7 +232,7 @@ class JournalRecord(ContractModel):
             updated_at=self.updated_at,
             stale_after_seconds=stale_after_seconds,
             failure_code=self.failure_code,
-            result=self.result,
+            result=result,
             result_digest=self.result_digest,
             structure_digest_before=self.structure_digest_before,
             structure_digest_after=self.structure_digest_after,

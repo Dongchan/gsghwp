@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
-from pydantic import Field, JsonValue, RootModel
+from pydantic import Field, JsonValue, RootModel, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from hwp_live_contract import LayoutPlan
@@ -199,13 +199,53 @@ class HwpOperateAssets(ContractModel):
 
 
 class HwpOperatePolicy(ContractModel):
-    preserve_style: bool = True
+    """표 채움 정책.
+
+    표시 형식(파이썬)과 글자 서식(네이티브)은 서로 다른 두 가지다. 예전에는
+    `preserve_style` 하나가 둘을 동시에 껐다 켰다: 접두어 `EL.` 를 지우려고
+    끄면 글꼴까지 잃었다. 아래 두 필드는 그 둘을 따로 제어한다.
+    """
+
+    # 파이썬 쪽. 기존 셀의 표시 문자열 골격 — 접두어·부호·단위·괄호·소수
+    # 자릿수·자리구분 — 을 새 값에 다시 씌운다
+    # (hwp_table_format_inference._rebuild_text). 끄면 준 문자열이 그대로 셀에
+    # 들어간다. `EL.+39.3m` 셀에 `39.3` 을 넣으려면 이 값을 False 로 준다.
+    preserve_display_format: bool = True
+    # 네이티브 쪽. 셀 글자 서식(글꼴·크기·색)을 읽어 두었다가 교체 후 다시
+    # 입힌다 (ActionTextPatch.cpp 의 preserveFormat). 표시 문자열과 무관하며,
+    # 켜져 있으면 expected_text 도 함께 실려 STALE_CELL_TEXT 검사가 동작한다.
+    preserve_character_style: bool = True
     preserve_existing_images: bool = True
     fill_blanks_only: bool = False
     allow_row_expansion: bool = False
     ambiguity: Literal["return_candidates", "unsupported"] = "return_candidates"
     numeric_value_mode: Literal["infer", "display", "base"] = "infer"
+    # 셀 주변에서 서로 다른 표시 배율(`천㎡` 와 `×1,000` 처럼)이 동시에 보이면
+    # 기본값 reject 는 편집을 멈춘다. 1000배 틀린 값을 쓰는 사고를 막는 검사다.
+    # ignore_scale 은 배율을 아예 추론하지 않고 준 숫자를 그대로 표시값으로
+    # 본다 — 검사를 끄는 유일한 방법이고, 기본값은 종전대로 reject 다.
+    scale_conflict: Literal["reject", "ignore_scale"] = "reject"
     atomic: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fan_out_legacy_preserve_style(cls, data: object) -> object:
+        """예전 `preserve_style` 하나를 두 필드로 펼친다.
+
+        분리 전 호출부는 표시 형식과 글자 서식을 함께 켜고 껐다. 그 의미를
+        그대로 보존해 두 필드에 같은 값을 넣는다. 새 필드를 함께 준 요청은
+        새 필드가 이긴다.
+        """
+        if not isinstance(data, dict):
+            return data
+        typed_data = cast(dict[str, object], data)
+        if "preserve_style" not in typed_data:
+            return typed_data
+        updated = dict(typed_data)
+        legacy = updated.pop("preserve_style")
+        _ = updated.setdefault("preserve_display_format", legacy)
+        _ = updated.setdefault("preserve_character_style", legacy)
+        return updated
 
 
 class HwpOperateRecovery(ContractModel):
@@ -297,10 +337,18 @@ def canonical_workflow(inputs: HwpOperateInputs) -> HwpWorkflowId | None:
         return "document.append_layout"
     if operation == "image.insert_or_replace":
         target = inputs.target
-        return "image.replace" if target is not None and target.kind == "picture" else "image.insert"
+        return (
+            "image.replace"
+            if target is not None and target.kind == "picture"
+            else "image.insert"
+        )
     if operation == "style.copy_and_apply":
         recipe = inputs.recipe
-        return "style.copy" if recipe is not None and recipe.source_position is not None else "style.apply"
+        return (
+            "style.copy"
+            if recipe is not None and recipe.source_position is not None
+            else "style.apply"
+        )
     return operation
 
 

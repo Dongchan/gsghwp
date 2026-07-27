@@ -23,11 +23,14 @@ from hwp_errors import HwpLiveError  # noqa: E402
 from hwp_live_api import LiveHwpApplication  # noqa: E402
 from hwp_live_contract import LayoutPlan  # noqa: E402
 from hwp_live_native_action_contract import (  # noqa: E402
+    NATIVE_ACTION_PAYLOAD_LIMIT,
     NativeActionFailure,
     NativeActionFailureEvidence,
+    action_request_payload_length,
 )
 from hwp_live_native_action_models import (  # noqa: E402
     CellCommand,
+    InsertTextCommand,
     MergeCommand,
     MillimeterValue,
     NativeActionRequest,
@@ -564,6 +567,60 @@ def test_command_limit_split_counts_each_new_call_cold_start() -> None:
 
     assert len(execution.batches) == 2
     assert tuple(batch.topology_work for batch in execution.batches) == (1, 1)
+
+
+def test_payload_limit_splits_before_native_encoding() -> None:
+    request = NativeActionRequest(
+        17,
+        "C:/documents/layout.hwp",
+        (
+            InsertTextCommand("a" * 3_100_000),
+            InsertTextCommand("b" * 3_100_000),
+        ),
+        expected_cursor=NativePosition(0, 0, 0),
+    )
+
+    execution = build_native_layout_execution_plan(request)
+
+    assert len(execution.batches) == 2
+    assert (
+        tuple(
+            command for batch in execution.batches for command in batch.request.commands
+        )
+        == request.commands
+    )
+    assert all(
+        action_request_payload_length(batch.request) <= NATIVE_ACTION_PAYLOAD_LIMIT
+        for batch in execution.batches
+    )
+    assert execution.batches[0].request.expected_cursor == NativePosition(0, 0, 0)
+    assert execution.batches[1].request.expected_cursor is None
+
+
+def test_atomic_payload_over_limit_is_rejected_before_dispatch() -> None:
+    request = NativeActionRequest(
+        17,
+        "C:/documents/layout.hwp",
+        (
+            InsertTextCommand("a" * 3_100_000),
+            InsertTextCommand("b" * 3_100_000),
+        ),
+        atomic=True,
+    )
+
+    with pytest.raises(HwpLiveError, match="원자 레이아웃 요청"):
+        _ = build_native_layout_execution_plan(request)
+
+
+def test_single_command_group_over_payload_limit_is_rejected() -> None:
+    request = NativeActionRequest(
+        17,
+        "C:/documents/layout.hwp",
+        (InsertTextCommand("a" * 6_000_000),),
+    )
+
+    with pytest.raises(HwpLiveError, match="단일 레이아웃 명령 그룹"):
+        _ = build_native_layout_execution_plan(request)
 
 
 def test_atomic_oversize_preserves_one_rollback_request() -> None:

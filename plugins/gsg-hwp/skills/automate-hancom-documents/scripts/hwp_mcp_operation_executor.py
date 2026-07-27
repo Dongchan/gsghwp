@@ -44,7 +44,11 @@ from hwp_operation_idempotency import OperationIdempotency, OperationTicket
 from hwp_operation_journal import OperationJournal
 from hwp_operation_registry import operation_registry
 from hwp_operation_verification import enforce_operation_verification
-from hwp_live_text_patch_contract import TextPatchRequest, TextPatchTarget
+from hwp_live_text_patch_contract import (
+    TextPatchRequest,
+    TextPatchTarget,
+    text_patch_minimum_protocol,
+)
 from hwp_mcp_session_lifetime import PublicSessionLifetime, public_session_lifetime
 
 
@@ -60,12 +64,6 @@ _PUBLIC_TOOL_SESSION_SCOPE: ContextVar[_PublicToolSessionScope | None] = Context
     default=None,
 )
 _PUBLIC_CLEANUP_GRACE_SECONDS: Final = 0.05
-# OperationResult.native_protocol is the public compatibility name for the
-# execution path's minimum required bridge protocol, not the connected DLL's
-# runtime ProtocolVersion.
-_TEXT_PATCH_MINIMUM_NATIVE_PROTOCOL: Final = 11
-
-
 CleanupCompletionWaiter = Callable[
     [tuple[Future[None], ...], float],
     Awaitable[None],
@@ -402,6 +400,7 @@ class HwpOperationExecutor:
                 partial_mutation=False,
                 retry_safe=True,
             )
+        minimum_protocol = text_patch_minimum_protocol(request)
         try:
             connected = await self.ensure_connection(inputs.document)
         except HwpLiveError as error:
@@ -436,7 +435,7 @@ class HwpOperationExecutor:
                     lookup_microseconds=0,
                     message="본문 text.patch를 적용하고 변경 범위와 서식을 다시 읽어 검증했습니다",
                     execution_mode="native_in_process",
-                    native_protocol=_TEXT_PATCH_MINIMUM_NATIVE_PROTOCOL,
+                    native_protocol=minimum_protocol,
                     verification="native_operation_specific_readback",
                     verified=True,
                     commands_executed=patched.native.commands_executed,
@@ -475,7 +474,7 @@ class HwpOperationExecutor:
                         ),
                         message="일치하는 본문이 여러 개여서 변경하지 않았습니다. occurrence를 지정하세요",
                         execution_mode="native_in_process",
-                        native_protocol=_TEXT_PATCH_MINIMUM_NATIVE_PROTOCOL,
+                        native_protocol=minimum_protocol,
                         verification="native_operation_specific_readback",
                         verified=False,
                         commands_executed=0,
@@ -495,7 +494,7 @@ class HwpOperationExecutor:
                         lookup_microseconds=0,
                         message=str(failure),
                         execution_mode="native_in_process",
-                        native_protocol=_TEXT_PATCH_MINIMUM_NATIVE_PROTOCOL,
+                        native_protocol=minimum_protocol,
                         verification="native_operation_specific_readback",
                         verified=False,
                         commands_executed=0,
@@ -507,7 +506,7 @@ class HwpOperationExecutor:
                     result = native_action_failure_result(
                         intent,
                         failure,
-                        minimum_native_protocol=(_TEXT_PATCH_MINIMUM_NATIVE_PROTOCOL),
+                        minimum_native_protocol=minimum_protocol,
                     ).model_copy(update={"request_id": inputs.request_id})
             except HwpLiveError as error:
                 result = transport_error_result(inputs, error, intent=intent)

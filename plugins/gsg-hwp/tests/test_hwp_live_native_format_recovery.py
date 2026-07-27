@@ -190,12 +190,17 @@ def test_verified_undo_reports_no_mutation(
     with pytest.raises(HwpLiveError) as raised:
         recipe._verify_structural_plan(_prepared_merge("A1", "B2"), 41, before, 1)
 
-    # Then: the restored document is reported as unchanged and retry-safe.
+    # Then: the Undo still runs. Removing this recovery is what would hurt.
     assert calls == [(41, "undo", 1)]
     assert raised.value.mutation_started is False
     envelope = _envelope(raised.value)
     assert envelope.changed is False
     assert envelope.retry_safe is True
+    # And: the claim reaches only as far as the evidence. A matching
+    # CellTopology is not proof that the whole document is pre-edit state.
+    assert "문서는 작업 전 상태입니다" not in raised.value.reason
+    assert "CellTopology" in raised.value.reason
+    assert "확인하지 않았습니다" in raised.value.reason
     assert envelope.partial_change is False
 
 
@@ -223,12 +228,12 @@ def test_unverified_undo_stays_conservative(
     assert envelope.retry_safe is False
 
 
-def test_unreadable_post_edit_structure_stays_conservative(
+def test_unreadable_post_edit_structure_never_undoes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Given: the post-edit structure could not be read, so nothing proves the
-    # native command mutated this table at all. The blind Undo may have
-    # reverted an earlier, unrelated edit instead.
+    # native command mutated this table at all. An Undo here reverts whatever
+    # the previous history entry is, which may be an earlier, unrelated edit.
     before = _grid_2x2()
     inspections: list[NativeDetailedInspection | None] = [None, before]
     calls: list[tuple[int, str, int]] = []
@@ -242,10 +247,61 @@ def test_unreadable_post_edit_structure_stays_conservative(
     with pytest.raises(HwpLiveError) as raised:
         recipe._verify_structural_plan(_prepared_merge("A1", "B2"), 41, before, 1)
 
+    # Then: no Undo ran at all, and the report says so.
+    assert calls == []
+    assert "자동 Undo를 실행하지 않았습니다" in raised.value.reason
     assert raised.value.mutation_started is None
     envelope = _envelope(raised.value)
     assert envelope.changed is True
     assert envelope.retry_safe is False
+
+
+def test_unchanged_topology_never_undoes_an_unrelated_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given: the post-edit CellTopology equals the pre-edit one, so this call
+    # left the table exactly as it found it. The only thing an Undo could
+    # revert here is somebody else's earlier edit.
+    before = _grid_2x2()
+    inspections = iter((_grid_2x2(),))
+    calls: list[tuple[int, str, int]] = []
+    monkeypatch.setattr(
+        recipe,
+        "inspect_native_structure",
+        lambda _window, _page: next(inspections),
+    )
+    monkeypatch.setattr(recipe, "execute_native_history", _history(calls))
+
+    with pytest.raises(HwpLiveError) as raised:
+        recipe._verify_structural_plan(_prepared_merge("A1", "B2"), 41, before, 1)
+
+    assert calls == []
+    assert "자동 Undo를 실행하지 않았습니다" in raised.value.reason
+
+
+def test_a_skipped_undo_admits_the_document_state_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Skipping the Undo may leave a partial change behind. Saying nothing
+    # about that would be worse than the blind Undo it replaces.
+    before = _grid_2x2()
+    inspections: list[NativeDetailedInspection | None] = [None]
+    monkeypatch.setattr(
+        recipe,
+        "inspect_native_structure",
+        lambda _window, _page: inspections.pop(0),
+    )
+    monkeypatch.setattr(recipe, "execute_native_history", _history([]))
+
+    with pytest.raises(HwpLiveError) as raised:
+        recipe._verify_structural_plan(_prepared_merge("A1", "B2"), 41, before, 1)
+
+    reason = raised.value.reason
+    assert "자동 Undo를 실행하지 않았습니다" in reason
+    assert "확정할 수 없습니다" in reason
+    # No recovery claim may appear when no recovery was attempted.
+    assert "복구했습니다" not in reason
+    assert raised.value.mutation_started is None
 
 
 def test_failed_undo_recovery_stays_conservative(

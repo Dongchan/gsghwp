@@ -17,7 +17,6 @@ from hwp_live_layout import resolve_layout_styles, validate_layout_anchor
 from hwp_live_native_action_contract import (
     NativeActionFailure,
     NativeActionFailureEvidence,
-    encode_action_request,
 )
 from hwp_live_native_action_models import (
     NativeActionRequest,
@@ -41,7 +40,11 @@ from hwp_live_native_layout import (
 from hwp_live_rot import HwpDocumentCandidate
 from hwp_live_safety import require_writable_document, run_layout_mutation
 from hwp_live_text_format_verification import verify_requested_text_format
-from hwp_live_text_patch_contract import TextPatchRequest, TextPatchResult
+from hwp_live_text_patch_contract import (
+    TextPatchRequest,
+    TextPatchResult,
+    text_patch_minimum_protocol,
+)
 
 
 @dataclass(slots=True)
@@ -253,6 +256,7 @@ def patch_validated_text(
             else build_native_format_commands(TextFormatCommandPlan(request.formatting))
         ),
     )
+    minimum_protocol = text_patch_minimum_protocol(request)
     native_result = execute_native_actions(
         candidate.window_handle,
         NativeActionRequest(
@@ -262,10 +266,12 @@ def patch_validated_text(
             expected_cursor=before.cursor,
             expected_selection=before.selection,
         ),
-        minimum_version=11,
+        minimum_version=minimum_protocol,
     )
     if native_result is None:
-        raise HwpLiveError("프로토콜 11 네이티브 text.patch를 사용할 수 없습니다")
+        raise HwpLiveError(
+            f"프로토콜 {minimum_protocol} 네이티브 text.patch를 사용할 수 없습니다"
+        )
     after = read_native_snapshot(candidate.window_handle)
     if after is None:
         raise HwpLiveError("text.patch 후 한컴 문서 상태를 읽지 못했습니다")
@@ -326,7 +332,6 @@ def apply_validated_layout(
         resolved_plan,
         assets,
     )
-    _ = encode_action_request(native_request)
     execution = build_native_layout_execution_plan(native_request)
     native = _NativeLayoutBox()
 

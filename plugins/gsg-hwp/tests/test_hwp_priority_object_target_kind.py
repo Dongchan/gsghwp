@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -24,6 +24,7 @@ SCRIPTS = (
 sys.path.insert(0, str(SCRIPTS))
 
 import hwp_priority_object_recipes as object_recipes  # noqa: E402
+import hwp_priority_object_inputs as object_inputs  # noqa: E402
 from hwp_live_api import LiveHwpApplication  # noqa: E402
 from hwp_live_native_action_models import (  # noqa: E402
     NativeCharacterFormat,
@@ -74,15 +75,23 @@ def _control(control_type: str, instance_id: str) -> NativePageControl:
     return NativePageControl(control_type, instance_id, _ANCHOR, None, None)
 
 
-def _page(*controls: NativePageControl) -> NativePageInspection:
+def _page_at(
+    page_number: int,
+    page_count: int,
+    *controls: NativePageControl,
+) -> NativePageInspection:
     return NativePageInspection(
         document_id=_DOCUMENT_ID,
         full_name=_DOCUMENT_PATH,
-        page=_PAGE,
-        page_count=_PAGE,
+        page=page_number,
+        page_count=page_count,
         text="",
         controls=controls,
     )
+
+
+def _page(*controls: NativePageControl) -> NativePageInspection:
+    return _page_at(_PAGE, _PAGE, *controls)
 
 
 def _selection_snapshot(control_type: str, control_instance_id: str) -> NativeSnapshot:
@@ -111,9 +120,10 @@ def _resolve(
     *,
     control_types: frozenset[str] = _CAPTION_TYPES,
     snapshot: NativeSnapshot | None = None,
+    window_handle: int | None = None,
 ) -> ResolvedObjectControl | ControlTargetFailure | None:
     return resolve_control_target(
-        ControlTargetRequest(page, target, control_types, snapshot)
+        ControlTargetRequest(page, target, control_types, snapshot, window_handle)
     )
 
 
@@ -123,12 +133,14 @@ def _resolved(
     *,
     control_types: frozenset[str] = _CAPTION_TYPES,
     snapshot: NativeSnapshot | None = None,
+    window_handle: int | None = None,
 ) -> ResolvedObjectControl:
     result = _resolve(
         page,
         target,
         control_types=control_types,
         snapshot=snapshot,
+        window_handle=window_handle,
     )
     assert isinstance(result, ResolvedObjectControl)
     return result
@@ -140,12 +152,14 @@ def _failure(
     *,
     control_types: frozenset[str] = _CAPTION_TYPES,
     snapshot: NativeSnapshot | None = None,
+    window_handle: int | None = None,
 ) -> ControlTargetFailure:
     result = _resolve(
         page,
         target,
         control_types=control_types,
         snapshot=snapshot,
+        window_handle=window_handle,
     )
     assert isinstance(result, ControlTargetFailure)
     return result
@@ -245,6 +259,62 @@ def test_explicit_control_instance_id_of_the_right_kind_still_resolves() -> None
     assert resolved.control_type == "tbl"
 
 
+def test_raw_explicit_control_instance_id_is_resolved_across_the_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    routing_page = _page_at(3, 4)
+    target_page = _page_at(1, 4, _control("tbl", "table-1"))
+    inspected_pages = (
+        target_page,
+        _page_at(2, 4),
+        _page_at(4, 4),
+    )
+    calls: list[tuple[int, tuple[int, ...], bool]] = []
+
+    def inspect_pages(
+        window_handle: int,
+        pages: tuple[int, ...],
+        *,
+        include_cells: bool = True,
+    ) -> tuple[NativePageInspection, ...]:
+        calls.append((window_handle, pages, include_cells))
+        return inspected_pages
+
+    monkeypatch.setattr(object_inputs, "inspect_native_pages", inspect_pages)
+
+    resolved = _resolved(
+        routing_page,
+        HwpOperateTarget(kind="table", control_instance_id="table-1"),
+        window_handle=_WINDOW_HANDLE,
+    )
+
+    assert resolved.instance_id == "table-1"
+    assert resolved.page.page == 1
+    assert calls == [(_WINDOW_HANDLE, (1, 2, 4), False)]
+
+
+def test_explicit_page_hint_keeps_object_id_validation_page_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_scan(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("an exact page hint must not trigger a document scan")
+
+    monkeypatch.setattr(object_inputs, "inspect_native_pages", unexpected_scan)
+
+    failure = _failure(
+        _page_at(3, 4),
+        HwpOperateTarget(
+            kind="table",
+            page_hint=3,
+            control_instance_id="table-1",
+        ),
+        window_handle=_WINDOW_HANDLE,
+    )
+
+    assert failure.status == "not_found"
+    assert "3쪽" in failure.message
+
+
 def test_table_kind_conflicts_with_a_picture_only_workflow() -> None:
     """image.replace never edits a table, so kind=table is a contradiction."""
     page = _page(_control("gso", "picture-1"))
@@ -294,10 +364,12 @@ def test_control_kind_keeps_the_mixed_candidate_list() -> None:
 
 
 @pytest.mark.parametrize("kind", ("document", "page", "selection", "control"))
-def test_non_specific_kinds_do_not_narrow_candidates(kind: str) -> None:
+def test_non_specific_kinds_do_not_narrow_candidates(
+    kind: Literal["document", "page", "selection", "control"],
+) -> None:
     page = _page(_control("gso", "picture-1"))
 
-    resolved = _resolved(page, HwpOperateTarget(kind=kind))  # type: ignore[arg-type]
+    resolved = _resolved(page, HwpOperateTarget(kind=kind))
 
     assert resolved.instance_id == "picture-1"
 
@@ -410,12 +482,26 @@ def test_caption_add_reports_a_missing_control_instead_of_raising(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def unexpected_structure_read(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("a rejected target must not reach a native inspection")
+        raise AssertionError("a rejected target must not reach detailed inspection")
+
+    def inspect_other_pages(
+        _window_handle: int,
+        _pages: tuple[int, ...],
+        *,
+        include_cells: bool = True,
+    ) -> tuple[NativePageInspection, ...]:
+        assert include_cells is False
+        return _page_at(1, 3), _page_at(2, 3)
 
     monkeypatch.setattr(
         object_recipes,
         "inspect_native_structure",
         unexpected_structure_read,
+    )
+    monkeypatch.setattr(
+        object_inputs,
+        "inspect_native_pages",
+        inspect_other_pages,
     )
 
     result = _operate_caption(
@@ -432,7 +518,7 @@ def test_caption_add_reports_a_kind_mismatch_instead_of_editing_a_picture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def unexpected_structure_read(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("a rejected target must not reach a native inspection")
+        raise AssertionError("a rejected target must not reach detailed inspection")
 
     monkeypatch.setattr(
         object_recipes,
