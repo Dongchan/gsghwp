@@ -2,7 +2,7 @@
 
 GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서 현재 열려 있는 HWP 문서를 빠르게 조회하고 네이티브 방식으로 편집·검수하도록 연결하는 로컬 MCP**입니다.
 
-- 배포 버전: **v1.2.0**
+- 배포 버전: **v1.2.1**
 - 원본 소스 버전: `0.5.73-dev.3`
 - MCP 런타임: `0.3.91`
 - C++ 네이티브 브리지: `0.5.124`
@@ -14,6 +14,27 @@ GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서
 버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록합니다.
 
 배포본 해시 검증, 코드 서명 현황, 백신 오탐 대처는 [docs/release-integrity.md](docs/release-integrity.md)를 참고하십시오.
+
+### v1.2.1 주요 변경
+
+- 표를 반복하고 내용을 채우는 작업이 5분 넘게 실패하던 것을 고쳤습니다. 캡션을 확인하려고 표 개수만큼
+  문서를 다시 읽던 것을 쪽 단위로 묶었습니다. 사용자 문서 실측에서 40초에 완료되고 되돌리기 호출이
+  한 번도 발생하지 않았습니다.
+- 큰 표에서 선택한 셀 범위를 읽지 못하면 "셀 주소를 지정해 다시 요청하라"고 답하던 것을 없앴습니다.
+  그 문구를 받은 에이전트가 없는 주소를 만들어내 엉뚱한 칸을 고치고 있었습니다. 선택과 표 구조로
+  푸는 경로가 이미 있었는데 그 앞에서 막고 있었습니다.
+- 셀 서식을 유지해 달라는 요청이 무시되어 서식이 사라지던 문제를 고쳤습니다.
+- 라벨만 보고 크기가 같은 무관한 표를 같은 묶음으로 판단해 덮어쓰던 문제를 고쳤습니다. 이제 표별로
+  확인하고, 어느 표인지 확정할 수 없으면 그 사실을 알립니다.
+- 되돌리기로 원래 상태를 복구한 뒤에도 "변경됨"으로 보고하던 것, 검증 근거가 부족한 것을 검증 실패와
+  같이 다루던 것을 고쳤습니다. 성공한 편집이 실패로 보고되면 에이전트가 되돌린 뒤 다시 시도합니다.
+- 바뀐 쪽 범위를 커서 위치 한 쪽만 알려주던 것을 실제로 바뀐 범위로 바꿨습니다.
+- 모든 네이티브 호출이 내부 통신을 세 번씩 하고 있던 것을 한 번으로 줄였습니다.
+- 표 채우기가 네이티브의 일괄 검증을 스스로 꺼뜨리던 문제를 고쳤습니다. 이제 한 칸이라도 내용이
+  달라졌으면 아무 칸도 쓰지 않습니다.
+- 셀 병합·나누기가 주소를 반드시 요구하던 것을 완화했습니다. 이미 선택해 둔 칸이 있으면 그대로 씁니다.
+- 파이썬과 네이티브가 서로 다른 한계값을 믿고 있던 곳들을 맞췄습니다. 50x50 표를 만들 수 없던
+  제한도 함께 풀었습니다.
 
 ### v1.2.0 주요 변경
 
@@ -191,7 +212,7 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 - `uv` 패키지 관리자
 - `uv`가 내려받고 관리하는 Python 3.12를 버전별 `.venv`에 격리하여 사용
 
-배포 ZIP에는 개발자의 `.venv`나 일반 Python 설치본을 넣지 않습니다. `install.ps1`이 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.0\.venv`를 새로 만들며, 시작 스크립트는 그 안의 `Scripts\python.exe`만 실행합니다. PC에 별도로 설치된 시스템 Python 3.12는 선택하거나 수정하지 않습니다.
+배포 ZIP에는 개발자의 `.venv`나 일반 Python 설치본을 넣지 않습니다. `install.ps1`이 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.1\.venv`를 새로 만들며, 시작 스크립트는 그 안의 `Scripts\python.exe`만 실행합니다. PC에 별도로 설치된 시스템 Python 3.12는 선택하거나 수정하지 않습니다.
 
 네이티브 UserAction DLL, 파일 경로 보안 모듈과 Event Bridge는 `Win32`, 런처는 `x64` Release 빌드입니다. 다른 한/글 주버전·비트 조합은 별도 검증 전까지 지원 대상으로 간주하지 않습니다.
 
@@ -230,7 +251,7 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 | 레지스트리 3 | `HKCU\Software\HNC\HwpAutomation\Modules`의 `FilePathCheckerModule` 값 |
 | 원본 백업 | `%LOCALAPPDATA%\GSG_HWP\backups\<시각-식별자>` |
 | 활성 설치 기록 | `%LOCALAPPDATA%\GSG_HWP\state\active-install.json` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.0\.venv` |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.1\.venv` |
 | 자동 업데이트 상태 | `%LOCALAPPDATA%\GSG_HWP\updater` |
 | 내려받은 버전 | `%LOCALAPPDATA%\GSG_HWP\packages\<버전>\gsg-hwp` |
 
