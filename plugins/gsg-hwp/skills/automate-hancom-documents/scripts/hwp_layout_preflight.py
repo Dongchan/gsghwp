@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from hwp_errors import HwpLiveError
 from hwp_live_contract import (
     ImageBlock,
     LayoutPlan,
@@ -13,13 +14,16 @@ from hwp_live_contract import (
     ParagraphBlock,
     TableBlock,
 )
+from hwp_live_native_action_models import IntegerValue, ParameterActionCommand
 from hwp_live_values import ContractModel
 from hwp_reference_layout_contract import ReferenceLayoutBlock
+from hwp_reference_layout_evidence import prepare_reference_layout
 from hwp_reference_layout_geometry import (
     HWPUNITS_PER_INCH,
     MILLIMETERS_PER_INCH,
     SectionPageGeometry,
 )
+from hwp_reference_layout_native import compile_reference_layout_command
 from hwp_reference_layout_patch import ReferenceLayoutPatchBlock
 
 
@@ -54,6 +58,7 @@ class _BlockEstimate:
     uncertain: bool
     reason_codes: tuple[str, ...]
     adjustable_items: tuple[str, ...]
+    definite: bool = False
 
 
 def _line_count(text: str, width_mm: float, font_size_pt: float) -> int:
@@ -155,6 +160,8 @@ def _block_estimate(
     | ReferenceLayoutPatchBlock,
     usable_width_mm: float,
     usable_height_mm: float,
+    page_geometry: SectionPageGeometry,
+    page_number: int,
 ) -> _BlockEstimate:
     if isinstance(block, ParagraphBlock):
         return _paragraph_estimate(block, usable_width_mm)
@@ -172,14 +179,40 @@ def _block_estimate(
         )
     if isinstance(block, ReferenceLayoutPatchBlock):
         return _BlockEstimate(0, 0, 0, False, (), ())
+    try:
+        command = compile_reference_layout_command(
+            prepare_reference_layout(block),
+            page_geometry,
+            page_number=page_number,
+            base_style_id=0,
+        )
+    except (HwpLiveError, OSError, ValueError):
+        return _BlockEstimate(
+            usable_width_mm,
+            usable_height_mm,
+            usable_height_mm,
+            False,
+            ("REFERENCE_LAYOUT_EXECUTION_REJECTED",),
+            ("adjust_reference_layout_geometry",),
+            definite=True,
+        )
+    width = _millimeters(_integer_setter(command, "BodyWidth"))
+    height = _millimeters(_integer_setter(command, "BodyHeight"))
     return _BlockEstimate(
-        usable_width_mm,
-        usable_height_mm,
-        usable_height_mm,
+        width,
+        height,
+        height,
         False,
         (),
         ("use_reference_layout_patch",),
     )
+
+
+def _integer_setter(command: ParameterActionCommand, path: str) -> int:
+    value = next(setter.value for setter in command.setters if setter.path == path)
+    if not isinstance(value, IntegerValue):
+        raise TypeError(f"{path} must be an integer native setter")
+    return value.value
 
 
 def _millimeters(value: int) -> float:
@@ -204,6 +237,7 @@ def preflight_layout(
     estimates: list[tuple[int, str, _BlockEstimate]] = []
     reason_codes: list[str] = []
     adjustable: list[str] = []
+    layout_page_number = page_number
 
     for index, block in enumerate(plan.blocks):
         if isinstance(block, PageBreakBlock):
@@ -211,11 +245,14 @@ def preflight_layout(
             maximum_minimum = max(maximum_minimum, page_minimum)
             page_estimated = 0.0
             page_minimum = 0.0
+            layout_page_number += 1
             continue
         estimate = _block_estimate(
             block,
             usable_width,
             usable_height,
+            page_geometry,
+            layout_page_number,
         )
         estimates.append((index, block.kind, estimate))
         page_estimated += estimate.height_mm
@@ -228,7 +265,9 @@ def preflight_layout(
     maximum_estimated = max(maximum_estimated, page_estimated)
     maximum_minimum = max(maximum_minimum, page_minimum)
     definite = (
-        maximum_minimum > usable_height + 0.1 or maximum_width > usable_width + 0.1
+        any(estimate.definite for _, _, estimate in estimates)
+        or maximum_minimum > usable_height + 0.1
+        or maximum_width > usable_width + 0.1
     )
     possible = uncertain or maximum_estimated > usable_height + 0.1
     overflow: LayoutOverflow = (

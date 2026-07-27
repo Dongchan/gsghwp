@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Final
+from typing import Annotated, Final, cast
 
 from PIL import ImageColor
+from pydantic import BeforeValidator
+from pydantic_core import PydanticCustomError
 
-from hwp_live_values import Rgb
+from hwp_live_values import Rgb, RgbObject
 
 
 _KOREAN_COLOR_NAMES: Final[Mapping[str, str]] = MappingProxyType(
@@ -63,6 +65,33 @@ def parse_rgb_color(value: str) -> Rgb | None:
     if len(parsed) != 3:
         return None
     return parsed[0], parsed[1], parsed[2]
+
+
+def _normalize_color_input(value: object) -> object:
+    if isinstance(value, str):
+        parsed = parse_rgb_color(value)
+        if parsed is None:
+            raise PydanticCustomError(
+                "color_input",
+                "색상은 이름, #RRGGBB, rgb(r,g,b), r,g,b, RGB 배열 또는 RGB 객체여야 합니다",
+            )
+        return parsed
+    if isinstance(value, RgbObject):
+        return value.r, value.g, value.b
+    if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
+        if set(mapping) == {"r", "g", "b"}:
+            return mapping["r"], mapping["g"], mapping["b"]
+    return cast(object, value)
+
+
+ColorInput = Annotated[
+    Rgb,
+    BeforeValidator(
+        _normalize_color_input,
+        json_schema_input_type=str | Rgb | RgbObject,
+    ),
+]
 
 
 def canonical_rgb_hex(color: Rgb) -> str:

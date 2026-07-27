@@ -59,8 +59,8 @@ def update_validated_table_batch(
         prepare_table_update(
             hwp,
             selector=candidate.selector,
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             window_handle=candidate.window_handle,
             requested_ref=item.table_ref,
             state_token=item.state_token,
@@ -75,8 +75,8 @@ def update_validated_table_batch(
     def mutate_tables() -> None:
         box.result = apply_native_table_update_batch(
             hwp,
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             window_handle=candidate.window_handle,
             prepared=prepared,
             guard=guard,
@@ -102,8 +102,8 @@ def insert_validated_table_image_batch(
         prepare_table_images(
             hwp,
             selector=candidate.selector,
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             window_handle=candidate.window_handle,
             requested_ref=item.table_ref,
             state_token=item.state_token,
@@ -118,8 +118,8 @@ def insert_validated_table_image_batch(
     def mutate_tables() -> None:
         box.result = apply_native_table_image_batch(
             hwp,
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             window_handle=candidate.window_handle,
             prepared=prepared,
             guard=guard,

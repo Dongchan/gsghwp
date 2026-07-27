@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from PIL import Image, ImageDraw
 
 
@@ -34,7 +36,17 @@ from hwp_reference_layout_patch import (  # noqa: E402
 from hwp_reference_layout_patch_builder import (  # noqa: E402
     build_reference_layout_patch,
 )
+from hwp_reference_layout_placement import PlacementFrame  # noqa: E402
 from hwp_reference_layout_refinement import compare_reference_render  # noqa: E402
+
+
+SAMPLE_FIXTURES = (
+    "reference_layout_vision_goals.json",
+    "reference_layout_namwon_strategy.json",
+    "reference_layout_three_theme_flow.json",
+    "reference_layout_carbon_org_chart.json",
+    "reference_layout_building_overview.json",
+)
 
 
 @dataclass(slots=True)
@@ -77,6 +89,42 @@ def _integer_array_sum(command: ParameterActionCommand, name: str) -> int:
         assert type(value) is int
         total += value
     return total
+
+
+@pytest.mark.parametrize("fixture_name", SAMPLE_FIXTURES)
+def test_sample_layout_uses_top_center_contain_frame(fixture_name: str) -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / fixture_name
+    block = ReferenceLayoutBlock.model_validate(
+        json.loads(fixture_path.read_text(encoding="utf-8"))
+    )
+    assert block.source_image is not None
+    page = _page()
+    area = page.usable_area(page_number=1)
+    expected = PlacementFrame.from_reference(
+        area,
+        block.source_image,
+        rows=len(block.row_breakpoints) - 1,
+        columns=len(block.column_breakpoints) - 1,
+        visible_edges=block.visible_edges,
+        styles=block.styles,
+        style_regions=block.style_regions,
+    )
+
+    command = compile_reference_layout_command(
+        block,
+        page,
+        page_number=1,
+        base_style_id=0,
+    )
+
+    assert _integer_setter(command, "BodyLeft") == expected.left
+    assert _integer_setter(command, "BodyTop") == expected.top
+    assert _integer_setter(command, "BodyWidth") == expected.width
+    assert _integer_setter(command, "BodyHeight") == expected.height
+    assert _integer_array_sum(command, "ColumnWidths") == expected.width
+    assert _integer_array_sum(command, "RowHeights") == expected.height
+    assert expected.width <= area.width
+    assert expected.height <= area.height
 
 
 def test_outer_edge_paint_stays_inside_reserved_body_area(

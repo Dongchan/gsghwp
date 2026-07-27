@@ -4,13 +4,13 @@ The runtime catalog is generated from the local official 2025-04 PDFs and packag
 
 `resources/hancom_official_api_catalog_v1.json`
 
-Use `hwp_search_official_api(query, category, limit)` to search it. Categories are `action`, `parameter_set`, and `automation`. Results include the exact source PDF and page.
+For an explicit official API lookup in production, use `hwp_search_tools(query="...", include_official_api=true, limit=5)`. The optional `official_api` response includes `action`, `parameter_set`, and `automation` matches, declarations where available, and the exact source PDF and page. The per-call path limits official results to five and each result to 4 KiB.
 
-Use `hwp_get_official_api_coverage` for a fast, mechanical split between native generic dispatch, exact ParameterSet mappings, unsupported value types, and catalog-only Automation members. It does not connect to HWP.
+Use `hwp_execute(tool_name="hwp_get_official_api_coverage", arguments={})` for a fast, mechanical split between native generic dispatch, exact ParameterSet mappings, unsupported value types, and catalog-only Automation members. These gateway calls are stateless and do not connect to HWP. In the QA profile the two underlying tools are also directly callable.
 
 Coverage is static catalog/protocol coverage. It does not prove that every Action exists in the installed HWP version or can execute in the current cursor, selection, control, or document state.
 
-The catalog keeps all 1,452 official cases searchable. Runtime batch execution routes 1,448 cases and intentionally excludes `action:0608:SaveHistoryItem`, `automation:0067:IHwpObject.ExportStyle`, `automation:0068:IHwpObject.ImportStyle`, and `automation:0365:IDHwpParameterArray.Clone`.
+The catalog keeps all 1,452 official cases searchable. Runtime batch execution routes 1,448 cases and intentionally excludes `action:0067:CharShapeTextColorGreen`, `action:0068:CharShapeTextColorRed`, `action:0365:MakeIndex`, and `action:0608:SaveHistoryItem`.
 
 Use `hwp_get_capabilities` separately to learn what the current plugin exposes and whether each tool is C++/ATL-required, native-preferred, COM, ROT, or hybrid. Catalog presence does not mean a public mutation tool exists.
 

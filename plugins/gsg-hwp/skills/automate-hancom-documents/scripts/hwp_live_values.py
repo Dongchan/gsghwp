@@ -12,3 +12,9 @@ class ContractModel(BaseModel):
 Alignment = Literal["inherit", "left", "center", "right", "justify"]
 RgbChannel = Annotated[int, Field(ge=0, le=255)]
 Rgb = tuple[RgbChannel, RgbChannel, RgbChannel]
+
+
+class RgbObject(ContractModel):
+    r: RgbChannel
+    g: RgbChannel
+    b: RgbChannel

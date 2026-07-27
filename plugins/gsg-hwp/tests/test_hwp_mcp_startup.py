@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sys
+from io import StringIO
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
@@ -21,7 +23,7 @@ import hwp_live_rot  # noqa: E402
 from hwp_live_session import LiveHwpController  # noqa: E402
 import hwp_mcp  # noqa: E402
 from hwp_mcp import build_server  # noqa: E402
-from hwp_mcp_forward import HwpExecuteArguments  # noqa: E402
+from hwp_mcp_forward import ForwardingFastMCP, HwpExecuteArguments  # noqa: E402
 from hwp_mcp_registry import tool_names, tool_spec  # noqa: E402
 from hwp_runtime_identity import RuntimeStatus  # noqa: E402
 
@@ -36,7 +38,6 @@ class _CompatibilityManifest(BaseModel):
 class _McpServerConfiguration(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(extra="ignore", frozen=True)
 
-    command: str
     args: tuple[str, ...]
 
 
@@ -89,8 +90,12 @@ def test_registered_descriptions_come_from_the_authoritative_catalog() -> None:
 def test_main_defers_wrapper_and_operation_registry_loading() -> None:
     server = MagicMock()
     with (
+        patch.object(
+            hwp_mcp,
+            "startup_codex_skill_registration_record",
+            return_value="skill-registration",
+        ),
         patch.object(hwp_mcp, "startup_runtime_record", return_value="runtime"),
-        patch.object(hwp_mcp, "ensure_codex_skill_registered"),
         patch.object(hwp_mcp, "ensure_native_bridge_registered"),
         patch.object(hwp_mcp, "build_server", return_value=server),
         patch.object(hwp_mcp, "configured_mcp_profile", return_value="production"),
@@ -104,25 +109,53 @@ def test_main_defers_wrapper_and_operation_registry_loading() -> None:
     server.run.assert_called_once_with(transport="stdio")
 
 
+def test_main_starts_without_a_legacy_junction_or_writable_skill_home(
+    tmp_path: Path,
+) -> None:
+    # Given
+    server = MagicMock()
+    stderr = StringIO()
+    codex_home = tmp_path / "read-only-codex-home"
+    _ = codex_home.write_text("not a directory\n", encoding="utf-8")
+
+    # When
+    with (
+        patch.dict("os.environ", {"CODEX_HOME": str(codex_home)}),
+        patch.object(hwp_mcp, "stderr", stderr),
+        patch.object(hwp_mcp, "startup_runtime_record", return_value="runtime"),
+        patch.object(hwp_mcp, "ensure_native_bridge_registered"),
+        patch.object(hwp_mcp, "build_server", return_value=server),
+        patch.object(hwp_mcp, "configured_mcp_profile", return_value="production"),
+    ):
+        hwp_mcp.main()
+
+    # Then
+    registration_record, runtime_record = stderr.getvalue().splitlines()
+    registration = json.loads(registration_record)
+    assert registration["event"] == "hwp_codex_skill_registration"
+    assert registration["owner"] == "plugin_manifest"
+    assert registration["legacy_state"] == "absent"
+    assert runtime_record == "runtime"
+    assert codex_home.read_text(encoding="utf-8") == "not a directory\n"
+    server.run.assert_called_once_with(transport="stdio")
+
+
 def test_production_catalog_keeps_stable_forward_gateway() -> None:
     assert "hwp_execute" in tool_names("production")
 
 
-def test_mcp_configuration_uses_portable_update_launcher() -> None:
+def test_mcp_configuration_uses_runtime_preflight_proxy() -> None:
     configuration = _McpConfiguration.model_validate_json(
         (SCRIPTS.parents[2] / ".mcp.json").read_text(encoding="utf-8")
     )
-    server = configuration.mcpServers["gsg-hwp"]
+    server = configuration.mcpServers["gsg-hwp-beta-live"]
 
-    assert server.command == "powershell.exe"
     assert server.args == (
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        "./scripts/start-mcp.ps1",
+        "./.venv/Scripts/python.exe",
+        "-X",
+        "utf8",
+        "-B",
+        "./skills/automate-hancom-documents/scripts/hwp_runtime_preflight.py",
     )
 
 
@@ -137,7 +170,9 @@ def test_runtime_identity_tool_is_public_and_forwardable() -> None:
         )
         forwarded = await server.call_unconverted_tool(
             "hwp_execute",
-            HwpExecuteArguments({"tool_name": "hwp_runtime_info", "arguments": {}}),
+            HwpExecuteArguments(
+                {"tool_name": "hwp_runtime_info", "arguments": {}}
+            ),
         )
         return (
             RuntimeStatus.model_validate(direct),
@@ -185,6 +220,67 @@ def test_stable_forward_gateway_serializes_newer_tool_result() -> None:
         )
 
     anyio.run(forward_search)
+
+
+def test_document_selector_is_a_public_compatible_alias() -> None:
+    server = ForwardingFastMCP("document-selector-alias")
+
+    async def target(*, document_path: str | None = None) -> dict[str, str | None]:
+        return {"document_path": document_path}
+
+    server.add_tool(target, name="target")
+
+    async def invoke() -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
+        listed = {tool.name: tool for tool in await server.list_tools()}
+        schema = listed["target"].inputSchema
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            raise AssertionError("tool properties schema is not an object")
+        assert {"document_path", "document_selector"} <= properties.keys()
+        direct = await server.call_unconverted_tool(
+            "target",
+            HwpExecuteArguments({"document_selector": "document_id:7"}),
+        )
+        legacy = await server.call_unconverted_tool(
+            "target",
+            HwpExecuteArguments({"document_path": "C:/docs/report.hwp"}),
+        )
+        if not isinstance(direct, dict) or not isinstance(legacy, dict):
+            raise AssertionError("alias target result is not an object")
+        return direct, legacy
+
+    direct, legacy = anyio.run(invoke)
+
+    assert direct == {"document_path": "document_id:7"}
+    assert legacy == {"document_path": "C:/docs/report.hwp"}
+
+
+def test_document_selector_alias_rejects_conflicting_values() -> None:
+    server = ForwardingFastMCP("document-selector-conflict")
+
+    async def target(*, document_path: str | None = None) -> str | None:
+        return document_path
+
+    server.add_tool(target, name="target")
+
+    async def invoke() -> None:
+        _ = await server.call_unconverted_tool(
+            "target",
+            HwpExecuteArguments(
+                {
+                    "document_path": "C:/one/report.hwp",
+                    "document_selector": "D:/two/report.hwp",
+                }
+            ),
+        )
+
+    try:
+        anyio.run(invoke)
+    except Exception as error:
+        assert "document_path" in str(error)
+        assert "document_selector" in str(error)
+    else:
+        raise AssertionError("conflicting document aliases must be rejected")
 
 
 def test_compatibility_manifest_matches_fresh_production_catalog() -> None:

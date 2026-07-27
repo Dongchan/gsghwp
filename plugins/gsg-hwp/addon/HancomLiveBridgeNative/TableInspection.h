@@ -29,7 +29,8 @@ bool InspectTableCells(
     IDispatch* hwp,
     const std::wstring& tableInstanceId,
     std::vector<TableCellRecord>* cells,
-    std::wstring* error) noexcept;
+    std::wstring* error,
+    std::wstring* errorCode = nullptr) noexcept;
 
 bool InspectTableTopology(
     IDispatch* hwp,

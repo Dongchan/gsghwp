@@ -6,6 +6,7 @@ from hwp_live_session_structure_batch import (
 )
 from hwp_live_session_structure_inspection import (
     connected_document as connected_document,
+    inspect_candidate_context as inspect_candidate_context,
     inspect_candidate_state as inspect_candidate_state,
     inspect_candidate_structure as inspect_candidate_structure,
 )

@@ -135,7 +135,7 @@ def test_connection_transport_error_is_unchanged_and_retry_safe() -> None:
     assert public_result.retry_safe is True
 
 
-def test_dispatcher_serializes_operations_before_the_sta_bridge() -> None:
+def test_dispatcher_allows_process_lanes_to_run_concurrently() -> None:
     dispatcher = McpThreadDispatcher(watch_workers=1)
     state_lock = Lock()
     active = 0
@@ -160,4 +160,4 @@ def test_dispatcher_serializes_operations_before_the_sta_bridge() -> None:
 
     anyio.run(run_operations)
 
-    assert maximum_active == 1
+    assert maximum_active > 1

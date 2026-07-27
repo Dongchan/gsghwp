@@ -92,10 +92,11 @@ def test_text_color_names_normalize_to_one_rgb(
 def test_public_text_color_is_canonicalized_before_execution() -> None:
     # Given: a Korean color name at the public MCP boundary.
     # When: the public formatting model parses it.
-    formatting = PublicTextFormattingInput(text_color="빨간색")
+    formatting = PublicTextFormattingInput.model_validate({"text_color": "빨간색"})
 
-    # Then: downstream code receives one canonical representation.
-    assert formatting.text_color == "#FF0000"
+    # Then: downstream code receives one canonical RGB representation.
+    assert formatting.text_color == (255, 0, 0)
+    assert formatting.to_parameters()["text_color"] == "#FF0000"
 
 
 def test_text_color_verification_rejects_a_false_success() -> None:

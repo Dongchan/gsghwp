@@ -110,22 +110,53 @@ public:
             bridge_status::NoteRevoke(status);
             return status;
         }
-        for (auto& publication : documentPublications_) {
-            RevokeCookie(table, publication.batchRegistrationCookie);
-            RevokeCookie(table, publication.registrationCookie);
+        HRESULT result = S_OK;
+        for (auto publication = documentPublications_.begin();
+             publication != documentPublications_.end();) {
+            const HRESULT revokeStatus = RevokePair(
+                table,
+                publication->registrationCookie,
+                publication->batchRegistrationCookie,
+                publication->batch);
+            if (SUCCEEDED(result) && FAILED(revokeStatus)) {
+                result = revokeStatus;
+            }
+            if (publication->registrationCookie == 0 &&
+                publication->batchRegistrationCookie == 0) {
+                publication = documentPublications_.erase(publication);
+            } else {
+                ++publication;
+            }
         }
-        documentPublications_.clear();
-        for (auto& publication : windowPublications_) {
-            RevokeCookie(table, publication.batchRegistrationCookie);
-            RevokeCookie(table, publication.registrationCookie);
+        for (auto publication = windowPublications_.begin();
+             publication != windowPublications_.end();) {
+            const HRESULT revokeStatus = RevokePair(
+                table,
+                publication->registrationCookie,
+                publication->batchRegistrationCookie,
+                publication->batch);
+            if (SUCCEEDED(result) && FAILED(revokeStatus)) {
+                result = revokeStatus;
+            }
+            if (publication->registrationCookie == 0 &&
+                publication->batchRegistrationCookie == 0) {
+                publication = windowPublications_.erase(publication);
+            } else {
+                ++publication;
+            }
         }
-        windowPublications_.clear();
-        RevokeCookie(table, batchRegistrationCookie_);
-        RevokeCookie(table, registrationCookie_);
+        const HRESULT revokeStatus = RevokePair(
+            table,
+            registrationCookie_,
+            batchRegistrationCookie_,
+            batch_);
+        if (SUCCEEDED(result) && FAILED(revokeStatus)) {
+            result = revokeStatus;
+        }
         table->Release();
-        lastResult_ = S_OK;
-        bridge_status::NoteRevoke(S_OK);
-        return S_OK;
+        lastResult_ = result;
+        bridge_status::NoteRevoke(result);
+        return result;
     }
 
 private:
@@ -133,6 +164,7 @@ private:
         HWND windowHandle = nullptr;
         DWORD registrationCookie = 0;
         DWORD batchRegistrationCookie = 0;
+        BatchAutomation* batch = nullptr;
     };
 
     struct DocumentPublication {
@@ -140,6 +172,7 @@ private:
         LONG documentId = 0;
         DWORD registrationCookie = 0;
         DWORD batchRegistrationCookie = 0;
+        BatchAutomation* batch = nullptr;
     };
 
     static bool IsRecognizedAction(LPCSTR const action) noexcept {
@@ -181,52 +214,102 @@ private:
         const HRESULT windowStatus = ReadWindowHandle(object, &windowHandle);
         LONG documentId = 0;
         const HRESULT documentStatus = ReadDocumentId(object, &documentId);
+        const bool publishWindow =
+            SUCCEEDED(windowStatus) && windowHandle != nullptr;
+        const bool publishDocument =
+            publishWindow && SUCCEEDED(documentStatus) && documentId > 0;
+        if (publishWindow) {
+            result = ReservePublicationSlot(windowPublications_);
+        }
+        if (SUCCEEDED(result) && publishDocument) {
+            result = ReservePublicationSlot(documentPublications_);
+        }
+        if (FAILED(result)) {
+            table->Release();
+            return FinishPublish(result);
+        }
 
-        RevokeCookie(table, batchRegistrationCookie_);
-        RevokeCookie(table, registrationCookie_);
+        result = RevokePair(
+            table,
+            registrationCookie_,
+            batchRegistrationCookie_,
+            batch_);
+        if (FAILED(result)) {
+            table->Release();
+            return FinishPublish(result);
+        }
         result = RegisterPair(
             table,
             object,
             nullptr,
             0,
             &registrationCookie_,
-            &batchRegistrationCookie_);
+            &batchRegistrationCookie_,
+            &batch_);
         if (FAILED(result)) {
             table->Release();
             return FinishPublish(result);
         }
 
-        if (SUCCEEDED(windowStatus) && windowHandle != nullptr) {
-            RemoveWindowPublication(table, windowHandle);
-            WindowPublication publication{};
-            publication.windowHandle = windowHandle;
-            result = RegisterPair(
-                table,
-                object,
-                windowHandle,
-                0,
-                &publication.registrationCookie,
-                &publication.batchRegistrationCookie);
+        if (publishWindow) {
+            result = RemoveWindowPublication(table, windowHandle);
             if (SUCCEEDED(result)) {
-                windowPublications_.push_back(publication);
+                try {
+                    windowPublications_.emplace_back();
+                } catch (...) {
+                    result = E_OUTOFMEMORY;
+                }
+            }
+            if (SUCCEEDED(result)) {
+                WindowPublication& publication = windowPublications_.back();
+                publication.windowHandle = windowHandle;
+                result = RegisterPair(
+                    table,
+                    object,
+                    windowHandle,
+                    0,
+                    &publication.registrationCookie,
+                    &publication.batchRegistrationCookie,
+                    &publication.batch);
+                if (FAILED(result) &&
+                    publication.registrationCookie == 0 &&
+                    publication.batchRegistrationCookie == 0) {
+                    ReleaseBatch(publication.batch);
+                    windowPublications_.pop_back();
+                }
             }
         }
-        if (SUCCEEDED(result) && SUCCEEDED(windowStatus) &&
-            SUCCEEDED(documentStatus) && windowHandle != nullptr &&
-            documentId > 0) {
-            RemoveDocumentPublication(table, windowHandle, documentId);
-            DocumentPublication publication{};
-            publication.windowHandle = windowHandle;
-            publication.documentId = documentId;
-            result = RegisterPair(
+        if (SUCCEEDED(result) && publishDocument) {
+            result = RemoveDocumentPublication(
                 table,
-                object,
                 windowHandle,
-                documentId,
-                &publication.registrationCookie,
-                &publication.batchRegistrationCookie);
+                documentId);
             if (SUCCEEDED(result)) {
-                documentPublications_.push_back(publication);
+                try {
+                    documentPublications_.emplace_back();
+                } catch (...) {
+                    result = E_OUTOFMEMORY;
+                }
+            }
+            if (SUCCEEDED(result)) {
+                DocumentPublication& publication =
+                    documentPublications_.back();
+                publication.windowHandle = windowHandle;
+                publication.documentId = documentId;
+                result = RegisterPair(
+                    table,
+                    object,
+                    windowHandle,
+                    documentId,
+                    &publication.registrationCookie,
+                    &publication.batchRegistrationCookie,
+                    &publication.batch);
+                if (FAILED(result) &&
+                    publication.registrationCookie == 0 &&
+                    publication.batchRegistrationCookie == 0) {
+                    ReleaseBatch(publication.batch);
+                    documentPublications_.pop_back();
+                }
             }
         }
 
@@ -260,7 +343,7 @@ private:
             });
     }
 
-    void RemoveWindowPublication(
+    HRESULT RemoveWindowPublication(
         IRunningObjectTable* const table,
         const HWND windowHandle) noexcept {
         const auto found = std::find_if(
@@ -270,14 +353,21 @@ private:
                 return publication.windowHandle == windowHandle;
             });
         if (found == windowPublications_.end()) {
-            return;
+            return S_OK;
         }
-        RevokeCookie(table, found->batchRegistrationCookie);
-        RevokeCookie(table, found->registrationCookie);
-        windowPublications_.erase(found);
+        const HRESULT result = RevokePair(
+            table,
+            found->registrationCookie,
+            found->batchRegistrationCookie,
+            found->batch);
+        if (found->registrationCookie == 0 &&
+            found->batchRegistrationCookie == 0) {
+            windowPublications_.erase(found);
+        }
+        return result;
     }
 
-    void RemoveDocumentPublication(
+    HRESULT RemoveDocumentPublication(
         IRunningObjectTable* const table,
         const HWND windowHandle,
         const LONG documentId) noexcept {
@@ -289,11 +379,18 @@ private:
                     publication.documentId == documentId;
             });
         if (found == documentPublications_.end()) {
-            return;
+            return S_OK;
         }
-        RevokeCookie(table, found->batchRegistrationCookie);
-        RevokeCookie(table, found->registrationCookie);
-        documentPublications_.erase(found);
+        const HRESULT result = RevokePair(
+            table,
+            found->registrationCookie,
+            found->batchRegistrationCookie,
+            found->batch);
+        if (found->registrationCookie == 0 &&
+            found->batchRegistrationCookie == 0) {
+            documentPublications_.erase(found);
+        }
+        return result;
     }
 
     static HRESULT ReadWindowHandle(
@@ -399,14 +496,17 @@ private:
         const HWND windowHandle,
         const LONG documentId,
         DWORD* const registrationCookie,
-        DWORD* const batchRegistrationCookie) noexcept {
+        DWORD* const batchRegistrationCookie,
+        BatchAutomation** const batchOwner) noexcept {
         *registrationCookie = 0;
         *batchRegistrationCookie = 0;
+        *batchOwner = nullptr;
         HRESULT result = RegisterObject(
             table,
             kMonikerPrefix,
             windowHandle,
             documentId,
+            0,
             object,
             registrationCookie);
         if (FAILED(result)) {
@@ -415,30 +515,79 @@ private:
         BatchAutomation* const batch =
             new (std::nothrow) BatchAutomation(object, documentId);
         if (batch == nullptr) {
-            RevokeCookie(table, *registrationCookie);
-            return E_OUTOFMEMORY;
+            const HRESULT revokeStatus =
+                RevokeCookie(table, *registrationCookie);
+            return FAILED(revokeStatus) ? revokeStatus : E_OUTOFMEMORY;
         }
         result = RegisterObject(
             table,
             kBatchMonikerPrefix,
             windowHandle,
             documentId,
+            ROTFLAGS_REGISTRATIONKEEPSALIVE,
             batch,
             batchRegistrationCookie);
-        static_cast<void>(batch->Release());
         if (FAILED(result)) {
-            RevokeCookie(table, *registrationCookie);
+            static_cast<void>(batch->Release());
+            const HRESULT revokeStatus =
+                RevokeCookie(table, *registrationCookie);
+            return FAILED(revokeStatus) ? revokeStatus : result;
+        }
+        *batchOwner = batch;
+        return result;
+    }
+
+    static void ReleaseBatch(BatchAutomation*& batch) noexcept {
+        if (batch != nullptr) {
+            static_cast<void>(batch->Release());
+            batch = nullptr;
+        }
+    }
+
+    template <typename Publication>
+    static HRESULT ReservePublicationSlot(
+        std::vector<Publication>& publications) noexcept {
+        if (publications.size() < publications.capacity()) {
+            return S_OK;
+        }
+        if (publications.size() == publications.max_size()) {
+            return E_OUTOFMEMORY;
+        }
+        try {
+            publications.reserve(publications.size() + 1);
+        } catch (...) {
+            return E_OUTOFMEMORY;
+        }
+        return S_OK;
+    }
+
+    static HRESULT RevokePair(
+        IRunningObjectTable* const table,
+        DWORD& registrationCookie,
+        DWORD& batchRegistrationCookie,
+        BatchAutomation*& batch) noexcept {
+        HRESULT result = RevokeCookie(table, batchRegistrationCookie);
+        const HRESULT rawStatus = RevokeCookie(table, registrationCookie);
+        if (SUCCEEDED(result) && FAILED(rawStatus)) {
+            result = rawStatus;
+        }
+        if (registrationCookie == 0 && batchRegistrationCookie == 0) {
+            ReleaseBatch(batch);
         }
         return result;
     }
 
-    static void RevokeCookie(
+    static HRESULT RevokeCookie(
         IRunningObjectTable* const table,
         DWORD& cookie) noexcept {
-        if (cookie != 0) {
-            static_cast<void>(table->Revoke(cookie));
+        if (cookie == 0) {
+            return S_OK;
+        }
+        const HRESULT status = table->Revoke(cookie);
+        if (SUCCEEDED(status)) {
             cookie = 0;
         }
+        return status;
     }
 
     static HRESULT RegisterObject(
@@ -446,6 +595,7 @@ private:
         const wchar_t* const prefix,
         const HWND windowHandle,
         const LONG documentId,
+        const DWORD flags,
         IUnknown* const object,
         DWORD* const cookie) noexcept {
         wchar_t itemName[64] = {};
@@ -478,7 +628,7 @@ private:
         HRESULT status = CreateItemMoniker(kMonikerDelimiter, itemName, &moniker);
         if (SUCCEEDED(status)) {
             status = table->Register(
-                ROTFLAGS_REGISTRATIONKEEPSALIVE,
+                flags,
                 object,
                 moniker,
                 cookie);
@@ -489,6 +639,7 @@ private:
 
     DWORD registrationCookie_ = 0;
     DWORD batchRegistrationCookie_ = 0;
+    BatchAutomation* batch_ = nullptr;
     std::vector<WindowPublication> windowPublications_;
     std::vector<DocumentPublication> documentPublications_;
     HRESULT lastResult_ = E_UNEXPECTED;

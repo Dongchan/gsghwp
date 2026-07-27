@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -28,6 +29,15 @@ from hwp_reference_layout_contract import (  # noqa: E402
     VisibleEdge,
 )
 from hwp_reference_layout_geometry import SectionPageGeometry  # noqa: E402
+
+
+REFERENCE_LAYOUT_FIXTURES = (
+    "reference_layout_vision_goals.json",
+    "reference_layout_namwon_strategy.json",
+    "reference_layout_three_theme_flow.json",
+    "reference_layout_carbon_org_chart.json",
+    "reference_layout_building_overview.json",
+)
 
 
 def _benchmark_layout(rows: int = 24, columns: int = 5) -> ReferenceLayoutBlock:
@@ -98,7 +108,7 @@ def test_reference_layout_compiles_to_one_high_level_native_command() -> None:
     request = build_native_layout_request(
         NativeLayoutContext(
             document_id=1,
-            full_name=r"C:\GSG_HWP_QA\sample.hwp",
+            full_name=r"D:\samples\reference.hwp",
             style_ids=(),
             page_geometry=_page(),
         ),
@@ -106,11 +116,7 @@ def test_reference_layout_compiles_to_one_high_level_native_command() -> None:
         {},
     )
 
-    bulk = [
-        command
-        for command in request.commands
-        if isinstance(command, ParameterActionCommand)
-    ]
+    bulk = [command for command in request.commands if isinstance(command, ParameterActionCommand)]
 
     assert len(request.commands) == 1
     assert len(bulk) == 1
@@ -126,14 +132,13 @@ def test_reference_layout_compiles_to_one_high_level_native_command() -> None:
     assert all(array.count > 0 for array in bulk[0].arrays)
     array_sizes = {array.name: array.count for array in bulk[0].arrays}
     assert all(
-        0 <= item.index < array_sizes[item.name] for item in bulk[0].array_values
+        0 <= item.index < array_sizes[item.name]
+        for item in bulk[0].array_values
     )
     assert any(item.index == 0 for item in bulk[0].array_values)
 
 
-def test_reference_layout_after_last_page_does_not_delete_a_guessed_trailing_page() -> (
-    None
-):
+def test_reference_layout_after_last_page_does_not_delete_a_guessed_trailing_page() -> None:
     layout = _benchmark_layout()
     request = build_native_layout_request(
         NativeLayoutContext(
@@ -158,14 +163,11 @@ def test_reference_layout_after_last_page_does_not_delete_a_guessed_trailing_pag
     last = request.commands[-1]
     assert isinstance(last, ParameterActionCommand)
     assert last.action == "ReferenceLayoutBulk"
-    assert (
-        sum(
-            isinstance(command, ParameterActionCommand)
-            and command.action == "ReferenceLayoutBulk"
-            for command in request.commands
-        )
-        == 1
-    )
+    assert sum(
+        isinstance(command, ParameterActionCommand)
+        and command.action == "ReferenceLayoutBulk"
+        for command in request.commands
+    ) == 1
 
 
 def test_reference_layout_pages_use_each_facing_page_gutter() -> None:
@@ -209,7 +211,9 @@ def test_reference_layout_pages_use_each_facing_page_gutter() -> None:
     lefts: list[int] = []
     for command in bulk:
         value = next(
-            setter.value for setter in command.setters if setter.path == "BodyLeft"
+            setter.value
+            for setter in command.setters
+            if setter.path == "BodyLeft"
         )
         assert isinstance(value, IntegerValue)
         lefts.append(value.value)
@@ -262,3 +266,67 @@ def test_bulk_payload_scales_with_components_not_physical_cells() -> None:
 
     assert len(command.array_values) < physical_cells * 4
     assert len(command.array_values) < component_count * 8
+
+
+def test_building_overview_fixture_stays_component_compressed() -> None:
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "reference_layout_building_overview.json"
+    )
+    layout = ReferenceLayoutBlock.model_validate(
+        json.loads(fixture.read_text(encoding="utf-8"))
+    )
+
+    request = build_native_layout_request(
+        NativeLayoutContext(
+            document_id=1,
+            full_name="test.hwp",
+            style_ids=(),
+            page_geometry=_page(),
+        ),
+        LayoutPlan(blocks=(layout,)),
+        {},
+    )
+
+    assert len(request.commands) == 1
+    assert len(layout.row_breakpoints) - 1 == 31
+    assert len(layout.column_breakpoints) - 1 == 6
+    assert len(layout.merges) == 47
+    assert len(layout.text_anchors) == 89
+    assert "rows" not in layout.model_dump()
+
+
+def test_all_reference_layout_fixtures_compile_to_one_bulk_command() -> None:
+    fixture_root = Path(__file__).parent / "fixtures"
+    for fixture_name in REFERENCE_LAYOUT_FIXTURES:
+        layout = ReferenceLayoutBlock.model_validate(
+            json.loads((fixture_root / fixture_name).read_text(encoding="utf-8"))
+        )
+        request = build_native_layout_request(
+            NativeLayoutContext(
+                document_id=1,
+                full_name="test.hwp",
+                style_ids=(),
+                page_geometry=_page(),
+            ),
+            LayoutPlan(blocks=(layout,)),
+            {},
+        )
+        command = request.commands[0]
+        rows = len(layout.row_breakpoints) - 1
+        columns = len(layout.column_breakpoints) - 1
+        component_count = (
+            len(layout.row_breakpoints)
+            + len(layout.column_breakpoints)
+            + len(layout.merges)
+            + len(layout.visible_edges)
+            + len(layout.style_regions)
+            + len(layout.text_anchors)
+        )
+
+        assert len(request.commands) == 1
+        assert isinstance(command, ParameterActionCommand)
+        assert command.action == "ReferenceLayoutBulk"
+        assert component_count < rows * columns * 4
+        assert "rows" not in layout.model_dump()

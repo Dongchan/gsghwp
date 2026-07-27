@@ -72,7 +72,9 @@ def resolve_workflow_table(
             and expected in normalize_table_text(item[1].caption.text)
         )
     if target is not None and target.header_signature:
-        headers = tuple(normalize_table_text(value) for value in target.header_signature)
+        headers = tuple(
+            normalize_table_text(value) for value in target.header_signature
+        )
         filtered = tuple(
             item
             for item in filtered
@@ -84,6 +86,8 @@ def resolve_workflow_table(
     if len(filtered) == 1:
         table_index, table = filtered[0]
         return ResolvedWorkflowTable(table, table_index, ())
+    if not filtered and target is not None and target.control_instance_id is not None:
+        return ResolvedWorkflowTable(None, None, ())
     source = filtered if filtered else indexed
     return ResolvedWorkflowTable(
         None,

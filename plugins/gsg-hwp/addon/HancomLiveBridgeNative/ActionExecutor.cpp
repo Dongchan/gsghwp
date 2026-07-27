@@ -1,38 +1,35 @@
 #include "ActionExecutor.h"
+#include "ActionExecutorInternal.h"
 
-#include "DispatchInvoke.h"
 #include "OfficialApiParameterArray.h"
 #include "OfficialApiState.h"
-#include "ParagraphFormatting.h"
-#include "ReferenceLayoutCommands.h"
-#include "ReferenceLayoutExecutor.h"
-#include "TableInspection.h"
-
-#include <WinCrypt.h>
-#include <atlbase.h>
-#include <atlcomcli.h>
-#include <wincodec.h>
+#include "ProtocolEncoding.h"
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
-#include <cstring>
-#include <cwctype>
 #include <filesystem>
-#include <limits>
 #include <map>
 #include <memory>
-#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
-#pragma comment(lib, "windowscodecs.lib")
-
 namespace hancom::actions {
-namespace {
+namespace detail {
 
+using hancom::com::FormatHResult;
+using hancom::com_state::CaptureSelection;
+using hancom::com_state::Position;
+using hancom::com_state::SamePosition;
+using hancom::com_state::SameSelection;
+using hancom::com_state::Selection;
+using hancom::com_state::SelectionCaptureFailure;
+using hancom::com_state::SelectionCapturePolicy;
+using hancom::com_state::SelectionCaptureStage;
+using hancom::com_state::kSelectionModeMask;
+using hancom::com_state::kSelectionNone;
+using hancom::com_state::kSelectionText;
 using hancom::dispatch::AsBool;
 using hancom::dispatch::AsDispatch;
 using hancom::dispatch::AsLong;
@@ -40,41 +37,7 @@ using hancom::dispatch::AsString;
 using hancom::dispatch::Method;
 using hancom::dispatch::PropertyGet;
 using hancom::dispatch::PropertyPut;
-
-struct Position {
-    LONG list = 0;
-    LONG paragraph = 0;
-    LONG character = 0;
-};
-
-struct Selection {
-    bool selected = false;
-    LONG mode = 0;
-    Position start;
-    Position end;
-};
-
-constexpr LONG kSelectionModeMask = 0x0F;
-constexpr LONG kSelectionNone = 0;
-constexpr LONG kSelectionText = 1;
-
-struct Context {
-    CComPtr<IDispatch> hwp;
-    CComPtr<IDispatch> action;
-    CComPtr<IDispatch> table;
-    std::wstring tableId;
-    std::wstring currentCell;
-    hancom::inspection::CellTopology topology;
-    hancom::formatting::ParagraphFormat copiedTableAnchorFormat;
-    bool hasCopiedTableAnchorFormat = false;
-    std::wstring copiedTableBlock;
-    bool hasCopiedTableBlock = false;
-    const Request* request = nullptr;
-    ExecutionResult* result = nullptr;
-};
-
-constexpr std::uintmax_t kMaximumBlockFileBytes = 256ULL * 1024ULL * 1024ULL;
-constexpr char kEncodedBlockMagic[] = "GSG_HWP_ENCODED_BLOCK_V1\n";
+using hancom::encoding::EncodeUtf8Base64;
 
 bool SetError(
     ExecutionResult* const result,
@@ -85,13 +48,6 @@ bool SetError(
     result->error.location = std::move(location);
     result->error.message = std::move(message);
     return false;
-}
-
-std::wstring HResultText(const wchar_t* const operation, const HRESULT status) {
-    std::wostringstream text;
-    text << operation << L" failed (HRESULT 0x" << std::hex
-         << static_cast<unsigned long>(status) << L')';
-    return text.str();
 }
 
 class MessageBoxModeScope final {
@@ -112,7 +68,7 @@ public:
                 result,
                 L"MESSAGE_BOX_MODE",
                 L"SetMessageBoxMode",
-                HResultText(L"enable automatic yes", status));
+                FormatHResult(L"enable automatic yes", status));
         }
         hwp_ = hwp;
         previousMode_ = previousMode;
@@ -124,7 +80,6 @@ public:
         if (!active_) {
             return true;
         }
-        active_ = false;
         CComVariant ignored;
         const HRESULT status = Method(
             hwp_,
@@ -136,8 +91,9 @@ public:
                 result,
                 L"MESSAGE_BOX_MODE",
                 L"SetMessageBoxMode",
-                HResultText(L"restore message box mode", status));
+                FormatHResult(L"restore message box mode", status));
         }
+        active_ = false;
         return true;
     }
 
@@ -169,76 +125,6 @@ CComVariant BooleanVariant(const bool value) {
     return result;
 }
 
-bool ReadImagePixelSize(
-    const std::wstring& path,
-    UINT* const width,
-    UINT* const height,
-    ExecutionResult* const result) {
-    CComPtr<IWICImagingFactory> factory;
-    HRESULT status = factory.CoCreateInstance(CLSID_WICImagingFactory);
-    CComPtr<IWICBitmapDecoder> decoder;
-    if (SUCCEEDED(status)) {
-        status = factory->CreateDecoderFromFilename(
-            path.c_str(),
-            nullptr,
-            GENERIC_READ,
-            WICDecodeMetadataCacheOnDemand,
-            &decoder);
-    }
-    CComPtr<IWICBitmapFrameDecode> frame;
-    if (SUCCEEDED(status)) {
-        status = decoder->GetFrame(0, &frame);
-    }
-    if (SUCCEEDED(status)) {
-        status = frame->GetSize(width, height);
-    }
-    if (FAILED(status)) {
-        return SetError(result, L"IMAGE_SIZE", path, HResultText(L"read image size", status));
-    }
-    if (*width == 0 || *height == 0) {
-        return SetError(result, L"IMAGE_SIZE", path, L"image has a zero pixel dimension");
-    }
-
-    CComPtr<IWICMetadataQueryReader> metadata;
-    PROPVARIANT orientation;
-    PropVariantInit(&orientation);
-    unsigned long value = 1;
-    if (SUCCEEDED(frame->GetMetadataQueryReader(&metadata)) &&
-        SUCCEEDED(metadata->GetMetadataByName(L"/app1/ifd/{ushort=274}", &orientation))) {
-        if (orientation.vt == VT_UI2) {
-            value = orientation.uiVal;
-        } else if (orientation.vt == VT_UI4) {
-            value = orientation.ulVal;
-        }
-    }
-    PropVariantClear(&orientation);
-    if (value >= 5 && value <= 8) {
-        std::swap(*width, *height);
-    }
-    return true;
-}
-
-bool FitImageInBox(
-    const std::wstring& path,
-    const double boxWidthMm,
-    const double boxHeightMm,
-    double* const widthMm,
-    double* const heightMm,
-    ExecutionResult* const result) {
-    UINT pixelWidth = 0;
-    UINT pixelHeight = 0;
-    if (!ReadImagePixelSize(path, &pixelWidth, &pixelHeight, result)) {
-        return false;
-    }
-    const double scale = (std::min)(
-        boxWidthMm / static_cast<double>(pixelWidth),
-        boxHeightMm / static_cast<double>(pixelHeight));
-    *widthMm = static_cast<double>(pixelWidth) * scale;
-    *heightMm = static_cast<double>(pixelHeight) * scale;
-    return std::isfinite(*widthMm) && std::isfinite(*heightMm) &&
-        *widthMm > 0.0 && *heightMm > 0.0;
-}
-
 std::vector<std::wstring> Split(const std::wstring& value, const wchar_t separator) {
     std::vector<std::wstring> fields;
     size_t start = 0;
@@ -252,65 +138,19 @@ std::vector<std::wstring> Split(const std::wstring& value, const wchar_t separat
     }
 }
 
-std::wstring EncodeUtf8Base64(const std::wstring& value) {
-    const int byteCount = WideCharToMultiByte(
-        CP_UTF8,
-        WC_ERR_INVALID_CHARS,
-        value.c_str(),
-        static_cast<int>(value.size()),
-        nullptr,
-        0,
-        nullptr,
-        nullptr);
-    if (byteCount < 0) {
-        return L"";
-    }
-    std::vector<BYTE> bytes(static_cast<size_t>(byteCount));
-    if (byteCount != 0 && WideCharToMultiByte(
-            CP_UTF8,
-            WC_ERR_INVALID_CHARS,
-            value.c_str(),
-            static_cast<int>(value.size()),
-            reinterpret_cast<LPSTR>(bytes.data()),
-            byteCount,
-            nullptr,
-            nullptr) != byteCount) {
-        return L"";
-    }
-    DWORD encodedCount = 0;
-    if (!CryptBinaryToStringW(
-            bytes.data(),
-            static_cast<DWORD>(bytes.size()),
-            CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-            nullptr,
-            &encodedCount)) {
-        return L"";
-    }
-    std::vector<wchar_t> encoded(encodedCount);
-    if (!CryptBinaryToStringW(
-            bytes.data(),
-            static_cast<DWORD>(bytes.size()),
-            CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-            encoded.data(),
-            &encodedCount)) {
-        return L"";
-    }
-    return std::wstring(encoded.data());
-}
-
 bool GetDispatchProperty(
     IDispatch* const object,
     const wchar_t* const name,
     CComPtr<IDispatch>& value,
     ExecutionResult* const result,
-    const std::wstring& location = L"") {
+    const std::wstring& location) {
     CComVariant property;
     HRESULT status = PropertyGet(object, name, &property);
     if (SUCCEEDED(status)) {
         status = AsDispatch(property, value);
     }
     if (FAILED(status)) {
-        return SetError(result, L"COM_PROPERTY", location, HResultText(name, status));
+        return SetError(result, L"COM_PROPERTY", location, FormatHResult(name, status));
     }
     return true;
 }
@@ -321,11 +161,11 @@ bool CallBooleanMethod(
     const std::vector<CComVariant>& arguments,
     bool* const returned,
     ExecutionResult* const result,
-    const std::wstring& location = L"") {
+    const std::wstring& location) {
     CComVariant value;
     HRESULT status = Method(object, name, arguments, &value);
     if (FAILED(status)) {
-        return SetError(result, L"COM_METHOD", location, HResultText(name, status));
+        return SetError(result, L"COM_METHOD", location, FormatHResult(name, status));
     }
     if (value.vt == VT_EMPTY) {
         *returned = true;
@@ -333,7 +173,7 @@ bool CallBooleanMethod(
     }
     status = AsBool(value, returned);
     if (FAILED(status)) {
-        return SetError(result, L"COM_RESULT", location, HResultText(name, status));
+        return SetError(result, L"COM_RESULT", location, FormatHResult(name, status));
     }
     return true;
 }
@@ -342,7 +182,7 @@ bool RunAction(
     IDispatch* const action,
     const std::wstring& name,
     ExecutionResult* const result,
-    const std::wstring& location = L"") {
+    const std::wstring& location) {
     bool returned = false;
     if (!CallBooleanMethod(
             action,
@@ -363,7 +203,7 @@ bool RunVerifiedNavigationAction(
     IDispatch* const action,
     const std::wstring& name,
     ExecutionResult* const result,
-    const std::wstring& location = L"") {
+    const std::wstring& location) {
     bool returned = false;
     return CallBooleanMethod(
         action,
@@ -375,18 +215,9 @@ bool RunVerifiedNavigationAction(
 }
 
 bool GetPosition(IDispatch* const hwp, Position* const position, ExecutionResult* const result) {
-    CComVariant list;
-    list.vt = VT_I4 | VT_BYREF;
-    list.plVal = &position->list;
-    CComVariant paragraph;
-    paragraph.vt = VT_I4 | VT_BYREF;
-    paragraph.plVal = &position->paragraph;
-    CComVariant character;
-    character.vt = VT_I4 | VT_BYREF;
-    character.plVal = &position->character;
-    const HRESULT status = Method(hwp, L"GetPos", {list, paragraph, character}, nullptr);
+    const HRESULT status = hancom::com_state::CapturePosition(hwp, position);
     if (FAILED(status)) {
-        return SetError(result, L"COM_METHOD", L"", HResultText(L"GetPos", status));
+        return SetError(result, L"COM_METHOD", L"", FormatHResult(L"GetPos", status));
     }
     return true;
 }
@@ -395,22 +226,27 @@ bool SetPosition(
     IDispatch* const hwp,
     const Position& position,
     ExecutionResult* const result,
-    const std::wstring& location = L"") {
-    bool returned = false;
-    if (!CallBooleanMethod(
+    const std::wstring& location) {
+    const hancom::com_state::PositionResult positioned =
+        hancom::com_state::ApplyPosition(
             hwp,
-            L"SetPos",
-            {
-                CComVariant(position.list),
-                CComVariant(position.paragraph),
-                CComVariant(position.character),
-            },
-            &returned,
+            position,
+            hancom::com_state::EmptyPositionResult::TreatAsSuccess);
+    if (FAILED(positioned.invokeStatus)) {
+        return SetError(
             result,
-            location)) {
-        return false;
+            L"COM_METHOD",
+            location,
+            FormatHResult(L"SetPos", positioned.invokeStatus));
     }
-    if (!returned) {
+    if (FAILED(positioned.conversionStatus)) {
+        return SetError(
+            result,
+            L"COM_RESULT",
+            location,
+            FormatHResult(L"SetPos", positioned.conversionStatus));
+    }
+    if (!positioned.positioned) {
         return SetError(result, L"POSITION_FAILED", location, L"SetPos returned false");
     }
     return true;
@@ -427,7 +263,7 @@ bool CreateSet(
         status = AsDispatch(raw, set);
     }
     if (FAILED(status)) {
-        return SetError(result, L"COM_METHOD", name, HResultText(L"CreateSet", status));
+        return SetError(result, L"COM_METHOD", name, FormatHResult(L"CreateSet", status));
     }
     return true;
 }
@@ -443,7 +279,7 @@ bool ItemLong(
         status = AsLong(raw, value);
     }
     if (FAILED(status)) {
-        return SetError(result, L"PARAMETER_ITEM", name, HResultText(L"Item", status));
+        return SetError(result, L"PARAMETER_ITEM", name, FormatHResult(L"Item", status));
     }
     return true;
 }
@@ -451,53 +287,49 @@ bool ItemLong(
 bool GetSelection(
     IDispatch* const hwp,
     Selection* const selection,
-    ExecutionResult* const result) {
-    CComVariant mode;
-    HRESULT status = PropertyGet(hwp, L"SelectionMode", &mode);
-    if (SUCCEEDED(status)) {
-        status = AsLong(mode, &selection->mode);
+    ExecutionResult* const result,
+    const SelectionCapturePolicy policy) {
+    SelectionCaptureFailure failure;
+    if (CaptureSelection(
+            hwp,
+            selection,
+            policy,
+            &failure)) {
+        return true;
     }
-    if (FAILED(status)) {
+    if (failure.stage == SelectionCaptureStage::SelectionMode) {
         return SetError(
             result,
             L"STATE_CAPTURE",
             L"",
-            HResultText(L"SelectionMode", status));
+            FormatHResult(L"SelectionMode", failure.status));
     }
-    CComPtr<IDispatch> start;
-    CComPtr<IDispatch> end;
-    if (!CreateSet(hwp, L"ListParaPos", start, result) ||
-        !CreateSet(hwp, L"ListParaPos", end, result)) {
-        return false;
+    if (failure.stage == SelectionCaptureStage::CreateSet) {
+        return SetError(
+            result,
+            L"COM_METHOD",
+            L"ListParaPos",
+            FormatHResult(L"CreateSet", failure.status));
     }
-    CComVariant raw;
-    status = Method(
-        hwp,
-        L"GetSelectedPosBySet",
-        {CComVariant(start), CComVariant(end)},
-        &raw);
-    if (SUCCEEDED(status)) {
-        status = AsBool(raw, &selection->selected);
+    if (failure.stage == SelectionCaptureStage::SelectedPositions) {
+        return SetError(
+            result,
+            L"SELECTION",
+            L"",
+            FormatHResult(L"GetSelectedPosBySet", failure.status));
     }
-    if (FAILED(status)) {
-        return SetError(result, L"SELECTION", L"", HResultText(L"GetSelectedPosBySet", status));
+    if (failure.stage == SelectionCaptureStage::PositionItem) {
+        return SetError(
+            result,
+            L"PARAMETER_ITEM",
+            failure.detail,
+            FormatHResult(L"Item", failure.status));
     }
-    return ItemLong(start, L"List", &selection->start.list, result) &&
-        ItemLong(start, L"Para", &selection->start.paragraph, result) &&
-        ItemLong(start, L"Pos", &selection->start.character, result) &&
-        ItemLong(end, L"List", &selection->end.list, result) &&
-        ItemLong(end, L"Para", &selection->end.paragraph, result) &&
-        ItemLong(end, L"Pos", &selection->end.character, result);
-}
-
-bool SamePosition(const Position& left, const Position& right) noexcept {
-    return left.list == right.list && left.paragraph == right.paragraph &&
-        left.character == right.character;
-}
-
-bool SameSelection(const Selection& left, const Selection& right) noexcept {
-    return left.selected == right.selected && left.mode == right.mode &&
-        SamePosition(left.start, right.start) && SamePosition(left.end, right.end);
+    return SetError(
+        result,
+        L"STATE_CAPTURE",
+        L"",
+        FormatHResult(failure.detail, failure.status));
 }
 
 bool SelectTextRange(
@@ -584,7 +416,7 @@ bool ReadSelectedText(
             context->result,
             L"SELECTION_TEXT",
             location,
-            HResultText(L"GetTextFile", status));
+            FormatHResult(L"GetTextFile", status));
     }
     return true;
 }
@@ -614,7 +446,7 @@ bool ValidateDocumentIdentity(
         status = AsString(pathValue, &fullName);
     }
     if (FAILED(status)) {
-        return SetError(result, L"DOCUMENT_IDENTITY", L"", HResultText(L"active document", status));
+        return SetError(result, L"DOCUMENT_IDENTITY", L"", FormatHResult(L"active document", status));
     }
     auto normalize = [](std::wstring value) {
         std::replace(value.begin(), value.end(), L'/', L'\\');
@@ -743,7 +575,7 @@ bool ConvertValue(
             status = AsLong(raw, &hwpUnit);
         }
         if (FAILED(status)) {
-            return SetError(result, L"VALUE_CONVERSION", location, HResultText(L"MiliToHwpUnit", status));
+            return SetError(result, L"VALUE_CONVERSION", location, FormatHResult(L"MiliToHwpUnit", status));
         }
         *converted = CComVariant(hwpUnit);
         return true;
@@ -756,7 +588,7 @@ bool ConvertValue(
             {CComVariant(value.text.c_str())},
             &raw);
         if (FAILED(status)) {
-            return SetError(result, L"VALUE_CONVERSION", location, HResultText(value.converter.c_str(), status));
+            return SetError(result, L"VALUE_CONVERSION", location, FormatHResult(value.converter.c_str(), status));
         }
         *converted = raw;
         return true;
@@ -777,7 +609,7 @@ bool PutItemOrProperty(
         status = Method(object, L"SetItem", {CComVariant(name.c_str()), value}, &ignored);
     }
     if (FAILED(status)) {
-        return SetError(result, L"PARAMETER_SET", location, HResultText(name.c_str(), status));
+        return SetError(result, L"PARAMETER_SET", location, FormatHResult(name.c_str(), status));
     }
     return true;
 }
@@ -799,6 +631,92 @@ bool ApplySetter(
     CComVariant value;
     return ConvertValue(hwp, setter.value, &value, result, setter.path) &&
         PutItemOrProperty(current, path.back(), value, result, setter.path);
+}
+
+const wchar_t* DirectShapePropertyName(const std::wstring& path) {
+    for (const wchar_t* const name : {
+             L"ProtectSize",
+             L"WidthRelTo",
+             L"Width",
+             L"HeightRelTo",
+             L"Height",
+         }) {
+        if (path == name || path == std::wstring(L"HSet/") + name) {
+            return name;
+        }
+    }
+    return nullptr;
+}
+
+bool ApplyDirectSelectedShapeProperties(
+    Context* const context,
+    const Command& command) {
+    if (command.name != L"ShapeObjDialog") {
+        return true;
+    }
+    const bool hasDirectProperty = std::any_of(
+        command.setters.begin(),
+        command.setters.end(),
+        [](const Setter& setter) {
+            return DirectShapePropertyName(setter.path) != nullptr;
+        });
+    if (!hasDirectProperty) {
+        return true;
+    }
+    CComPtr<IDispatch> control;
+    CComPtr<IDispatch> properties;
+    if (!GetDispatchProperty(
+            context->hwp,
+            L"CurSelectedCtrl",
+            control,
+            context->result,
+            command.name) ||
+        !GetDispatchProperty(
+            control,
+            L"Properties",
+            properties,
+            context->result,
+            command.name)) {
+        return false;
+    }
+    CComVariant ignored;
+    for (const Setter& setter : command.setters) {
+        const wchar_t* const name = DirectShapePropertyName(setter.path);
+        if (name == nullptr) {
+            continue;
+        }
+        CComVariant value;
+        if (!ConvertValue(
+                context->hwp,
+                setter.value,
+                &value,
+                context->result,
+                setter.path)) {
+            return false;
+        }
+        const HRESULT status = Method(
+            properties,
+            L"SetItem",
+            {CComVariant(name), value},
+            &ignored);
+        if (FAILED(status)) {
+            return SetError(
+                context->result,
+                L"SHAPE_PROPERTY",
+                setter.path,
+                FormatHResult(name, status));
+        }
+    }
+    const HRESULT status =
+        PropertyPut(control, L"Properties", CComVariant(properties));
+    if (FAILED(status)) {
+        return SetError(
+            context->result,
+            L"SHAPE_PROPERTY",
+            command.name,
+            FormatHResult(L"Properties", status));
+    }
+    return true;
 }
 
 bool ReadAppliedSetterValue(
@@ -830,7 +748,7 @@ bool ReadAppliedSetterValue(
             result,
             L"POSTCONDITION",
             setter.path,
-            HResultText(L"read applied cell format", status));
+            FormatHResult(L"read applied cell format", status));
     }
     return true;
 }
@@ -895,7 +813,7 @@ bool VerifyAppliedCellFormat(
             context->result,
             L"POSTCONDITION",
             command.name,
-            HResultText(L"read applied cell format", status));
+            FormatHResult(L"read applied cell format", status));
     }
     for (const Setter& setter : command.setters) {
         CComVariant actual;
@@ -921,7 +839,7 @@ bool VerifyAppliedCellFormat(
 bool ExecuteParameterAction(
     Context* const context,
     const Command& command,
-    const bool verifyCellFormat = true) {
+    const bool verifyCellFormat) {
     CComPtr<IDispatch> parameterSets;
     CComPtr<IDispatch> parameter;
     CComPtr<IDispatch> set;
@@ -951,7 +869,7 @@ bool ExecuteParameterAction(
             context->result,
             L"ACTION_DEFAULT",
             command.name,
-            HResultText(L"GetDefault", status));
+            FormatHResult(L"GetDefault", status));
     }
     std::map<
         std::wstring,
@@ -965,7 +883,7 @@ bool ExecuteParameterAction(
                 context->result,
                 L"PARAMETER_ARRAY",
                 name,
-                HResultText(L"CreateItemArray", status));
+                FormatHResult(L"CreateItemArray", status));
         }
         auto writer =
             std::make_unique<hancom::official_api::ParameterArrayWriter>();
@@ -975,7 +893,7 @@ bool ExecuteParameterAction(
                 context->result,
                 L"PARAMETER_ARRAY",
                 name,
-                HResultText(L"bind SetItem", status));
+                FormatHResult(L"bind SetItem", status));
         }
         arrays.emplace(name, std::move(writer));
     }
@@ -1003,7 +921,7 @@ bool ExecuteParameterAction(
                 context->result,
                 L"PARAMETER_ARRAY",
                 arrayValue.name,
-                HResultText(L"SetItem", status));
+                FormatHResult(L"SetItem", status));
         }
     }
     for (const Setter& setter : command.setters) {
@@ -1027,6 +945,10 @@ bool ExecuteParameterAction(
             L"ACTION_FAILED",
             command.name,
             command.name + L" returned false");
+    }
+    if (!ApplyDirectSelectedShapeProperties(context, command)) {
+        context->result->partialMutation = true;
+        return false;
     }
     ++context->result->actionsExecuted;
     if (verifyCellFormat && !VerifyAppliedCellFormat(context, command, parameter, set)) {
@@ -1055,7 +977,7 @@ bool CurrentPhysicalPage(
         status = AsLong(raw, &zeroBased);
     }
     if (FAILED(status) || zeroBased < 0) {
-        return SetError(result, L"PAGE", L"page", HResultText(L"CurrentPage", status));
+        return SetError(result, L"PAGE", L"page", FormatHResult(L"CurrentPage", status));
     }
     *page = zeroBased + 1;
     return true;
@@ -1069,7 +991,7 @@ bool MoveToPage(Context* const context, const LONG requestedPage) {
         status = AsLong(rawCount, &pageCount);
     }
     if (FAILED(status)) {
-        return SetError(context->result, L"PAGE", L"page", HResultText(L"PageCount", status));
+        return SetError(context->result, L"PAGE", L"page", FormatHResult(L"PageCount", status));
     }
     if (requestedPage < 1 || requestedPage > pageCount) {
         return SetError(
@@ -1125,2880 +1047,29 @@ bool MoveToPage(Context* const context, const LONG requestedPage) {
     return true;
 }
 
-bool GetControlInstanceId(
-    IDispatch* const control,
-    std::wstring* const controlId,
-    ExecutionResult* const result,
-    const std::wstring& location = L"") {
-    CComVariant value;
-    HRESULT status = Method(control, L"GetCtrlInstID", {}, &value);
-    if (SUCCEEDED(status)) {
-        status = AsString(value, controlId);
-    }
-    if (FAILED(status)) {
-        return SetError(result, L"CONTROL_ID", location, HResultText(L"GetCtrlInstID", status));
-    }
-    return true;
-}
-
-bool AnchorPosition(
-    IDispatch* control,
-    Position* position,
-    ExecutionResult* result);
-
-bool GetSelectedControl(
-    Context* const context,
-    const std::wstring& instanceId,
-    CComPtr<IDispatch>& selectedControl) {
-    CComPtr<IDispatch> control;
-    if (!GetDispatchProperty(
-            context->hwp,
-            L"CurSelectedCtrl",
-            control,
-            context->result,
-            instanceId)) {
-        return false;
-    }
-    std::wstring selectedId;
-    if (!GetControlInstanceId(control, &selectedId, context->result, instanceId) ||
-        selectedId != instanceId) {
-        return SetError(
-            context->result,
-            L"WRONG_CONTROL",
-            instanceId,
-            L"selected control identity does not match the request");
-    }
-    selectedControl = control;
-    return true;
-}
-
-bool SelectControl(
-    Context* const context,
-    const std::wstring& instanceId,
-    CComPtr<IDispatch>& selectedControl) {
-    bool selected = false;
-    if (!CallBooleanMethod(
-            context->hwp,
-            L"SelectCtrl",
-            {CComVariant(instanceId.c_str()), CComVariant(1L)},
-            &selected,
-            context->result,
-            instanceId)) {
-        return false;
-    }
-    return GetSelectedControl(context, instanceId, selectedControl);
-}
-
-bool SelectControl(Context* const context, const std::wstring& instanceId) {
-    CComPtr<IDispatch> selectedControl;
-    return SelectControl(context, instanceId, selectedControl);
-}
-
-bool CaptureCurrentTable(Context* const context) {
-    CComPtr<IDispatch> table;
-    ExecutionResult parentResult;
-    if (!GetDispatchProperty(
-            context->hwp,
-            L"ParentCtrl",
-            table,
-            &parentResult,
-            L"table") &&
-        !GetDispatchProperty(
-            context->hwp,
-            L"CurSelectedCtrl",
-            table,
-            context->result,
-            L"table")) {
-        return false;
-    }
-    std::wstring id;
-    if (!GetControlInstanceId(table, &id, context->result, L"table")) {
-        return false;
-    }
-    context->table = table;
-    context->tableId = std::move(id);
-    context->topology.Clear();
-    return true;
-}
-
-bool RunAndCountAction(
-    Context* const context,
-    const std::wstring& action,
-    const std::wstring& location) {
-    if (!RunAction(context->action, action, context->result, location)) {
-        return false;
-    }
-    ++context->result->actionsExecuted;
-    return true;
-}
-
-bool DeleteControl(Context* const context, const std::wstring& instanceId) {
-    CComPtr<IDispatch> selectedControl;
-    if (!SelectControl(context, instanceId, selectedControl)) {
-        return false;
-    }
-    bool deleted = false;
-    if (!CallBooleanMethod(
-            context->hwp,
-            L"DeleteCtrl",
-            {CComVariant(selectedControl)},
-            &deleted,
-            context->result,
-            instanceId)) {
-        return false;
-    }
-    if (!deleted) {
-        return SetError(
-            context->result,
-            L"CONTROL_DELETE_FAILED",
-            instanceId,
-            L"DeleteCtrl returned false");
-    }
-    ++context->result->actionsExecuted;
-    if (context->tableId == instanceId) {
-        context->table.Release();
-        context->tableId.clear();
-        context->topology.Clear();
-    }
-    return true;
-}
-
-bool CopyControl(Context* const context, const std::wstring& instanceId) {
-    context->table.Release();
-    context->tableId.clear();
-    context->topology.Clear();
-    context->copiedTableBlock.clear();
-    context->hasCopiedTableBlock = false;
-    context->hasCopiedTableAnchorFormat = false;
-    CComPtr<IDispatch> control;
-    Position anchor;
-    if (!SelectControl(context, instanceId, control) ||
-        !AnchorPosition(control, &anchor, context->result) ||
-        !SetPosition(context->hwp, anchor, context->result, instanceId)) {
-        return false;
-    }
-    const HRESULT formatStatus = hancom::formatting::ReadParagraphFormat(
-        context->hwp,
-        &context->copiedTableAnchorFormat);
-    if (FAILED(formatStatus)) {
-        return SetError(
-            context->result,
-            L"TABLE_ANCHOR_FORMAT",
-            instanceId,
-            HResultText(L"read source table anchor format", formatStatus));
-    }
-    context->hasCopiedTableAnchorFormat = true;
-    if (anchor.character == (std::numeric_limits<LONG>::max)()) {
-        return SetError(
-            context->result,
-            L"TABLE_BLOCK_RANGE",
-            instanceId,
-            L"source table anchor character is outside the selectable range");
-    }
-    bool selected = false;
-    if (!CallBooleanMethod(
-            context->hwp,
-            L"SelectText",
-            {
-                CComVariant(anchor.paragraph),
-                CComVariant(anchor.character),
-                CComVariant(anchor.paragraph),
-                CComVariant(anchor.character + 1),
-            },
-            &selected,
-            context->result,
-            instanceId)) {
-        return false;
-    }
-    if (!selected) {
-        return SetError(
-            context->result,
-            L"TABLE_BLOCK_RANGE",
-            instanceId,
-            L"source table control range could not be selected");
-    }
-    CComVariant rawBlock;
-    std::wstring block;
-    HRESULT status = Method(
-        context->hwp,
-        L"GetTextFile",
-        {CComVariant(L"HWP"), CComVariant(L"saveblock:true")},
-        &rawBlock);
-    if (SUCCEEDED(status)) {
-        status = AsString(rawBlock, &block);
-    }
-    if (FAILED(status)) {
-        return SetError(
-            context->result,
-            L"TABLE_BLOCK_COPY",
-            instanceId,
-            HResultText(L"GetTextFile HWP saveblock", status));
-    }
-    if (block.find_first_not_of(L" \t\r\n") == std::wstring::npos) {
-        return SetError(
-            context->result,
-            L"TABLE_BLOCK_COPY",
-            instanceId,
-            L"GetTextFile returned an empty HWP table block");
-    }
-    context->copiedTableBlock = std::move(block);
-    context->hasCopiedTableBlock = true;
-    return SetPosition(context->hwp, anchor, context->result, instanceId) &&
-        SelectControl(context, instanceId);
-}
-
-bool ApplyCopiedTableAnchor(Context* const context, const std::wstring& instanceId) {
-    if (!context->hasCopiedTableAnchorFormat) {
-        return SetError(
-            context->result,
-            L"NO_TABLE_ANCHOR_FORMAT",
-            instanceId,
-            L"APPLY_COPIED_TABLE_ANCHOR requires a preceding COPY_CONTROL command");
-    }
-    CComPtr<IDispatch> control;
-    Position anchor;
-    if (!SelectControl(context, instanceId, control) ||
-        !AnchorPosition(control, &anchor, context->result) ||
-        !SetPosition(context->hwp, anchor, context->result, instanceId)) {
-        return false;
-    }
-    HRESULT formatStatus = hancom::formatting::ApplyParagraphFormat(
-        context->hwp,
-        context->copiedTableAnchorFormat);
-    if (FAILED(formatStatus)) {
-        return SetError(
-            context->result,
-            L"TABLE_ANCHOR_FORMAT",
-            instanceId,
-            HResultText(L"apply copied table anchor format", formatStatus));
-    }
-    context->result->actionsExecuted += 2;
-    hancom::formatting::ParagraphFormat actual;
-    formatStatus = hancom::formatting::ReadParagraphFormat(context->hwp, &actual);
-    if (FAILED(formatStatus) || !(actual == context->copiedTableAnchorFormat)) {
-        return SetError(
-            context->result,
-            L"TABLE_ANCHOR_FORMAT",
-            instanceId,
-            FAILED(formatStatus)
-                ? HResultText(L"verify copied table anchor format", formatStatus)
-                : L"target table anchor format does not match its source");
-    }
-    return SelectControl(context, instanceId);
-}
-
-bool PasteTable(Context* const context) {
-    if (!context->hasCopiedTableAnchorFormat || !context->hasCopiedTableBlock) {
-        return SetError(
-            context->result,
-            L"NO_TABLE_ANCHOR_FORMAT",
-            L"table",
-            L"PASTE_TABLE requires a preceding COPY_CONTROL command");
-    }
-    CComVariant inserted;
-    HRESULT status = Method(
-        context->hwp,
-        L"SetTextFile",
-        {
-            CComVariant(context->copiedTableBlock.c_str()),
-            CComVariant(L"HWP"),
-            CComVariant(L"insertfile"),
-        },
-        &inserted);
-    bool insertedBlock = false;
-    if (SUCCEEDED(status)) {
-        status = AsBool(inserted, &insertedBlock);
-    }
-    if (FAILED(status)) {
-        return SetError(
-            context->result,
-            L"TABLE_BLOCK_PASTE",
-            L"table",
-            HResultText(L"SetTextFile HWP insertfile", status));
-    }
-    if (!insertedBlock) {
-        return SetError(
-            context->result,
-            L"TABLE_BLOCK_PASTE",
-            L"table",
-            L"SetTextFile returned false");
-    }
-    if (!RunAndCountAction(context, L"SelectCtrlReverse", L"table") ||
-        !CaptureCurrentTable(context)) {
-        return false;
-    }
-    Position anchor;
-    hancom::formatting::ParagraphFormat actual;
-    if (!AnchorPosition(context->table, &anchor, context->result) ||
-        !SetPosition(context->hwp, anchor, context->result, context->tableId)) {
-        return false;
-    }
-    HRESULT formatStatus = hancom::formatting::ReadParagraphFormat(context->hwp, &actual);
-    if (FAILED(formatStatus) || !(actual == context->copiedTableAnchorFormat)) {
-        if (SUCCEEDED(formatStatus)) {
-            formatStatus = hancom::formatting::ApplyParagraphFormat(
-                context->hwp,
-                context->copiedTableAnchorFormat);
-            if (SUCCEEDED(formatStatus)) {
-                context->result->actionsExecuted += 2;
-                formatStatus = hancom::formatting::ReadParagraphFormat(context->hwp, &actual);
-            }
-        }
-        if (FAILED(formatStatus) || !(actual == context->copiedTableAnchorFormat)) {
-            return SetError(
-                context->result,
-                L"TABLE_ANCHOR_FORMAT",
-                context->tableId,
-                FAILED(formatStatus)
-                    ? HResultText(L"verify pasted table anchor format", formatStatus)
-                    : L"pasted table anchor format does not match its source");
-        }
-    }
-    if (!SelectControl(context, context->tableId)) {
-        return false;
-    }
-    context->result->createdControlIds.push_back(context->tableId);
-    return true;
-}
-
-bool SetTableTreatAsCharacter(Context* const context, const bool treatAsCharacter = true) {
-    if (context->table == nullptr) {
-        return SetError(context->result, L"NO_TABLE", L"", L"created table control is unavailable");
-    }
-    CComPtr<IDispatch> properties;
-    if (!GetDispatchProperty(
-            context->table,
-            L"Properties",
-            properties,
-            context->result,
-            L"TreatAsChar")) {
-        return false;
-    }
-    CComVariant ignored;
-    HRESULT status = Method(
-        properties,
-        L"SetItem",
-        {CComVariant(L"TreatAsChar"), BooleanVariant(treatAsCharacter)},
-        &ignored);
-    if (SUCCEEDED(status)) {
-        status = PropertyPut(context->table, L"Properties", CComVariant(properties));
-    }
-    if (FAILED(status)) {
-        return SetError(
-            context->result,
-            L"TABLE_PROPERTY",
-            L"TreatAsChar",
-            HResultText(L"TreatAsChar", status));
-    }
-    return true;
-}
-
-bool GetParentControlId(
-    IDispatch* const hwp,
-    std::wstring* const id,
-    ExecutionResult* const result) {
-    CComPtr<IDispatch> parent;
-    return GetDispatchProperty(hwp, L"ParentCtrl", parent, result) &&
-        GetControlInstanceId(parent, id, result);
-}
-
-std::wstring GetCellAddress(IDispatch* const hwp) {
-    LONG sectionCount = 0;
-    LONG sectionNumber = 0;
-    LONG pageNumber = 0;
-    LONG column = 0;
-    LONG line = 0;
-    LONG position = 0;
-    SHORT over = 0;
-    BSTR controlName = nullptr;
-    CComVariant sectionCountArgument;
-    sectionCountArgument.vt = VT_I4 | VT_BYREF;
-    sectionCountArgument.plVal = &sectionCount;
-    CComVariant sectionNumberArgument;
-    sectionNumberArgument.vt = VT_I4 | VT_BYREF;
-    sectionNumberArgument.plVal = &sectionNumber;
-    CComVariant pageNumberArgument;
-    pageNumberArgument.vt = VT_I4 | VT_BYREF;
-    pageNumberArgument.plVal = &pageNumber;
-    CComVariant columnArgument;
-    columnArgument.vt = VT_I4 | VT_BYREF;
-    columnArgument.plVal = &column;
-    CComVariant lineArgument;
-    lineArgument.vt = VT_I4 | VT_BYREF;
-    lineArgument.plVal = &line;
-    CComVariant positionArgument;
-    positionArgument.vt = VT_I4 | VT_BYREF;
-    positionArgument.plVal = &position;
-    CComVariant overArgument;
-    overArgument.vt = VT_I2 | VT_BYREF;
-    overArgument.piVal = &over;
-    CComVariant controlNameArgument;
-    controlNameArgument.vt = VT_BSTR | VT_BYREF;
-    controlNameArgument.pbstrVal = &controlName;
-    CComVariant returned;
-    const HRESULT status = Method(
-        hwp,
-        L"KeyIndicator",
-        {
-            sectionCountArgument,
-            sectionNumberArgument,
-            pageNumberArgument,
-            columnArgument,
-            lineArgument,
-            positionArgument,
-            overArgument,
-            controlNameArgument,
-        },
-        &returned);
-    if (FAILED(status)) {
-        if (controlName != nullptr) {
-            SysFreeString(controlName);
-        }
-        return L"";
-    }
-    const std::wstring indicator = controlName == nullptr
-        ? std::wstring()
-        : std::wstring(controlName, SysStringLen(controlName));
-    if (controlName != nullptr) {
-        SysFreeString(controlName);
-    }
-    const size_t opening = indicator.find(L'(');
-    const size_t closing = indicator.find(L')', opening == std::wstring::npos ? 0 : opening + 1);
-    if (opening == std::wstring::npos || closing == std::wstring::npos || closing <= opening + 1) {
-        return L"";
-    }
-    std::wstring address = indicator.substr(opening + 1, closing - opening - 1);
-    std::transform(address.begin(), address.end(), address.begin(), towupper);
-    return address;
-}
-
-bool BuildCellTopology(Context* const context) {
-    if (context->table == nullptr && !CaptureCurrentTable(context)) {
-        return false;
-    }
-    std::wstring error;
-    if (!hancom::inspection::InspectTableTopology(
-            context->hwp,
-            context->tableId,
-            &context->topology,
-            &error)) {
-        return SetError(
-            context->result,
-            L"TABLE_TOPOLOGY",
-            context->tableId,
-            error.empty() ? L"table topology inspection failed" : error);
-    }
-    return true;
-}
-
-std::wstring NormalizeAddress(std::wstring address) {
-    std::transform(address.begin(), address.end(), address.begin(), towupper);
-    return address;
-}
-
-bool GoToCell(Context* const context, const std::wstring& requested) {
-    const std::wstring address = NormalizeAddress(requested);
-    if ((context->topology.Empty() && !BuildCellTopology(context)) ||
-        context->topology.Find(address) == nullptr) {
-        if (!context->topology.Empty()) {
-            return SetError(context->result, L"CELL_NOT_FOUND", address, L"cell is not present in the current table");
-        }
-        return false;
-    }
-    const auto enter = [&](ExecutionResult* const result) {
-        const hancom::inspection::CellTopologyCell* const cell =
-            context->topology.Find(address);
-        if (cell == nullptr) {
-            return false;
-        }
-        if (!SetPosition(
-                context->hwp,
-                Position{cell->listId, 0, 0},
-                result,
-                address)) {
-            return false;
-        }
-        std::wstring parent;
-        ExecutionResult local;
-        return GetParentControlId(context->hwp, &parent, &local) &&
-            parent == context->tableId && GetCellAddress(context->hwp) == address;
-    };
-    ExecutionResult firstAttempt;
-    if (enter(&firstAttempt)) {
-        context->currentCell = address;
-        return true;
-    }
-    context->topology.Clear();
-    if (!BuildCellTopology(context)) {
-        return false;
-    }
-    if (context->topology.Find(address) == nullptr) {
-        return SetError(context->result, L"CELL_NOT_FOUND", address, L"cell is not present after refreshing the table map");
-    }
-    if (!enter(context->result)) {
-        return SetError(context->result, L"WRONG_CELL", address, L"cursor did not enter the requested cell");
-    }
-    context->currentCell = address;
-    return true;
-}
-
-bool MergeCellsUsingTopology(
-    Context* const context,
-    const std::wstring& first,
-    const std::wstring& second,
-    const bool clearTopology) {
-    if (context->topology.Empty() && !BuildCellTopology(context)) {
-        return false;
-    }
-    std::vector<hancom::inspection::CellTopologyStep> path;
-    std::vector<std::wstring> region;
-    std::wstring error;
-    if (!context->topology.PlanRectangularMerge(first, second, &path, &region, &error)) {
-        return SetError(
-            context->result,
-            L"MERGE_RANGE",
-            first + L":" + second,
-            error.empty() ? L"merge range is not a complete cell rectangle" : error);
-    }
-    if (!GoToCell(context, first) ||
-        !RunAction(context->action, L"TableCellBlock", context->result, first) ||
-        !RunAction(context->action, L"TableCellBlockExtend", context->result, first)) {
-        return false;
-    }
-    for (const hancom::inspection::CellTopologyStep& step : path) {
-        const wchar_t* const action =
-            step.direction == hancom::inspection::CellDirection::Right
-            ? L"TableRightCell"
-            : L"TableLowerCell";
-        if (!RunAction(context->action, action, context->result, step.destination)) {
-            return false;
-        }
-        if (GetCellAddress(context->hwp) != step.destination) {
-            return SetError(
-                context->result,
-                L"MERGE_PATH",
-                step.destination,
-                L"actual cell neighbour did not match the inspected topology");
-        }
-    }
-    if (!RunAction(context->action, L"TableMergeCell", context->result, first)) {
-        return false;
-    }
-    if (clearTopology) {
-        context->topology.Clear();
-    }
-    context->currentCell = NormalizeAddress(first);
-    return true;
-}
-
-bool MergeCells(Context* const context, const std::wstring& first, const std::wstring& second) {
-    return MergeCellsUsingTopology(context, first, second, true);
-}
-
-bool InsertText(Context* const context, const std::wstring& text, const std::wstring& location) {
-    CComPtr<IDispatch> parameterSets;
-    CComPtr<IDispatch> insertText;
-    CComPtr<IDispatch> set;
-    if (!GetDispatchProperty(context->hwp, L"HParameterSet", parameterSets, context->result, location) ||
-        !GetDispatchProperty(parameterSets, L"HInsertText", insertText, context->result, location) ||
-        !GetDispatchProperty(insertText, L"HSet", set, context->result, location)) {
-        return false;
-    }
-    CComVariant ignored;
-    HRESULT status = Method(
-        context->action,
-        L"GetDefault",
-        {CComVariant(L"InsertText"), CComVariant(set)},
-        &ignored);
-    if (SUCCEEDED(status)) {
-        status = PropertyPut(insertText, L"Text", CComVariant(text.c_str()));
-    }
-    if (FAILED(status)) {
-        return SetError(context->result, L"INSERT_TEXT", location, HResultText(L"InsertText", status));
-    }
-    bool executed = false;
-    if (!CallBooleanMethod(
-            context->action,
-            L"Execute",
-            {CComVariant(L"InsertText"), CComVariant(set)},
-            &executed,
-            context->result,
-            location)) {
-        return false;
-    }
-    if (!executed) {
-        return SetError(context->result, L"INSERT_TEXT", location, L"InsertText returned false");
-    }
-    ++context->result->textInsertions;
-    return true;
-}
-
-struct TextFormatFingerprint {
-    std::wstring faceName;
-    LONG height = 0;
-    bool bold = false;
-    LONG textColor = 0;
-    LONG alignment = 0;
-    LONG lineSpacing = 0;
-    LONG leftMargin = 0;
-    LONG rightMargin = 0;
-    LONG indentation = 0;
-    LONG previousSpacing = 0;
-    LONG nextSpacing = 0;
-};
-
-struct PreservedTextFormat {
-    CComPtr<IDispatch> characterSet;
-    CComPtr<IDispatch> paragraphSet;
-    TextFormatFingerprint fingerprint;
-};
-
-bool FormatLongProperty(
-    IDispatch* const object,
-    const wchar_t* const name,
-    LONG* const value) {
-    CComVariant raw;
-    return SUCCEEDED(PropertyGet(object, name, &raw)) &&
-        SUCCEEDED(AsLong(raw, value));
-}
-
-bool FormatBooleanProperty(
-    IDispatch* const object,
-    const wchar_t* const name,
-    bool* const value) {
-    CComVariant raw;
-    return SUCCEEDED(PropertyGet(object, name, &raw)) &&
-        SUCCEEDED(AsBool(raw, value));
-}
-
-bool FormatTextProperty(
-    IDispatch* const object,
-    const wchar_t* const name,
-    std::wstring* const value) {
-    CComVariant raw;
-    return SUCCEEDED(PropertyGet(object, name, &raw)) &&
-        SUCCEEDED(AsString(raw, value));
-}
-
-bool DefaultTextFormatParameter(
-    Context* const context,
-    const wchar_t* const actionName,
-    const wchar_t* const parameterName,
-    CComPtr<IDispatch>& parameter,
-    CComPtr<IDispatch>& set,
-    const std::wstring& location) {
-    CComPtr<IDispatch> parameterSets;
-    if (!GetDispatchProperty(
-            context->hwp,
-            L"HParameterSet",
-            parameterSets,
-            context->result,
-            location) ||
-        !GetDispatchProperty(
-            parameterSets,
-            parameterName,
-            parameter,
-            context->result,
-            location) ||
-        !GetDispatchProperty(parameter, L"HSet", set, context->result, location)) {
-        return false;
-    }
-    CComVariant ignored;
-    const HRESULT status = Method(
-        context->action,
-        L"GetDefault",
-        {CComVariant(actionName), CComVariant(set)},
-        &ignored);
-    return SUCCEEDED(status) ||
-        SetError(
-            context->result,
-            L"TEXT_FORMAT_READBACK",
-            location,
-            HResultText(actionName, status));
-}
-
-bool ReadTextFormatFingerprint(
-    IDispatch* const character,
-    IDispatch* const paragraph,
-    TextFormatFingerprint* const format) {
-    return
-        FormatTextProperty(character, L"FaceNameHangul", &format->faceName) &&
-        FormatLongProperty(character, L"Height", &format->height) &&
-        FormatBooleanProperty(character, L"Bold", &format->bold) &&
-        FormatLongProperty(character, L"TextColor", &format->textColor) &&
-        FormatLongProperty(paragraph, L"AlignType", &format->alignment) &&
-        FormatLongProperty(paragraph, L"LineSpacing", &format->lineSpacing) &&
-        FormatLongProperty(paragraph, L"LeftMargin", &format->leftMargin) &&
-        FormatLongProperty(paragraph, L"RightMargin", &format->rightMargin) &&
-        FormatLongProperty(paragraph, L"Indentation", &format->indentation) &&
-        FormatLongProperty(paragraph, L"PrevSpacing", &format->previousSpacing) &&
-        FormatLongProperty(paragraph, L"NextSpacing", &format->nextSpacing);
-}
-
-bool CaptureTextFormat(
-    Context* const context,
-    PreservedTextFormat* const preserved,
-    const std::wstring& location) {
-    CComPtr<IDispatch> character;
-    CComPtr<IDispatch> paragraph;
-    return
-        DefaultTextFormatParameter(
-            context,
-            L"CharShape",
-            L"HCharShape",
-            character,
-            preserved->characterSet,
-            location) &&
-        DefaultTextFormatParameter(
-            context,
-            L"ParagraphShape",
-            L"HParaShape",
-            paragraph,
-            preserved->paragraphSet,
-            location) &&
-        (ReadTextFormatFingerprint(character, paragraph, &preserved->fingerprint) ||
-         SetError(
-             context->result,
-             L"TEXT_FORMAT_READBACK",
-             location,
-             L"character or paragraph format could not be captured"));
-}
-
-bool ExecuteCapturedFormat(
-    Context* const context,
-    const wchar_t* const actionName,
-    IDispatch* const set,
-    const std::wstring& location) {
-    bool executed = false;
-    return
-        CallBooleanMethod(
-            context->action,
-            L"Execute",
-            {CComVariant(actionName), CComVariant(set)},
-            &executed,
-            context->result,
-            location) &&
-        (executed ||
-         SetError(
-             context->result,
-             L"TEXT_FORMAT_APPLY",
-             location,
-             std::wstring(actionName) + L" returned false"));
-}
-
-bool SameTextFormat(
-    const TextFormatFingerprint& left,
-    const TextFormatFingerprint& right) noexcept {
-    return left.faceName == right.faceName &&
-        left.height == right.height &&
-        left.bold == right.bold &&
-        left.textColor == right.textColor &&
-        left.alignment == right.alignment &&
-        left.lineSpacing == right.lineSpacing &&
-        left.leftMargin == right.leftMargin &&
-        left.rightMargin == right.rightMargin &&
-        left.indentation == right.indentation &&
-        left.previousSpacing == right.previousSpacing &&
-        left.nextSpacing == right.nextSpacing;
-}
-
-bool ApplyAndVerifyTextFormat(
-    Context* const context,
-    const PreservedTextFormat& preserved,
-    const std::wstring& location) {
-    if (!ExecuteCapturedFormat(
-            context,
-            L"CharShape",
-            preserved.characterSet,
-            location) ||
-        !ExecuteCapturedFormat(
-            context,
-            L"ParagraphShape",
-            preserved.paragraphSet,
-            location)) {
-        return false;
-    }
-    PreservedTextFormat after;
-    if (!CaptureTextFormat(context, &after, location)) {
-        return false;
-    }
-    return SameTextFormat(preserved.fingerprint, after.fingerprint) ||
-        SetError(
-            context->result,
-            L"TEXT_FORMAT_READBACK",
-            location,
-            L"character or paragraph format changed after text replacement");
-}
-
-bool SetCellText(Context* const context, const Command& command) {
-    const std::wstring address = NormalizeAddress(command.first);
-    if (!GoToCell(context, address) ||
-        !RunAction(context->action, L"SelectAll", context->result, address)) {
-        return false;
-    }
-    Selection before;
-    std::wstring current;
-    if (!GetSelection(context->hwp, &before, context->result) ||
-        !ReadSelectedText(context, &current, address)) {
-        return false;
-    }
-    if (command.hasExpectedText && current != command.expectedText) {
-        return SetError(
-            context->result,
-            L"STALE_CELL_TEXT",
-            address,
-            L"cell text changed before the style-preserving replacement");
-    }
-    PreservedTextFormat preserved;
-    if (command.preserveFormat &&
-        !CaptureTextFormat(context, &preserved, address)) {
-        return false;
-    }
-    const bool replaced = command.second.empty()
-        ? RunAction(context->action, L"Delete", context->result, address)
-        : InsertText(context, command.second, address);
-    if (!replaced) {
-        return false;
-    }
-    if (command.second.empty()) {
-        if (!GoToCell(context, address) ||
-            !RunAction(context->action, L"SelectAll", context->result, address)) {
-            return false;
-        }
-        std::wstring after;
-        return
-            ReadSelectedText(context, &after, address) &&
-            (after.empty() ||
-             SetError(
-                 context->result,
-                 L"TEXT_PATCH_READBACK",
-                 address,
-                 L"cell text is not empty after replacement"));
-    }
-    Position end;
-    if (!GetPosition(context->hwp, &end, context->result) ||
-        !SelectTextRange(context, before.start, end, address)) {
-        return false;
-    }
-    if (command.preserveFormat &&
-        !ApplyAndVerifyTextFormat(context, preserved, address)) {
-        return false;
-    }
-    std::wstring inserted;
-    return
-        ReadSelectedText(context, &inserted, address) &&
-        (inserted == command.second ||
-         SetError(
-             context->result,
-             L"TEXT_PATCH_READBACK",
-             address,
-             L"cell replacement readback does not match the requested text"));
-}
-
-bool ReplaceSelection(Context* const context, const Command& command) {
-    Selection before;
-    if (!GetSelection(context->hwp, &before, context->result)) {
-        return false;
-    }
-    if (!before.selected) {
-        return SetError(
-            context->result,
-            L"NO_SELECTION",
-            L"selection",
-            L"the replacement command requires an active text selection");
-    }
-    if (before.start.list != before.end.list) {
-        return SetError(
-            context->result,
-            L"CROSS_CONTROL_SELECTION",
-            L"selection",
-            L"the replacement selection crosses HWP controls");
-    }
-
-    CComVariant raw;
-    std::wstring selected;
-    HRESULT status = Method(
-        context->hwp,
-        L"GetTextFile",
-        {CComVariant(L"UNICODE"), CComVariant(L"saveblock:true")},
-        &raw);
-    if (SUCCEEDED(status)) {
-        status = AsString(raw, &selected);
-    }
-    if (FAILED(status)) {
-        return SetError(
-            context->result,
-            L"SELECTION_TEXT",
-            L"selection",
-            HResultText(L"GetTextFile", status));
-    }
-    if (selected != command.first) {
-        return SetError(
-            context->result,
-            L"STALE_SELECTION_TEXT",
-            L"selection",
-            L"selected text changed after the request was prepared");
-    }
-
-    Selection confirmed;
-    if (!GetSelection(context->hwp, &confirmed, context->result)) {
-        return false;
-    }
-    if (confirmed.selected != before.selected ||
-        confirmed.start.list != before.start.list ||
-        confirmed.start.paragraph != before.start.paragraph ||
-        confirmed.start.character != before.start.character ||
-        confirmed.end.list != before.end.list ||
-        confirmed.end.paragraph != before.end.paragraph ||
-        confirmed.end.character != before.end.character) {
-        return SetError(
-            context->result,
-            L"STALE_SELECTION",
-            L"selection",
-            L"selection changed while its text was verified");
-    }
-    return InsertText(context, command.second, L"selection");
-}
-
-bool TextMatchesAt(
-    const std::wstring& actual,
-    const std::wstring& expected,
-    const size_t offset,
-    const bool matchCase) {
-    if (offset > actual.size() || expected.size() > actual.size() - offset) {
-        return false;
-    }
-    for (size_t index = 0; index < actual.size(); ++index) {
-        if (index == expected.size()) {
-            return true;
-        }
-        const wchar_t current = actual[offset + index];
-        if ((matchCase && current != expected[index]) ||
-            (!matchCase && towlower(current) != towlower(expected[index]))) {
-            return false;
-        }
-    }
-    return expected.size() == actual.size() - offset;
-}
-
-bool TextMatches(
-    const std::wstring& actual,
-    const std::wstring& expected,
-    const bool matchCase) {
-    return actual.size() == expected.size() &&
-        TextMatchesAt(actual, expected, 0, matchCase);
-}
-
-bool PatchSelectedText(
-    Context* const context,
-    const std::wstring& expected,
-    const bool requireExpected,
-    const bool matchCase,
-    const std::wstring& replacement,
-    const std::wstring& location,
-    const bool preserveFormat = false) {
-    Selection before;
-    if (!GetSelection(context->hwp, &before, context->result)) {
-        return false;
-    }
-    if ((before.mode & kSelectionModeMask) != kSelectionText) {
-        return SetError(
-            context->result,
-            L"NON_TEXT_SELECTION",
-            location,
-            L"text.patch cannot replace a non-text selection");
-    }
-    if (!before.selected || before.start.list != before.end.list) {
-        return SetError(
-            context->result,
-            before.selected ? L"CROSS_CONTROL_SELECTION" : L"NO_SELECTION",
-            location,
-            L"text.patch requires one active text range");
-    }
-    std::wstring selected;
-    if (!ReadSelectedText(context, &selected, location)) {
-        return false;
-    }
-    if (requireExpected && !TextMatches(selected, expected, matchCase)) {
-        return SetError(
-            context->result,
-            L"STALE_SELECTION_TEXT",
-            location,
-            L"selected text changed before text.patch");
-    }
-    Selection confirmed;
-    if (!GetSelection(context->hwp, &confirmed, context->result)) {
-        return false;
-    }
-    if (!SameSelection(before, confirmed)) {
-        return SetError(
-            context->result,
-            L"STALE_SELECTION",
-            location,
-            L"selection changed while text.patch verified its text");
-    }
-    PreservedTextFormat preserved;
-    if (preserveFormat &&
-        !CaptureTextFormat(context, &preserved, location)) {
-        return false;
-    }
-    const bool replaced = replacement.empty()
-        ? RunAction(context->action, L"Delete", context->result, location)
-        : InsertText(context, replacement, location);
-    if (!replaced) {
-        return false;
-    }
-    Position end;
-    if (!GetPosition(context->hwp, &end, context->result)) {
-        return false;
-    }
-    if (replacement.empty()) {
-        Selection afterDeletion;
-        if (!SamePosition(before.start, end) ||
-            !GetSelection(context->hwp, &afterDeletion, context->result) ||
-            afterDeletion.selected) {
-            return SetError(
-                context->result,
-                L"TEXT_PATCH_READBACK",
-                location,
-                L"deleted range did not collapse to its verified start");
-        }
-        return true;
-    }
-    if (!SelectTextRange(context, before.start, end, location)) {
-        return false;
-    }
-    if (preserveFormat &&
-        !ApplyAndVerifyTextFormat(context, preserved, location)) {
-        return false;
-    }
-    std::wstring inserted;
-    if (!ReadSelectedText(context, &inserted, location) || inserted != replacement) {
-        return SetError(
-            context->result,
-            L"TEXT_PATCH_READBACK",
-            location,
-            L"reselected text does not match the requested replacement");
-    }
-    return true;
-}
-
-bool PatchCurrentText(Context* const context, const Command& command) {
-    Selection before;
-    if (!GetSelection(context->hwp, &before, context->result)) {
-        return false;
-    }
-    if (before.selected) {
-        return PatchSelectedText(
-            context,
-            command.first,
-            command.hasExpectedText,
-            true,
-            command.second,
-            L"current",
-            command.preserveFormat);
-    }
-    if ((before.mode & kSelectionModeMask) != kSelectionNone) {
-        return SetError(
-            context->result,
-            L"NON_TEXT_SELECTION",
-            L"current",
-            L"text.patch cannot insert into a non-text selection");
-    }
-    if (command.hasExpectedText && !command.first.empty()) {
-        return SetError(
-            context->result,
-            L"NO_SELECTION",
-            L"current",
-            L"expected old text was supplied but the current cursor has no selection");
-    }
-    Position start;
-    if (!GetPosition(context->hwp, &start, context->result) ||
-        !InsertText(context, command.second, L"current")) {
-        return false;
-    }
-    Position end;
-    if (!GetPosition(context->hwp, &end, context->result)) {
-        return false;
-    }
-    if (command.second.empty()) {
-        return SamePosition(start, end)
-            ? true
-            : SetError(
-                  context->result,
-                  L"TEXT_PATCH_READBACK",
-                  L"current",
-                  L"empty insertion changed the current position");
-    }
-    if (!SelectTextRange(context, start, end, L"current")) {
-        return false;
-    }
-    std::wstring inserted;
-    if (!ReadSelectedText(context, &inserted, L"current") ||
-        inserted != command.second) {
-        return SetError(
-            context->result,
-            L"TEXT_PATCH_READBACK",
-            L"current",
-            L"reselected insertion does not match the requested text");
-    }
-    return true;
-}
-
-struct TextMatch {
-    Selection selection;
-};
-
-std::wstring TextMatchKey(const Selection& match) {
-    return std::to_wstring(match.start.list) + L":" +
-        std::to_wstring(match.start.paragraph) + L":" +
-        std::to_wstring(match.start.character) + L"-" +
-        std::to_wstring(match.end.list) + L":" +
-        std::to_wstring(match.end.paragraph) + L":" +
-        std::to_wstring(match.end.character);
-}
-
-std::wstring TextMatchCandidates(const std::vector<TextMatch>& matches) {
-    std::wostringstream encoded;
-    for (size_t index = 0; index < matches.size(); ++index) {
-        if (index != 0) {
-            encoded << L'|';
-        }
-        encoded << TextMatchKey(matches[index].selection);
-    }
-    return encoded.str();
-}
-
-Position TextPositionAtOffset(
-    const Position& start,
-    const std::wstring& text,
-    const size_t offset) {
-    Position position = start;
-    for (size_t index = 0; index < offset; ++index) {
-        if (text[index] == L'\r' &&
-            index + 1 < offset &&
-            text[index + 1] == L'\n') {
-            ++position.paragraph;
-            position.character = 0;
-            ++index;
-        } else if (text[index] == L'\r' || text[index] == L'\n') {
-            ++position.paragraph;
-            position.character = 0;
-        } else {
-            ++position.character;
-        }
-    }
-    return position;
-}
-
-bool SelectCellTextPatchMatch(
-    Context* const context,
-    const Command& command,
-    const Selection& original,
-    const std::wstring& location) {
-    constexpr size_t kMaximumCandidates = 24;
-    if (!RunAction(context->action, L"SelectAll", context->result, location)) {
-        return false;
-    }
-    Selection cellSelection;
-    std::wstring cellText;
-    if (!GetSelection(context->hwp, &cellSelection, context->result) ||
-        !cellSelection.selected ||
-        cellSelection.start.list != cellSelection.end.list ||
-        !ReadSelectedText(context, &cellText, location)) {
-        return SetError(
-            context->result,
-            L"TEXT_FIND_STATE",
-            location,
-            L"table cell did not expose one text selection");
-    }
-    std::vector<TextMatch> matches;
-    for (size_t offset = 0;
-         offset + command.first.size() <= cellText.size();) {
-        if (!TextMatchesAt(cellText, command.first, offset, command.matchCase)) {
-            ++offset;
-            continue;
-        }
-        const Position start =
-            TextPositionAtOffset(cellSelection.start, cellText, offset);
-        const Position end = TextPositionAtOffset(
-            cellSelection.start,
-            cellText,
-            offset + command.first.size());
-        matches.push_back(TextMatch{
-            Selection{true, kSelectionText, start, end},
-        });
-        if (command.occurrence > 0 &&
-            matches.size() == static_cast<size_t>(command.occurrence)) {
-            return SelectTextRange(context, start, end, location);
-        }
-        if (command.occurrence == 0 && matches.size() == kMaximumCandidates) {
-            break;
-        }
-        offset += command.first.size();
-    }
-    if (!RestoreTextPosition(context, original, location + L".restore")) {
-        return false;
-    }
-    if (matches.empty()) {
-        return SetError(
-            context->result,
-            command.occurrence > 0
-                ? L"TEXT_OCCURRENCE_NOT_FOUND"
-                : L"TEXT_NOT_FOUND",
-            location,
-            L"text.patch found no matching text in the target cell before mutation");
-    }
-    if (command.occurrence > 0) {
-        return SetError(
-            context->result,
-            L"TEXT_OCCURRENCE_NOT_FOUND",
-            location,
-            L"requested text occurrence was not found in the target cell before mutation");
-    }
-    if (matches.size() > 1) {
-        return SetError(
-            context->result,
-            L"AMBIGUOUS_TEXT_MATCH",
-            TextMatchCandidates(matches),
-            L"multiple text matches in the target cell require an explicit occurrence");
-    }
-    return SelectTextRange(
-        context,
-        matches.front().selection.start,
-        matches.front().selection.end,
-        location);
-}
-
-bool PrepareForwardFind(
-    Context* const context,
-    const std::wstring& expected,
-    const bool matchCase,
-    CComPtr<IDispatch>& set) {
-    CComPtr<IDispatch> parameterSets;
-    CComPtr<IDispatch> findReplace;
-    if (!GetDispatchProperty(
-            context->hwp,
-            L"HParameterSet",
-            parameterSets,
-            context->result,
-            L"text.find") ||
-        !GetDispatchProperty(
-            parameterSets,
-            L"HFindReplace",
-            findReplace,
-            context->result,
-            L"text.find") ||
-        !GetDispatchProperty(
-            findReplace,
-            L"HSet",
-            set,
-            context->result,
-            L"text.find")) {
-        return false;
-    }
-    CComVariant ignored;
-    const HRESULT status = Method(
-        context->action,
-        L"GetDefault",
-        {CComVariant(L"ForwardFind"), CComVariant(set)},
-        &ignored);
-    if (FAILED(status)) {
-        return SetError(
-            context->result,
-            L"ACTION_DEFAULT",
-            L"text.find",
-            HResultText(L"ForwardFind", status));
-    }
-    return PutItemOrProperty(
-               findReplace,
-               L"FindString",
-               CComVariant(expected.c_str()),
-               context->result,
-               L"text.find") &&
-        PutItemOrProperty(
-               findReplace,
-               L"Direction",
-               CComVariant(0L),
-               context->result,
-               L"text.find") &&
-        PutItemOrProperty(
-               findReplace,
-               L"MatchCase",
-               BooleanVariant(matchCase),
-               context->result,
-               L"text.find") &&
-        PutItemOrProperty(
-               findReplace,
-               L"IgnoreMessage",
-               BooleanVariant(true),
-               context->result,
-               L"text.find");
-}
-
-bool SelectTextPatchMatch(
-    Context* const context,
-    const Command& command,
-    const Selection& original,
-    const LONG listFilter) {
-    constexpr size_t kMaximumCandidates = 24;
-    constexpr size_t kMaximumSearches = 20'000;
-    CComPtr<IDispatch> findSet;
-    if (!PrepareForwardFind(context, command.first, command.matchCase, findSet)) {
-        return false;
-    }
-    const bool positioned = listFilter < 0
-        ? RunVerifiedNavigationAction(
-              context->action,
-              L"MoveDocBegin",
-              context->result,
-              L"text.find")
-        : SetPosition(
-              context->hwp,
-              Position{listFilter, 0, 0},
-              context->result,
-              L"text.find");
-    if (!positioned) {
-        return false;
-    }
-    std::set<std::wstring> seen;
-    std::vector<TextMatch> matches;
-    bool exhausted = false;
-    for (size_t search = 0; search < kMaximumSearches; ++search) {
-        bool found = false;
-        if (!CallBooleanMethod(
-                context->action,
-                L"Execute",
-                {CComVariant(L"ForwardFind"), CComVariant(findSet)},
-                &found,
-                context->result,
-                L"text.find")) {
-            return false;
-        }
-        if (!found) {
-            exhausted = true;
-            break;
-        }
-        Selection current;
-        if (!GetSelection(context->hwp, &current, context->result) ||
-            !current.selected || current.start.list != current.end.list) {
-            return SetError(
-                context->result,
-                L"TEXT_FIND_STATE",
-                L"text.find",
-                L"ForwardFind did not return one text selection");
-        }
-        const std::wstring key = TextMatchKey(current);
-        if (!seen.insert(key).second) {
-            exhausted = true;
-            break;
-        }
-        if (listFilter < 0 || current.start.list == listFilter) {
-            matches.push_back(TextMatch{current});
-            if (command.occurrence > 0 &&
-                matches.size() == static_cast<size_t>(command.occurrence)) {
-                return true;
-            }
-            if (command.occurrence == 0 && matches.size() == kMaximumCandidates) {
-                break;
-            }
-        }
-        if (!SetPosition(
-                context->hwp,
-                current.end,
-                context->result,
-                L"text.find")) {
-            return false;
-        }
-    }
-    if (command.occurrence > 0) {
-        if (!RestoreTextPosition(context, original, L"text.find.restore")) {
-            return false;
-        }
-        return SetError(
-            context->result,
-            exhausted ? L"TEXT_OCCURRENCE_NOT_FOUND" : L"TEXT_SEARCH_LIMIT",
-            L"text.find",
-            L"requested text occurrence was not found before mutation");
-    }
-    if (!exhausted && matches.size() < 2) {
-        if (!RestoreTextPosition(context, original, L"text.find.restore")) {
-            return false;
-        }
-        return SetError(
-            context->result,
-            L"TEXT_SEARCH_LIMIT",
-            L"text.find",
-            L"text search limit was reached before uniqueness could be proven");
-    }
-    if (matches.empty()) {
-        if (!RestoreTextPosition(context, original, L"text.find.restore")) {
-            return false;
-        }
-        return SetError(
-            context->result,
-            exhausted ? L"TEXT_NOT_FOUND" : L"TEXT_SEARCH_LIMIT",
-            L"text.find",
-            L"text.patch found no matching text before mutation");
-    }
-    if (matches.size() > 1) {
-        if (!RestoreTextPosition(context, original, L"text.find.restore")) {
-            return false;
-        }
-        return SetError(
-            context->result,
-            L"AMBIGUOUS_TEXT_MATCH",
-            TextMatchCandidates(matches),
-            L"multiple text matches require an explicit occurrence");
-    }
-    return SelectTextRange(
-        context,
-        matches.front().selection.start,
-        matches.front().selection.end,
-        L"text.find");
-}
-
-bool PatchSearchedText(
-    Context* const context,
-    const Command& command,
-    const LONG listFilter,
-    const Selection& original,
-    const std::wstring& location) {
-    if (command.occurrence < 0 || command.occurrence > 20'000) {
-        return SetError(
-            context->result,
-            L"TEXT_OCCURRENCE",
-            location,
-            L"text occurrence must be between 1 and 20000 when supplied");
-    }
-    return SelectTextPatchMatch(context, command, original, listFilter) &&
-        PatchSelectedText(
-            context,
-            command.first,
-            true,
-            command.matchCase,
-            command.second,
-            location,
-            command.preserveFormat);
-}
-
-bool PatchText(Context* const context, const Command& command) {
-    if (command.name == L"CURRENT") {
-        return PatchCurrentText(context, command);
-    }
-    if (command.name == L"RANGE") {
-        const Position start{command.list, command.paragraph, command.character};
-        const Position end{
-            command.endList,
-            command.endParagraph,
-            command.endCharacter};
-        return SelectTextRange(context, start, end, L"range") &&
-            PatchSelectedText(
-                context,
-                command.first,
-                true,
-                true,
-                command.second,
-                L"range",
-                command.preserveFormat);
-    }
-    Selection original;
-    if (!GetSelection(context->hwp, &original, context->result)) {
-        return false;
-    }
-    if (command.name == L"FIND") {
-        return PatchSearchedText(
-            context,
-            command,
-            -1,
-            original,
-            L"text.find");
-    }
-    if (command.name == L"CELL") {
-        if (!SelectControl(context, command.tableInstanceId) ||
-            !CaptureCurrentTable(context) ||
-            !GoToCell(context, command.cellAddress)) {
-            return false;
-        }
-        const std::wstring address = NormalizeAddress(command.cellAddress);
-        return
-            SelectCellTextPatchMatch(context, command, original, address) &&
-            PatchSelectedText(
-                context,
-                command.first,
-                true,
-                command.matchCase,
-                command.second,
-                address,
-                command.preserveFormat);
-    }
-    return SetError(
-        context->result,
-        L"TEXT_PATCH_TARGET",
-        command.name,
-        L"unsupported text.patch target");
-}
-
-bool ConfigureImageCell(Context* const context, const std::wstring& location) {
-    CComPtr<IDispatch> parameterSets;
-    CComPtr<IDispatch> shape;
-    CComPtr<IDispatch> shapeSet;
-    CComPtr<IDispatch> cell;
-    if (!GetDispatchProperty(context->hwp, L"HParameterSet", parameterSets, context->result, location) ||
-        !GetDispatchProperty(parameterSets, L"HShapeObject", shape, context->result, location) ||
-        !GetDispatchProperty(shape, L"HSet", shapeSet, context->result, location)) {
-        return false;
-    }
-    CComVariant ignored;
-    HRESULT status = Method(
-        context->action,
-        L"GetDefault",
-        {CComVariant(L"TablePropertyDialog"), CComVariant(shapeSet)},
-        &ignored);
-    if (FAILED(status) ||
-        !PutItemOrProperty(shapeSet, L"ShapeType", CComVariant(3L), context->result, location) ||
-        !PutItemOrProperty(shapeSet, L"ShapeCellSize", CComVariant(0L), context->result, location) ||
-        !GetDispatchProperty(shape, L"ShapeTableCell", cell, context->result, location)) {
-        return false;
-    }
-    const std::pair<const wchar_t*, LONG> margins[] = {
-        {L"HasMargin", 1L},
-        {L"MarginLeft", 0L},
-        {L"MarginRight", 0L},
-        {L"MarginTop", 0L},
-        {L"MarginBottom", 0L},
-    };
-    for (const auto& [name, value] : margins) {
-        status = PropertyPut(cell, name, CComVariant(value));
-        if (FAILED(status)) {
-            return SetError(context->result, L"IMAGE_CELL_FORMAT", location, HResultText(name, status));
-        }
-    }
-    bool executed = false;
-    if (!CallBooleanMethod(
-            context->action,
-            L"Execute",
-            {CComVariant(L"TablePropertyDialog"), CComVariant(shapeSet)},
-            &executed,
-            context->result,
-            location) ||
-        !executed) {
-        return executed ? false : SetError(
-            context->result,
-            L"IMAGE_CELL_FORMAT",
-            location,
-            L"TablePropertyDialog returned false");
-    }
-    CComPtr<IDispatch> paragraph;
-    CComPtr<IDispatch> paragraphSet;
-    if (!GetDispatchProperty(parameterSets, L"HParaShape", paragraph, context->result, location) ||
-        !GetDispatchProperty(paragraph, L"HSet", paragraphSet, context->result, location)) {
-        return false;
-    }
-    status = Method(
-        context->action,
-        L"GetDefault",
-        {CComVariant(L"ParagraphShape"), CComVariant(paragraphSet)},
-        &ignored);
-    if (FAILED(status)) {
-        return SetError(context->result, L"IMAGE_CELL_FORMAT", location, HResultText(L"GetDefault", status));
-    }
-    const wchar_t* const fields[] = {
-        L"LeftMargin",
-        L"RightMargin",
-        L"Indentation",
-        L"PrevSpacing",
-        L"NextSpacing",
-    };
-    for (const wchar_t* const field : fields) {
-        status = PropertyPut(paragraph, field, CComVariant(0L));
-        if (FAILED(status)) {
-            return SetError(context->result, L"IMAGE_CELL_FORMAT", location, HResultText(field, status));
-        }
-    }
-    if (!CallBooleanMethod(
-            context->action,
-            L"Execute",
-            {CComVariant(L"ParagraphShape"), CComVariant(paragraphSet)},
-            &executed,
-            context->result,
-            location) ||
-        !executed) {
-        return executed ? false : SetError(
-            context->result,
-            L"IMAGE_CELL_FORMAT",
-            location,
-            L"ParagraphShape returned false");
-    }
-    return true;
-}
-
-bool InsertPicture(Context* const context, const Command& command) {
-    const std::wstring& path = command.first;
-    const std::wstring address = GetCellAddress(context->hwp);
-    const bool inCell = !address.empty();
-    const std::wstring location = inCell ? address : path;
-    if (inCell && !ConfigureImageCell(context, location)) {
-        return false;
-    }
-    CComVariant raw;
-    HRESULT status = Method(
-        context->hwp,
-        L"InsertPicture",
-        {
-            CComVariant(path.c_str()),
-            BooleanVariant(true),
-            CComVariant(3L),
-            BooleanVariant(false),
-            BooleanVariant(false),
-            CComVariant(0L),
-            CComVariant(0L),
-            CComVariant(0L),
-        },
-        &raw);
-    CComPtr<IDispatch> picture;
-    if (SUCCEEDED(status)) {
-        status = AsDispatch(raw, picture);
-    }
-    if (FAILED(status)) {
-        return SetError(context->result, L"INSERT_IMAGE", location, HResultText(L"InsertPicture", status));
-    }
-    CComPtr<IDispatch> properties;
-    if (!GetDispatchProperty(picture, L"Properties", properties, context->result, location)) {
-        return false;
-    }
-    CComVariant ignored;
-    if (command.hasPictureBox) {
-        double widthMm = 0.0;
-        double heightMm = 0.0;
-        if (!FitImageInBox(
-                path,
-                command.pictureWidthMm,
-                command.pictureHeightMm,
-                &widthMm,
-                &heightMm,
-                context->result)) {
-            return false;
-        }
-        Value widthValue;
-        widthValue.kind = ValueKind::Millimeter;
-        widthValue.millimeter = widthMm;
-        Value heightValue;
-        heightValue.kind = ValueKind::Millimeter;
-        heightValue.millimeter = heightMm;
-        CComVariant width;
-        CComVariant height;
-        if (!ConvertValue(context->hwp, widthValue, &width, context->result, location) ||
-            !ConvertValue(context->hwp, heightValue, &height, context->result, location)) {
-            return false;
-        }
-        status = Method(
-            properties,
-            L"SetItem",
-            {CComVariant(L"Width"), width},
-            &ignored);
-        if (SUCCEEDED(status)) {
-            status = Method(
-                properties,
-                L"SetItem",
-                {CComVariant(L"Height"), height},
-                &ignored);
-        }
-    }
-    if (SUCCEEDED(status)) {
-        status = Method(
-            properties,
-            L"SetItem",
-            {CComVariant(L"TreatAsChar"), BooleanVariant(true)},
-            &ignored);
-    }
-    if (SUCCEEDED(status)) {
-        status = PropertyPut(picture, L"Properties", CComVariant(properties));
-    }
-    if (FAILED(status)) {
-        return SetError(context->result, L"INSERT_IMAGE", location, HResultText(L"TreatAsChar", status));
-    }
-    ++context->result->imageInsertions;
-    return true;
-}
-
-bool ApplyStyle(Context* const context, const LONG styleId, const std::wstring& location) {
-    CComPtr<IDispatch> parameterSets;
-    CComPtr<IDispatch> style;
-    CComPtr<IDispatch> set;
-    if (!GetDispatchProperty(context->hwp, L"HParameterSet", parameterSets, context->result, location) ||
-        !GetDispatchProperty(parameterSets, L"HStyle", style, context->result, location) ||
-        !GetDispatchProperty(style, L"HSet", set, context->result, location)) {
-        return false;
-    }
-    CComVariant ignored;
-    HRESULT status = Method(
-        context->action,
-        L"GetDefault",
-        {CComVariant(L"Style"), CComVariant(set)},
-        &ignored);
-    if (SUCCEEDED(status)) {
-        status = PropertyPut(style, L"Apply", CComVariant(styleId));
-    }
-    if (FAILED(status)) {
-        return SetError(context->result, L"STYLE", location, HResultText(L"Style", status));
-    }
-    bool executed = false;
-    return CallBooleanMethod(
-               context->action,
-               L"Execute",
-               {CComVariant(L"Style"), CComVariant(set)},
-               &executed,
-               context->result,
-               location) &&
-        (executed || SetError(context->result, L"STYLE", location, L"Style returned false"));
-}
-
-Setter IntegerSetter(const std::wstring& path, const LONG value) {
-    Setter setter;
-    setter.path = path;
-    setter.value.kind = ValueKind::Integer;
-    setter.value.integer = value;
-    return setter;
-}
-
-Setter BooleanSetter(const std::wstring& path, const bool value) {
-    Setter setter;
-    setter.path = path;
-    setter.value.kind = ValueKind::Boolean;
-    setter.value.boolean = value;
-    return setter;
-}
-
-Setter TextSetter(const std::wstring& path, const std::wstring& value) {
-    Setter setter;
-    setter.path = path;
-    setter.value.kind = ValueKind::Text;
-    setter.value.text = value;
-    return setter;
-}
-
-bool ApplyCaptionFormat(Context* const context, const Command& caption) {
-    Command character;
-    character.kind = CommandKind::Action;
-    character.name = L"CharShape";
-    character.parameterSet = L"HCharShape";
-    character.setters = {
-        BooleanSetter(L"Bold", caption.captionBold),
-        IntegerSetter(L"Height", caption.captionHeight),
-        IntegerSetter(L"TextColor", caption.captionTextColor),
-    };
-    const wchar_t* const languages[] = {
-        L"Hangul",
-        L"Latin",
-        L"Hanja",
-        L"Japanese",
-        L"Other",
-        L"Symbol",
-        L"User",
-    };
-    for (const wchar_t* const language : languages) {
-        character.setters.push_back(
-            TextSetter(L"FaceName" + std::wstring(language), caption.captionFaceName));
-        character.setters.push_back(
-            IntegerSetter(L"FontType" + std::wstring(language), 1L));
-    }
-    if (!ExecuteParameterAction(context, character)) {
-        return false;
-    }
-
-    Command paragraph;
-    paragraph.kind = CommandKind::Action;
-    paragraph.name = L"ParagraphShape";
-    paragraph.parameterSet = L"HParaShape";
-    paragraph.setters = {
-        IntegerSetter(L"AlignType", caption.captionAlignment),
-        IntegerSetter(L"LineSpacing", caption.captionLineSpacing),
-        IntegerSetter(L"LeftMargin", caption.captionLeftMargin),
-        IntegerSetter(L"RightMargin", caption.captionRightMargin),
-        IntegerSetter(L"Indentation", caption.captionIndentation),
-        IntegerSetter(L"PrevSpacing", caption.captionPreviousSpacing),
-        IntegerSetter(L"NextSpacing", caption.captionNextSpacing),
-    };
-    return ExecuteParameterAction(context, paragraph);
-}
-
-bool CopyPasteCaptionFormat(Context* const context) {
-    Command shape;
-    shape.kind = CommandKind::Action;
-    shape.name = L"ShapeCopyPaste";
-    shape.parameterSet = L"HShapeCopyPaste";
-    shape.setters = {IntegerSetter(L"Type", 2L)};
-    return ExecuteParameterAction(context, shape);
-}
-
-bool AttachCaption(Context* const context, const Command& command) {
-    if (context->table == nullptr || context->tableId.empty()) {
-        return SetError(context->result, L"NO_TABLE", L"caption", L"current table is unavailable");
-    }
-    if (command.hasCaptionFormatSource &&
-        (!SetPosition(
-             context->hwp,
-             Position{
-                 command.captionFormatSourceList,
-                 command.captionFormatSourceParagraph,
-                 command.captionFormatSourceCharacter,
-             },
-             context->result,
-             L"caption format source") ||
-         !CopyPasteCaptionFormat(context))) {
-        return false;
-    }
-    if (!SelectControl(context, context->tableId)) {
-        return false;
-    }
-    bool detached = false;
-    if (!CallBooleanMethod(
-            context->action,
-            L"Run",
-            {CComVariant(L"ShapeObjDetachCaption")},
-            &detached,
-            context->result,
-            L"caption reset")) {
-        return false;
-    }
-    if (detached) {
-        ++context->result->actionsExecuted;
-    }
-    if (!SelectControl(context, context->tableId) ||
-        !RunAction(context->action, L"ShapeObjAttachCaption", context->result, L"caption") ||
-        !RunAction(context->action, L"MoveParaEnd", context->result, L"caption") ||
-        !InsertText(context, command.first, L"caption")) {
-        return false;
-    }
-    if (!RunAction(context->action, L"SelectAll", context->result, L"caption") ||
-        !ApplyStyle(context, command.styleId, L"caption")) {
-        return false;
-    }
-    if (command.hasCaptionFormatSource || command.hasCaptionFormat) {
-        if (command.hasCaptionFormatSource) {
-            if (!CopyPasteCaptionFormat(context)) {
-                return false;
-            }
-        } else if (!ApplyCaptionFormat(context, command)) {
-            return false;
-        }
-    }
-    if (!RunAction(context->action, L"CloseEx", context->result, L"caption")) {
-        return false;
-    }
-    return SelectControl(context, context->tableId);
-}
-
-bool AnchorPosition(
-    IDispatch* const control,
-    Position* const position,
-    ExecutionResult* const result) {
-    CComVariant raw;
-    CComPtr<IDispatch> anchor;
-    HRESULT status = Method(control, L"GetAnchorPos", {CComVariant(0L)}, &raw);
-    if (SUCCEEDED(status)) {
-        status = AsDispatch(raw, anchor);
-    }
-    if (FAILED(status)) {
-        return SetError(result, L"TABLE_ANCHOR", L"", HResultText(L"GetAnchorPos", status));
-    }
-    return ItemLong(anchor, L"List", &position->list, result) &&
-        ItemLong(anchor, L"Para", &position->paragraph, result) &&
-        ItemLong(anchor, L"Pos", &position->character, result);
-}
-
-bool LeaveTable(Context* const context, const bool appendParagraph = true) {
-    if (context->table == nullptr) {
-        return SetError(context->result, L"NO_TABLE", L"", L"current table is unavailable");
-    }
-    Position anchor;
-    if (!AnchorPosition(context->table, &anchor, context->result)) {
-        return false;
-    }
-    for (size_t attempt = 0; attempt < 16; ++attempt) {
-        Position current;
-        if (!GetPosition(context->hwp, &current, context->result)) {
-            return false;
-        }
-        if (current.list == anchor.list) {
-            break;
-        }
-        if (!RunAction(context->action, L"MoveParentList", context->result, L"table")) {
-            return false;
-        }
-    }
-    Position current;
-    if (!GetPosition(context->hwp, &current, context->result) || current.list != anchor.list) {
-        return SetError(context->result, L"TABLE_PARENT", L"", L"table parent list was not reached");
-    }
-    if (!SetPosition(
-            context->hwp,
-            Position{anchor.list, anchor.paragraph, anchor.character + 1},
-            context->result,
-            L"table")) {
-        return false;
-    }
-    if (appendParagraph &&
-        !RunAction(context->action, L"BreakPara", context->result, L"table")) {
-        return false;
-    }
-    context->table.Release();
-    context->tableId.clear();
-    context->topology.Clear();
-    return true;
-}
-
-bool ReadTail(
-    Context* const context,
-    const Position& start,
-    std::wstring* const selected) {
-    if (!SetPosition(context->hwp, start, context->result, L"DELETE_TAIL") ||
-        !RunAction(context->action, L"MoveSelDocEnd", context->result, L"DELETE_TAIL")) {
-        return false;
-    }
-    CComVariant raw;
-    HRESULT status = Method(
-        context->hwp,
-        L"GetTextFile",
-        {CComVariant(L"UNICODE"), CComVariant(L"saveblock:true")},
-        &raw);
-    if (SUCCEEDED(status)) {
-        status = AsString(raw, selected);
-    }
-    if (FAILED(status)) {
-        return SetError(context->result, L"DELETE_TAIL", L"", HResultText(L"GetTextFile", status));
-    }
-    return true;
-}
-
-bool DeleteTail(Context* const context, const Command& command) {
-    const Position start{command.list, command.paragraph, command.character};
-    std::wstring selected;
-    if (!ReadTail(context, start, &selected)) {
-        return false;
-    }
-    if (selected.rfind(command.first, 0) != 0) {
-        static_cast<void>(RunAction(context->action, L"Cancel", context->result, L"DELETE_TAIL"));
-        return SetError(context->result, L"STALE_TAIL", L"", L"tail prefix does not match the request");
-    }
-    return RunAction(context->action, L"Delete", context->result, L"DELETE_TAIL");
-}
-
-bool RollbackAppendTail(Context* const context, const Position& start) {
-    ExecutionResult rollbackResult;
-    Context rollback;
-    rollback.hwp = context->hwp;
-    rollback.action = context->action;
-    rollback.result = &rollbackResult;
-    std::wstring expected;
-    if (!ReadTail(&rollback, start, &expected)) {
-        return false;
-    }
-    Command command;
-    command.kind = CommandKind::DeleteTail;
-    command.list = start.list;
-    command.paragraph = start.paragraph;
-    command.character = start.character;
-    command.first = std::move(expected);
-    return DeleteTail(&rollback, command);
-}
-
-bool CaptureCallResult(
-    ExecutionResult* const result,
-    const std::wstring& method,
-    const CComVariant& raw) {
-    CComVariant value;
-    const HRESULT status = VariantCopyInd(&value, &raw);
-    if (FAILED(status)) {
-        return SetError(result, L"CALL_RETURN", method, HResultText(method.c_str(), status));
-    }
-    CallResult captured;
-    captured.method = method;
-    switch (value.vt) {
-    case VT_EMPTY:
-    case VT_NULL:
-        captured.value = std::monostate{};
-        break;
-    case VT_BOOL:
-        captured.value = value.boolVal != VARIANT_FALSE;
-        break;
-    case VT_I1:
-        captured.value = static_cast<std::int64_t>(value.cVal);
-        break;
-    case VT_I2:
-        captured.value = static_cast<std::int64_t>(value.iVal);
-        break;
-    case VT_I4:
-        captured.value = static_cast<std::int64_t>(value.lVal);
-        break;
-    case VT_INT:
-        captured.value = static_cast<std::int64_t>(value.intVal);
-        break;
-    case VT_I8:
-        captured.value = static_cast<std::int64_t>(value.llVal);
-        break;
-    case VT_UI1:
-        captured.value = static_cast<std::uint64_t>(value.bVal);
-        break;
-    case VT_UI2:
-        captured.value = static_cast<std::uint64_t>(value.uiVal);
-        break;
-    case VT_UI4:
-        captured.value = static_cast<std::uint64_t>(value.ulVal);
-        break;
-    case VT_UINT:
-        captured.value = static_cast<std::uint64_t>(value.uintVal);
-        break;
-    case VT_UI8:
-        captured.value = static_cast<std::uint64_t>(value.ullVal);
-        break;
-    case VT_BSTR:
-        captured.value = value.bstrVal == nullptr
-            ? std::wstring()
-            : std::wstring(value.bstrVal, SysStringLen(value.bstrVal));
-        break;
-    default:
-        return SetError(
-            result,
-            L"CALL_RETURN_TYPE",
-            method,
-            L"Automation method returned an unsupported VARIANT type " +
-                std::to_wstring(value.vt));
-    }
-    result->callResults.push_back(std::move(captured));
-    return true;
-}
-
-bool ExecuteCall(Context* const context, const Command& command) {
-    std::vector<CComVariant> arguments;
-    arguments.reserve(command.arguments.size());
-    for (const Value& value : command.arguments) {
-        CComVariant converted;
-        if (!ConvertValue(
-                context->hwp,
-                value,
-                &converted,
-                context->result,
-                command.name)) {
-            return false;
-        }
-        arguments.push_back(converted);
-    }
-    CComVariant returned;
-    const HRESULT status = Method(
-        context->hwp,
-        command.name.c_str(),
-        arguments,
-        &returned);
-    if (FAILED(status)) {
-        return SetError(context->result, L"COM_METHOD", command.name, HResultText(command.name.c_str(), status));
-    }
-    return CaptureCallResult(context->result, command.name, returned);
-}
-
-bool SaveEncodedBlockFile(
-    Context* const context,
-    const std::wstring& pathText,
-    const std::wstring& encodedBlock) {
-    const size_t magicLength = std::char_traits<char>::length(kEncodedBlockMagic);
-    if (encodedBlock.empty() || encodedBlock.size() > kMaximumBlockFileBytes - magicLength) {
-        return SetError(context->result, L"BLOCK_FILE_SIZE", pathText, L"encoded HWP block text is empty or exceeds 256 MiB");
-    }
-    std::vector<BYTE> bytes;
-    bytes.reserve(magicLength + encodedBlock.size());
-    bytes.insert(bytes.end(), kEncodedBlockMagic, kEncodedBlockMagic + magicLength);
-    for (const wchar_t character : encodedBlock) {
-        if (character > 0x7f) {
-            return SetError(context->result, L"BLOCK_FILE_ENCODING", pathText, L"encoded HWP block text contains a non-ASCII character");
-        }
-        bytes.push_back(static_cast<BYTE>(character));
-    }
-    const HANDLE output = CreateFileW(
-        pathText.c_str(),
-        GENERIC_WRITE,
-        0,
-        nullptr,
-        CREATE_NEW,
-        FILE_ATTRIBUTE_TEMPORARY,
-        nullptr);
-    if (output == INVALID_HANDLE_VALUE) {
-        return SetError(context->result, L"BLOCK_FILE_CREATE", pathText, L"block output file could not be created exclusively");
-    }
-    DWORD written = 0;
-    const BOOL writeSucceeded = WriteFile(
-        output,
-        bytes.data(),
-        static_cast<DWORD>(bytes.size()),
-        &written,
-        nullptr);
-    const BOOL closeSucceeded = CloseHandle(output);
-    if (!writeSucceeded || written != bytes.size() || !closeSucceeded) {
-        static_cast<void>(DeleteFileW(pathText.c_str()));
-        return SetError(context->result, L"BLOCK_FILE_WRITE", pathText, L"encoded HWP block could not be written completely");
-    }
-    return true;
-}
-
-bool SaveDocumentFile(Context* const context, const std::wstring& pathText) {
-    CComVariant rawDocument;
-    std::wstring documentBlock;
-    HRESULT status = Method(
-        context->hwp,
-        L"GetTextFile",
-        {CComVariant(L"HWP"), CComVariant(L"")},
-        &rawDocument);
-    if (SUCCEEDED(status)) {
-        status = AsString(rawDocument, &documentBlock);
-    }
-    if (FAILED(status) || documentBlock.empty()) {
-        return SetError(
-            context->result,
-            L"DOCUMENT_CHECKPOINT_CAPTURE",
-            pathText,
-            FAILED(status)
-                ? HResultText(L"GetTextFile HWP document", status)
-                : L"GetTextFile returned an empty HWP document");
-    }
-    return SaveEncodedBlockFile(context, pathText, documentBlock);
-}
-
-std::wstring ReferenceCellAddress(const LONG row, LONG column) {
-    std::wstring letters;
-    do {
-        letters.insert(letters.begin(), static_cast<wchar_t>(L'A' + column % 26));
-        column = column / 26 - 1;
-    } while (column >= 0);
-    return letters + std::to_wstring(row + 1);
-}
-
-bool RunReferenceAction(
-    Context* const context,
-    const wchar_t* const action,
-    const std::wstring& location) {
-    if (!RunAction(context->action, action, context->result, location)) {
-        return false;
-    }
-    ++context->result->actionsExecuted;
-    return true;
-}
-
-bool SelectReferenceRegion(
-    Context* const context,
-    const LONG top,
-    const LONG left,
-    const LONG bottom,
-    const LONG right) {
-    if (context->topology.Empty() && !BuildCellTopology(context)) {
-        return false;
-    }
-    const auto ownerAt = [&](const LONG row, const LONG column) {
-        for (const hancom::inspection::CellTopologyCell& cell :
-             context->topology.Cells()) {
-            const LONG cellTop = cell.row - 1;
-            const LONG cellLeft = cell.column - 1;
-            if (cellTop <= row && row < cellTop + cell.rowSpan &&
-                cellLeft <= column && column < cellLeft + cell.columnSpan) {
-                return cell.address;
-            }
-        }
-        return std::wstring{};
-    };
-    const std::wstring first = ownerAt(top, left);
-    const std::wstring last = ownerAt(bottom - 1, right - 1);
-    if (first.empty() || last.empty()) {
-        return SetError(
-            context->result,
-            L"REFERENCE_LAYOUT_REGION",
-            ReferenceCellAddress(top, left) + L":" +
-                ReferenceCellAddress(bottom - 1, right - 1),
-            L"selected region is not covered by the inspected table topology");
-    }
-    if (!GoToCell(context, first) ||
-        !RunReferenceAction(context, L"TableCellBlock", first) ||
-        !RunReferenceAction(context, L"TableCellBlockExtend", first)) {
-        return false;
-    }
-    if (first == last) {
-        return true;
-    }
-    std::vector<hancom::inspection::CellTopologyStep> path;
-    std::vector<std::wstring> region;
-    std::wstring error;
-    if (!context->topology.PlanRectangularMerge(first, last, &path, &region, &error)) {
-        return SetError(
-            context->result,
-            L"REFERENCE_LAYOUT_REGION",
-            first + L":" + last,
-            error.empty() ? L"style region is not a complete cell rectangle" : error);
-    }
-    for (const hancom::inspection::CellTopologyStep& step : path) {
-        const wchar_t* const action =
-            step.direction == hancom::inspection::CellDirection::Right
-            ? L"TableRightCell"
-            : L"TableLowerCell";
-        if (!RunReferenceAction(context, action, step.destination) ||
-            GetCellAddress(context->hwp) != step.destination) {
-            return SetError(
-                context->result,
-                L"REFERENCE_LAYOUT_REGION",
-                step.destination,
-                L"selected region did not follow the inspected cell topology");
-        }
-    }
-    context->currentCell = first;
-    return true;
-}
-
-bool InsertReferenceText(
-    Context* const context,
-    const hancom::reference_layout::Text& text) {
-    size_t start = 0;
-    size_t line = 0;
-    while (start <= text.value.size()) {
-        const size_t newline = text.value.find(L'\n', start);
-        const size_t end = newline == std::wstring::npos ? text.value.size() : newline;
-        std::wstring value = text.value.substr(start, end - start);
-        if (!value.empty() && value.back() == L'\r') {
-            value.pop_back();
-        }
-        if (line > 0 &&
-            !RunReferenceAction(
-                context,
-                hancom::reference_layout::TextBreakAction(text.breakMode),
-                L"reference text")) {
-            return false;
-        }
-        if (!value.empty() && !InsertText(context, value, L"reference text")) {
-            return false;
-        }
-        ++line;
-        if (newline == std::wstring::npos) {
-            break;
-        }
-        start = newline + 1;
-    }
-    return true;
-}
-
-bool VerifyReferenceTopology(
-    Context* const context,
-    const hancom::reference_layout::Spec& spec) {
-    context->topology.Clear();
-    if (!BuildCellTopology(context) ||
-        context->topology.Rows() != spec.rows ||
-        context->topology.Columns() != spec.columns) {
-        return SetError(
-            context->result,
-            L"REFERENCE_LAYOUT_VERIFY",
-            context->tableId,
-            L"final table dimensions do not match the compressed layout");
-    }
-    size_t expectedCells = static_cast<size_t>(spec.rows * spec.columns);
-    for (const hancom::reference_layout::Merge& merge : spec.merges) {
-        expectedCells -= static_cast<size_t>(
-            merge.rowSpan * merge.columnSpan - 1);
-        const std::wstring address = ReferenceCellAddress(merge.row, merge.column);
-        const hancom::inspection::CellTopologyCell* const cell =
-            context->topology.Find(address);
-        if (cell == nullptr ||
-            cell->rowSpan != merge.rowSpan ||
-            cell->columnSpan != merge.columnSpan) {
-            return SetError(
-                context->result,
-                L"REFERENCE_LAYOUT_VERIFY",
-                address,
-                L"final merged-cell topology does not match the request");
-        }
-    }
-    if (context->topology.Cells().size() != expectedCells) {
-        return SetError(
-            context->result,
-            L"REFERENCE_LAYOUT_VERIFY",
-            context->tableId,
-            L"final table has an unexpected physical cell count");
-    }
-    for (const hancom::inspection::CellTopologyCell& cell : context->topology.Cells()) {
-        if (cell.row < 1 || cell.column < 1 ||
-            cell.row + cell.rowSpan - 1 > spec.rows ||
-            cell.column + cell.columnSpan - 1 > spec.columns) {
-            return SetError(
-                context->result,
-                L"REFERENCE_LAYOUT_VERIFY",
-                cell.address,
-                L"final cell lies outside the requested grid");
-        }
-        LONG expectedWidth = 0;
-        for (LONG column = cell.column - 1;
-             column < cell.column - 1 + cell.columnSpan; ++column) {
-            expectedWidth += spec.columnWidths[static_cast<size_t>(column)];
-        }
-        LONG expectedHeight = 0;
-        for (LONG row = cell.row - 1;
-             row < cell.row - 1 + cell.rowSpan; ++row) {
-            expectedHeight += spec.rowHeights[static_cast<size_t>(row)];
-        }
-        if ((cell.width >= 0 && cell.width != expectedWidth) ||
-            (cell.height >= 0 && cell.height != expectedHeight)) {
-            return SetError(
-                context->result,
-                L"REFERENCE_LAYOUT_VERIFY",
-                cell.address,
-                L"final cell geometry does not match the breakpoint mapping");
-        }
-    }
-    return true;
-}
-
-const hancom::inspection::CellTopologyCell* ReferenceAxisAnchor(
-    const Context* const context,
-    const bool column,
-    const LONG index) {
-    for (const hancom::inspection::CellTopologyCell& cell :
-         context->topology.Cells()) {
-        const LONG cellIndex = column ? cell.column - 1 : cell.row - 1;
-        const LONG span = column ? cell.columnSpan : cell.rowSpan;
-        if (cellIndex == index && span == 1) {
-            return &cell;
-        }
-    }
-    return nullptr;
-}
-
-bool ResizeReferenceAxis(
-    Context* const context,
-    const bool column,
-    const LONG index,
-    const LONG size) {
-    if ((context->topology.Empty() && !BuildCellTopology(context))) {
-        return false;
-    }
-    const hancom::inspection::CellTopologyCell* const anchor =
-        ReferenceAxisAnchor(context, column, index);
-    const std::wstring location =
-        std::wstring(column ? L"column " : L"row ") + std::to_wstring(index);
-    if (anchor == nullptr) {
-        return SetError(
-            context->result,
-            L"REFERENCE_LAYOUT_PATCH_GEOMETRY",
-            location,
-            L"no single-span cell can resize the requested grid interval");
-    }
-    if (!GoToCell(context, anchor->address) ||
-        !RunReferenceAction(
-            context,
-            column ? L"TableCellBlockCol" : L"TableCellBlockRow",
-            location) ||
-        !ExecuteParameterAction(
-            context,
-            hancom::reference_layout::CellSizeCommand(column, size),
-            false)) {
-        return false;
-    }
-    return RunReferenceAction(context, L"Cancel", location);
-}
-
-bool ReconcileReferenceGeometry(
-    Context* const context,
-    const hancom::reference_layout::Spec& spec) {
-    const std::wstring tableId = context->tableId;
-    if (tableId.empty() ||
-        !LeaveTable(context, false) ||
-        !SelectControl(context, tableId) ||
-        !CaptureCurrentTable(context)) {
+bool RequiresReferenceLayoutAppendRollback(const Request& request) {
+    if (request.commands.empty() ||
+        request.commands.front().kind != CommandKind::MoveDocumentEnd) {
         return false;
-    }
-    context->topology.Clear();
-    if (!BuildCellTopology(context) ||
-        context->topology.Rows() != spec.rows ||
-        context->topology.Columns() != spec.columns) {
-        return SetError(
-            context->result,
-            L"REFERENCE_LAYOUT_RECONCILE",
-            context->tableId,
-            L"final table dimensions cannot be reconciled to the compressed layout");
-    }
-    std::vector<LONG> columns;
-    std::vector<LONG> rows;
-    for (LONG column = 0; column < spec.columns; ++column) {
-        const hancom::inspection::CellTopologyCell* const anchor =
-            ReferenceAxisAnchor(context, true, column);
-        if (anchor == nullptr || anchor->width < 0) {
-            return SetError(
-                context->result,
-                L"REFERENCE_LAYOUT_RECONCILE",
-                L"column " + std::to_wstring(column),
-                L"no measurable single-span cell covers the requested column");
-        }
-        if (anchor->width != spec.columnWidths[static_cast<size_t>(column)]) {
-            columns.push_back(column);
-        }
-    }
-    for (LONG row = 0; row < spec.rows; ++row) {
-        const hancom::inspection::CellTopologyCell* const anchor =
-            ReferenceAxisAnchor(context, false, row);
-        if (anchor == nullptr || anchor->height < 0) {
-            return SetError(
-                context->result,
-                L"REFERENCE_LAYOUT_RECONCILE",
-                L"row " + std::to_wstring(row),
-                L"no measurable single-span cell covers the requested row");
-        }
-        if (anchor->height != spec.rowHeights[static_cast<size_t>(row)]) {
-            rows.push_back(row);
-        }
-    }
-    for (const LONG column : columns) {
-        if (!ResizeReferenceAxis(
-                context,
-                true,
-                column,
-                spec.columnWidths[static_cast<size_t>(column)])) {
-            return false;
-        }
-    }
-    for (const LONG row : rows) {
-        if (!ResizeReferenceAxis(
-                context,
-                false,
-                row,
-                spec.rowHeights[static_cast<size_t>(row)])) {
-            return false;
-        }
     }
-    return true;
-}
-
-bool IntersectsPatchedAxis(
-    const LONG start,
-    const LONG span,
-    const std::vector<LONG>& patched) {
     return std::any_of(
-        patched.begin(),
-        patched.end(),
-        [&](const LONG value) { return start <= value && value < start + span; });
-}
-
-bool VerifyPatchedReferenceTopology(
-    Context* const context,
-    const hancom::reference_layout::Spec& spec,
-    const hancom::inspection::CellTopology& originalTopology) {
-    context->topology.Clear();
-    if (!BuildCellTopology(context) ||
-        context->topology.Rows() != spec.rows ||
-        context->topology.Columns() != spec.columns) {
-        return SetError(
-            context->result,
-            L"REFERENCE_LAYOUT_PATCH_VERIFY",
-            context->tableId,
-            L"patched table dimensions do not match the compressed layout");
-    }
-    if (!originalTopology.HasSamePhysicalShape(context->topology)) {
-        return SetError(
-            context->result,
-            L"REFERENCE_LAYOUT_PATCH_VERIFY",
-            context->tableId,
-            L"patch changed the existing physical cell topology");
-    }
-    for (const hancom::reference_layout::Merge& merge : spec.merges) {
-        const hancom::inspection::CellTopologyCell* const cell =
-            context->topology.Find(
-                ReferenceCellAddress(merge.row, merge.column));
-        if (cell == nullptr ||
-            cell->rowSpan != merge.rowSpan ||
-            cell->columnSpan != merge.columnSpan) {
-            return SetError(
-                context->result,
-                L"REFERENCE_LAYOUT_PATCH_VERIFY",
-                context->tableId,
-                L"patch changed the expected merged-cell topology");
-        }
-    }
-    for (const hancom::inspection::CellTopologyCell& cell :
-         context->topology.Cells()) {
-        if (IntersectsPatchedAxis(
-                cell.column - 1,
-                cell.columnSpan,
-                spec.patchColumns)) {
-            LONG expected = 0;
-            for (LONG column = cell.column - 1;
-                 column < cell.column - 1 + cell.columnSpan;
-                 ++column) {
-                expected += spec.columnWidths[static_cast<size_t>(column)];
-            }
-            if (cell.width >= 0 && cell.width != expected) {
-                return SetError(
-                    context->result,
-                    L"REFERENCE_LAYOUT_PATCH_VERIFY",
-                    cell.address,
-                    L"patched column geometry does not match the requested boundary "
-                    L"(expected " + std::to_wstring(expected) +
-                    L", actual " + std::to_wstring(cell.width) + L")");
-            }
-        }
-        if (IntersectsPatchedAxis(
-                cell.row - 1,
-                cell.rowSpan,
-                spec.patchRows)) {
-            LONG expected = 0;
-            for (LONG row = cell.row - 1;
-                 row < cell.row - 1 + cell.rowSpan;
-                 ++row) {
-                expected += spec.rowHeights[static_cast<size_t>(row)];
-            }
-            if (cell.height >= 0 && cell.height != expected) {
-                return SetError(
-                    context->result,
-                    L"REFERENCE_LAYOUT_PATCH_VERIFY",
-                    cell.address,
-                    L"patched row geometry does not match the requested boundary "
-                    L"(expected " + std::to_wstring(expected) +
-                    L", actual " + std::to_wstring(cell.height) + L")");
-            }
-        }
-    }
-    return true;
-}
-
-class ReferenceLayoutHost final : public hancom::reference_layout::Host {
-public:
-    explicit ReferenceLayoutHost(Context* const context) : context_(context) {}
-
-    bool Fail(const Error& error) override {
-        return SetError(
-            context_->result,
-            error.code,
-            error.location,
-            error.message);
-    }
-
-    bool ExecuteParameter(const Command& command) override {
-        return ExecuteParameterAction(context_, command, false);
-    }
-
-    bool CaptureCreatedTable() override {
-        if (!CaptureCurrentTable(context_) || !SetTableTreatAsCharacter(context_)) {
-            return false;
-        }
-        context_->result->createdControlIds.push_back(context_->tableId);
-        return true;
-    }
-
-    bool CaptureExistingTable(const std::wstring& controlId) override {
-        if (!SelectControl(context_, controlId) || !CaptureCurrentTable(context_)) {
-            return false;
-        }
-        if (context_->tableId != controlId) {
-            return SetError(
-                context_->result,
-                L"WRONG_CONTROL",
-                controlId,
-                L"captured table identity does not match the patch target");
-        }
-        if (!BuildCellTopology(context_)) {
-            return false;
-        }
-        if (originalTopology_.Empty()) {
-            originalTopology_ = context_->topology;
-        }
-        return true;
-    }
-
-    bool ResizeColumn(const LONG column, const LONG width) override {
-        return ResizeReferenceAxis(context_, true, column, width);
-    }
-
-    bool ResizeRow(const LONG row, const LONG height) override {
-        return ResizeReferenceAxis(context_, false, row, height);
-    }
-
-    bool SelectRegion(
-        const LONG top,
-        const LONG left,
-        const LONG bottom,
-        const LONG right) override {
-        return SelectReferenceRegion(context_, top, left, bottom, right);
-    }
-
-    bool GoToCell(const LONG row, const LONG column) override {
-        return ::hancom::actions::GoToCell(
-            context_,
-            ReferenceCellAddress(row, column));
-    }
-
-    bool Run(
-        const wchar_t* const action,
-        const std::wstring& location) override {
-        return RunReferenceAction(context_, action, location);
-    }
-
-    bool InsertText(const hancom::reference_layout::Text& text) override {
-        return InsertReferenceText(context_, text);
-    }
-
-    bool MergeCells(const hancom::reference_layout::Merge& merge) override {
-        const auto ownerAt = [&](const LONG row, const LONG column) {
-            for (const hancom::inspection::CellTopologyCell& cell :
-                 context_->topology.Cells()) {
-                const LONG top = cell.row - 1;
-                const LONG left = cell.column - 1;
-                if (top <= row && row < top + cell.rowSpan &&
-                    left <= column && column < left + cell.columnSpan) {
-                    return cell.address;
-                }
-            }
-            return std::wstring{};
-        };
-        const std::wstring first = ownerAt(merge.row, merge.column);
-        const std::wstring last = ownerAt(
-            merge.row + merge.rowSpan - 1,
-            merge.column + merge.columnSpan - 1);
-        if (first.empty() || last.empty()) {
-            return SetError(
-                context_->result,
-                L"REFERENCE_LAYOUT_MERGE",
-                ReferenceCellAddress(merge.row, merge.column),
-                L"merge corner is not covered by the inspected table topology");
-        }
-        return MergeCellsUsingTopology(
-            context_,
-            first,
-            last,
-            false);
-    }
-
-    bool ReconcileFinalGeometry(
-        const hancom::reference_layout::Spec& spec) override {
-        return ReconcileReferenceGeometry(context_, spec);
-    }
-
-    bool VerifyFinalTopology(
-        const hancom::reference_layout::Spec& spec) override {
-        return VerifyReferenceTopology(context_, spec);
-    }
-
-    bool VerifyPatchedTopology(
-        const hancom::reference_layout::Spec& spec) override {
-        return VerifyPatchedReferenceTopology(context_, spec, originalTopology_);
-    }
-
-    bool LeaveTable(const bool appendParagraph = true) override {
-        return ::hancom::actions::LeaveTable(context_, appendParagraph);
-    }
-
-private:
-    Context* context_;
-    hancom::inspection::CellTopology originalTopology_;
-};
-
-bool ExecuteCommand(Context* const context, const Command& command) {
-    switch (command.kind) {
-    case CommandKind::Run:
-        if (!RunAction(context->action, command.name, context->result, command.name)) {
-            return false;
-        }
-        ++context->result->actionsExecuted;
-        if (command.name == L"TableAppendRow") {
-            context->topology.Clear();
-        }
-        return true;
-    case CommandKind::Action:
-        if (command.name == L"ReferenceLayoutBulk" ||
-            command.name == L"ReferenceLayoutPatch") {
-            ReferenceLayoutHost host(context);
-            return hancom::reference_layout::Execute(command, &host);
-        }
-        if (!ExecuteParameterAction(context, command)) {
-            return false;
-        }
-        if (command.name == L"TableCreate") {
-            if (!CaptureCurrentTable(context) || !SetTableTreatAsCharacter(context)) {
-                return false;
-            }
-            context->result->createdControlIds.push_back(context->tableId);
-        } else if (command.name == L"TableSplitCell") {
-            context->topology.Clear();
-        }
-        return true;
-    case CommandKind::Call:
-        return ExecuteCall(context, command);
-    case CommandKind::MovePage:
-        return MoveToPage(context, command.page);
-    case CommandKind::MovePosition:
-        return SetPosition(
-            context->hwp,
-            Position{command.list, command.paragraph, command.character},
-            context->result,
-            L"MOVE_POSITION");
-    case CommandKind::SelectControl:
-        return SelectControl(context, command.first);
-    case CommandKind::DeleteControl:
-        return DeleteControl(context, command.first);
-    case CommandKind::CopyControl:
-        return CopyControl(context, command.first);
-    case CommandKind::SaveDocumentFile:
-        return SaveDocumentFile(context, command.first);
-    case CommandKind::ApplyCopiedTableAnchor:
-        return ApplyCopiedTableAnchor(context, command.first);
-    case CommandKind::PasteTable:
-        return PasteTable(context);
-    case CommandKind::CaptureTable:
-        return CaptureCurrentTable(context);
-    case CommandKind::MoveDocumentEnd:
-        return RunAction(context->action, L"MoveDocEnd", context->result, L"MOVE_DOC_END");
-    case CommandKind::DeleteTail:
-        return DeleteTail(context, command);
-    case CommandKind::InsertText:
-        return InsertText(context, command.first, L"text");
-    case CommandKind::ReplaceSelection:
-        return ReplaceSelection(context, command);
-    case CommandKind::TextPatch:
-        return PatchText(context, command);
-    case CommandKind::InsertPicture:
-        return InsertPicture(context, command);
-    case CommandKind::Cell:
-        return GoToCell(context, command.first);
-    case CommandKind::SetCellText:
-        return SetCellText(context, command);
-    case CommandKind::Merge:
-        return MergeCells(context, command.first, command.second);
-    case CommandKind::Caption:
-        return AttachCaption(context, command);
-    case CommandKind::LeaveTable:
-        return LeaveTable(context);
-    }
-    return SetError(context->result, L"COMMAND", L"", L"unsupported command kind");
-}
-
-bool ValidateCommandOrder(const Request& request, ExecutionResult* const result) {
-    if (request.atomic && (request.commands.empty() ||
-        request.commands.front().kind != CommandKind::MoveDocumentEnd)) {
-        return SetError(
-            result,
-            L"ATOMIC_UNSUPPORTED",
-            L"POLICY",
-            L"atomic rollback requires an append batch starting with MOVE_DOC_END");
-    }
-    bool copiedTable = false;
-    for (const Command& command : request.commands) {
-        if (command.kind == CommandKind::CopyControl) {
-            copiedTable = true;
-            continue;
-        }
-        if ((command.kind == CommandKind::PasteTable ||
-             command.kind == CommandKind::ApplyCopiedTableAnchor) &&
-            !copiedTable) {
-            const wchar_t* const name = command.kind == CommandKind::PasteTable
-                ? L"PASTE_TABLE"
-                : L"APPLY_COPIED_TABLE_ANCHOR";
-            return SetError(
-                result,
-                L"NO_TABLE_ANCHOR_FORMAT",
-                command.kind == CommandKind::PasteTable ? L"table" : command.first,
-                std::wstring(name) + L" requires a preceding COPY_CONTROL command");
-        }
-    }
-    return true;
-}
-
-std::wstring StructureDigest(IDispatch* const hwp) {
-    const hancom::official_api::DocumentState state =
-        hancom::official_api::CaptureDocumentState(hwp);
-    if (state.pageCount < 0 || state.controlCount < 0) {
-        return L"";
-    }
-    return std::to_wstring(state.pageCount) + L":" +
-        std::to_wstring(state.controlCount) + L":" +
-        std::to_wstring(state.controlHash);
-}
-
-std::wstring CommandStep(const Command& command) {
-    switch (command.kind) {
-    case CommandKind::Run:
-    case CommandKind::Action:
-    case CommandKind::Call:
-        return command.name;
-    case CommandKind::MovePage:
-        return L"MOVE_PAGE";
-    case CommandKind::MovePosition:
-        return L"MOVE_POSITION";
-    case CommandKind::SelectControl:
-        return L"SELECT_CONTROL";
-    case CommandKind::DeleteControl:
-        return L"DELETE_CONTROL";
-    case CommandKind::CopyControl:
-        return L"COPY_CONTROL";
-    case CommandKind::SaveDocumentFile:
-        return L"SAVE_DOCUMENT_FILE";
-    case CommandKind::ApplyCopiedTableAnchor:
-        return L"APPLY_COPIED_TABLE_ANCHOR";
-    case CommandKind::PasteTable:
-        return L"PASTE_TABLE";
-    case CommandKind::CaptureTable:
-        return L"CAPTURE_TABLE";
-    case CommandKind::MoveDocumentEnd:
-        return L"MOVE_DOC_END";
-    case CommandKind::DeleteTail:
-        return L"DELETE_TAIL";
-    case CommandKind::InsertText:
-        return L"INSERT_TEXT";
-    case CommandKind::ReplaceSelection:
-        return L"REPLACE_SELECTION";
-    case CommandKind::TextPatch:
-        return L"PATCH_TEXT";
-    case CommandKind::InsertPicture:
-        return L"INSERT_PICTURE";
-    case CommandKind::Cell:
-        return L"CELL";
-    case CommandKind::SetCellText:
-        return L"SET_CELL_TEXT";
-    case CommandKind::Merge:
-        return L"MERGE";
-    case CommandKind::Caption:
-        return L"CAPTION";
-    case CommandKind::LeaveTable:
-        return L"LEAVE_TABLE";
-    }
-    return L"COMMAND";
-}
-
-bool CommandMayMutate(const Command& command) {
-    switch (command.kind) {
-    case CommandKind::Run:
-        return command.name != L"SelectCtrlFront" && command.name != L"Cancel";
-    case CommandKind::Action:
-    case CommandKind::Call:
-    case CommandKind::DeleteControl:
-    case CommandKind::ApplyCopiedTableAnchor:
-    case CommandKind::PasteTable:
-    case CommandKind::DeleteTail:
-    case CommandKind::InsertText:
-    case CommandKind::ReplaceSelection:
-    case CommandKind::TextPatch:
-    case CommandKind::InsertPicture:
-    case CommandKind::SetCellText:
-    case CommandKind::Merge:
-    case CommandKind::Caption:
-        return true;
-    case CommandKind::MovePage:
-    case CommandKind::MovePosition:
-    case CommandKind::SelectControl:
-    case CommandKind::CopyControl:
-    case CommandKind::SaveDocumentFile:
-    case CommandKind::CaptureTable:
-    case CommandKind::MoveDocumentEnd:
-    case CommandKind::Cell:
-    case CommandKind::LeaveTable:
-        return false;
-    }
-    return false;
+        request.commands.begin(),
+        request.commands.end(),
+        [](const Command& command) {
+            return command.kind == CommandKind::Action &&
+                command.name == L"ReferenceLayoutBulk";
+        });
 }
 
 }
+
+using namespace detail;
 
 ExecutionResult Execute(IDispatch* const hwp, const Request& request) noexcept {
     const auto started = std::chrono::steady_clock::now();
     ExecutionResult result;
+    const bool rollbackAppendTail =
+        request.atomic || RequiresReferenceLayoutAppendRollback(request);
     MessageBoxModeScope messageBoxMode;
     bool atomicRollbackAttempted = false;
     bool atomicRollbackSucceeded = false;
@@ -4040,14 +1111,14 @@ ExecutionResult Execute(IDispatch* const hwp, const Request& request) noexcept {
             if (result.failedStep.empty()) {
                 result.failedStep = result.error.location;
             }
-            result.retrySafe = !result.partialMutation;
+            result.retrySafe = result.retrySafe && !result.partialMutation;
         }
         result.elapsedMicroseconds = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - started).count();
         return result;
     };
     const auto attemptAtomicRollback = [&]() noexcept {
-        if (!request.atomic || !hasAtomicAppendStart || atomicRollbackAttempted ||
+        if (!rollbackAppendTail || !hasAtomicAppendStart || atomicRollbackAttempted ||
             context.action == nullptr) {
             return;
         }
@@ -4076,6 +1147,9 @@ ExecutionResult Execute(IDispatch* const hwp, const Request& request) noexcept {
         if (!GetDispatchProperty(hwp, L"HAction", context.action, &result)) {
             return finish();
         }
+        if (!PreflightTableTextCommands(&context, request)) {
+            return finish();
+        }
         for (const Command& command : request.commands) {
             result.failedStep = CommandStep(command);
             const bool timesPicture = command.kind == CommandKind::InsertPicture;
@@ -4096,7 +1170,7 @@ ExecutionResult Execute(IDispatch* const hwp, const Request& request) noexcept {
                 attemptAtomicRollback();
                 return finish();
             }
-            if (request.atomic && command.kind == CommandKind::MoveDocumentEnd &&
+            if (rollbackAppendTail && command.kind == CommandKind::MoveDocumentEnd &&
                 !hasAtomicAppendStart) {
                 if (!GetPosition(hwp, &atomicAppendStart, &result)) {
                     return finish();

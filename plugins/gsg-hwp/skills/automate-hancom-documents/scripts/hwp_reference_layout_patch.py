@@ -81,13 +81,23 @@ class ReferenceLayoutPatchBlock(ContractModel):
             column < 0 or column >= columns for column in self.changed_columns
         ):
             raise ValueError("changed columns must be unique column indexes")
+        if self.text_styles and not self.text_anchors:
+            raise ValueError("text_styles require text_anchors")
         if not (
             self.changed_rows
             or self.changed_columns
             or self.style_regions
             or self.edges
+            or self.text_anchors
         ):
             raise ValueError("reference layout patch has no changes")
+        text_targets = {
+            (anchor.row, anchor.column)
+            for anchor in self.text_anchors
+        }
+        if len(text_targets) != len(self.text_anchors):
+            raise ValueError("text anchor targets must be unique")
+        _ = self.combined_styles()
         for region in self.style_regions:
             for merge in self.merges:
                 overlaps = (
@@ -109,6 +119,25 @@ class ReferenceLayoutPatchBlock(ContractModel):
         _ = self.as_reference_layout()
         return self
 
+    def combined_styles(self) -> tuple[ReferenceStyle, ...]:
+        combined = list(self.styles)
+        by_key = {style.key: style for style in self.styles}
+        text_keys: set[str] = set()
+        for style in self.text_styles:
+            if style.key in text_keys:
+                raise ValueError("text style keys must be unique")
+            text_keys.add(style.key)
+            existing = by_key.get(style.key)
+            if existing is not None:
+                if existing != style:
+                    raise ValueError(
+                        "region and text styles with the same key must be identical"
+                    )
+                continue
+            combined.append(style)
+            by_key[style.key] = style
+        return tuple(combined)
+
     def as_reference_layout(self) -> ReferenceLayoutBlock:
         return ReferenceLayoutBlock(
             kind="reference_layout",
@@ -117,8 +146,9 @@ class ReferenceLayoutPatchBlock(ContractModel):
             column_breakpoints=self.column_breakpoints,
             merges=self.merges,
             visible_edges=self.edges,
-            styles=self.styles,
+            styles=self.combined_styles(),
             style_regions=self.style_regions,
+            text_anchors=self.text_anchors,
             protected_gaps=self.protected_gaps,
         )
 
@@ -129,6 +159,7 @@ def compile_reference_layout_patch_command(
     *,
     page_number: int,
 ) -> ParameterActionCommand:
+    layout = patch.as_reference_layout()
     area = page.usable_area(page_number=page_number)
     frame = PlacementFrame.from_reference(
         area,
@@ -142,16 +173,11 @@ def compile_reference_layout_patch_command(
     columns = frame.map_columns(patch.column_breakpoints)
     rows = frame.map_rows(patch.row_breakpoints)
     row_heights = reserve_text_row_heights(
-        patch.as_reference_layout().model_copy(
-            update={
-                "styles": patch.text_styles or patch.styles,
-                "text_anchors": patch.text_anchors,
-            }
-        ),
+        layout,
         rows.sizes,
         columns.sizes,
     )
-    payload = compile_reference_layout_payload(patch.as_reference_layout())
+    payload = compile_reference_layout_payload(layout)
     column_array, column_values = integer_array("ColumnWidths", columns.sizes)
     row_array, row_values = integer_array("RowHeights", row_heights)
     patch_columns_array, patch_column_values = integer_array(

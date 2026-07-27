@@ -155,18 +155,28 @@ bool CellTopology::Build(
             return Fail(error, L"table topology physical grid exceeds the inspection limit");
         }
 
-        std::map<std::pair<long, long>, size_t> owners;
+        const size_t noOwner = (std::numeric_limits<size_t>::max)();
+        std::vector<size_t> ownerBySlot(
+            static_cast<size_t>(expectedSlots),
+            noOwner);
+        size_t assignedSlots = 0;
         for (size_t index = 0; index < cells.size(); ++index) {
             const CellTopologyCell& cell = cells[index];
             for (long row = cell.row; row < cell.row + cell.rowSpan; ++row) {
                 for (long column = cell.column; column < cell.column + cell.columnSpan; ++column) {
-                    if (!owners.emplace(std::pair(row, column), index).second) {
+                    const size_t slot =
+                        static_cast<size_t>(row - 1) *
+                            static_cast<size_t>(columns) +
+                        static_cast<size_t>(column - 1);
+                    if (ownerBySlot[slot] != noOwner) {
                         return Fail(error, L"table topology cells overlap");
                     }
+                    ownerBySlot[slot] = index;
+                    ++assignedSlots;
                 }
             }
         }
-        if (owners.size() != expectedSlots) {
+        if (assignedSlots != expectedSlots) {
             return Fail(error, L"table topology has a physical-grid gap");
         }
 
@@ -194,6 +204,7 @@ bool CellTopology::Build(
         }
         cells_ = std::move(cells);
         byAddress_ = std::move(byAddress);
+        ownerBySlot_ = std::move(ownerBySlot);
         rows_ = rows;
         columns_ = columns;
         return true;
@@ -205,8 +216,16 @@ bool CellTopology::Build(
 void CellTopology::Clear() noexcept {
     cells_.clear();
     byAddress_.clear();
+    ownerBySlot_.clear();
     rows_ = 0;
     columns_ = 0;
+}
+
+void CellTopology::InvalidateGeometry() noexcept {
+    for (CellTopologyCell& cell : cells_) {
+        cell.width = -1;
+        cell.height = -1;
+    }
 }
 
 bool CellTopology::Empty() const noexcept {
@@ -228,6 +247,22 @@ const CellTopologyCell* CellTopology::Find(const std::wstring& raw) const noexce
     } catch (...) {
         return nullptr;
     }
+}
+
+const CellTopologyCell* CellTopology::OwnerAt(
+    const long row,
+    const long column) const noexcept {
+    if (row < 1 || column < 1 || row > rows_ || column > columns_) {
+        return nullptr;
+    }
+    const size_t slot =
+        static_cast<size_t>(row - 1) * static_cast<size_t>(columns_) +
+        static_cast<size_t>(column - 1);
+    if (slot >= ownerBySlot_.size()) {
+        return nullptr;
+    }
+    const size_t owner = ownerBySlot_[slot];
+    return owner < cells_.size() ? &cells_[owner] : nullptr;
 }
 
 const std::vector<CellTopologyCell>& CellTopology::Cells() const noexcept {

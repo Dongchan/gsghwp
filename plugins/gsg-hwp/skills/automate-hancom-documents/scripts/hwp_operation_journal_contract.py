@@ -18,6 +18,7 @@ from hwp_operation_contract import (
     OperationJournalState,
     OperationResult,
 )
+from hwp_save_fingerprint import SaveFileFingerprint
 
 
 type JournalDecisionKind = Literal[
@@ -106,10 +107,19 @@ class JournalDecision:
     commands_completed: int | None = None
     resolved_target_id: str | None = None
     target_resolution_basis: str | None = None
+    request_id: str | None = None
+    document_path: str | None = None
+    operation: str | None = None
+    save_fingerprint_before: SaveFileFingerprint | None = None
 
 
 class JournalRecord(ContractModel):
     request_digest: str
+    request_id: str | None = Field(default=None, min_length=1, max_length=128)
+    document_session: str | None = Field(default=None, min_length=1, max_length=500)
+    document_path: str | None = Field(default=None, max_length=32_767)
+    operation: str | None = Field(default=None, min_length=1, max_length=100)
+    save_fingerprint_before: SaveFileFingerprint | None = None
     attempt: int = Field(default=1, ge=1)
     state: OperationJournalState
     started_at: datetime
@@ -211,6 +221,10 @@ class JournalRecord(ContractModel):
             commands_completed=self.commands_completed,
             resolved_target_id=self.resolved_target_id,
             target_resolution_basis=self.target_resolution_basis,
+            request_id=self.request_id,
+            document_path=self.document_path,
+            operation=self.operation,
+            save_fingerprint_before=self.save_fingerprint_before,
         )
 
 

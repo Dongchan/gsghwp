@@ -39,6 +39,7 @@ enum class CommandKind {
     DeleteControl,
     CopyControl,
     SaveDocumentFile,
+    RestoreDocumentFile,
     ApplyCopiedTableAnchor,
     PasteTable,
     CaptureTable,

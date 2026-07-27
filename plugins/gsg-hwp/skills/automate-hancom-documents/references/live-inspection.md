@@ -20,6 +20,12 @@ Fast inspection is C++/ATL in-process and must be tried before detailed structur
 
 An identical fast inspection is cached for the current live-change revision, with at most 32 page/mode entries. Any MCP mutation, external HWP change event, reconnect, or disconnect invalidates it, so repeated reasoning reads avoid a second full control scan without serving pre-edit structure after a change.
 
+`hwp_list_styles` likewise reuses one style scan for the same document and `state_token`. A local mutation, external HWP change event, document change, reconnect, or disconnect invalidates that result.
+
+When `hwp_inspect_structure` receives an explicit nonzero `page`, native control traversal is limited to that requested page instead of scanning unrelated pages. Use `page=0` only for the current-page form.
+
+`hwp_inspect`, `hwp_list_styles`, `hwp_inspect_page_fast`, `hwp_inspect_structure`, and `hwp_render_page` return a short MCP text summary and keep the complete result once in the structured payload. Read the structured result; do not expect or parse a duplicate JSON copy from the text summary.
+
 Every top-level `instance_id` returned by fast inspection is immediately reusable. Pass it directly as `target_id` to `hwp_add_caption`, `hwp_replace_image`, or `hwp_fill_table`. For a tool whose schema has a `target` object, including `hwp_format_table`, `hwp_merge_table_cells`, and `hwp_split_table_cell`, pass `target: {"target_id": instance_id}`. Include it in `control_instance_ids` for `hwp_delete_control`. After a worker reload, inspect again before relying on cached page and index metadata.
 
 For an HWP document analysis or verification request, render the relevant page with `hwp_render_page` and inspect the returned PNG. Rendering establishes visual facts; use the structural reads above alongside it for IDs, cell addresses, merges, and exact dimensions.

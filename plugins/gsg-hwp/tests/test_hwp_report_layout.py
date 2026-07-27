@@ -47,7 +47,9 @@ def test_report_builder_turns_text_and_records_into_compact_native_layout() -> N
 
     layout = report_layout_plan(report)
 
-    paragraphs = tuple(block for block in layout.blocks if isinstance(block, ParagraphBlock))
+    paragraphs = tuple(
+        block for block in layout.blocks if isinstance(block, ParagraphBlock)
+    )
     tables = tuple(block for block in layout.blocks if isinstance(block, TableBlock))
     assert paragraphs[0].text == "사업 검토 보고"
     assert paragraphs[0].style_role == "heading"
@@ -59,6 +61,46 @@ def test_report_builder_turns_text_and_records_into_compact_native_layout() -> N
     assert table.rows[1][1].alignment == "right"
     assert table.column_width_weights is not None
     assert table.column_widths_mm is None
+
+
+def test_report_builder_overrides_template_styles_with_readable_paragraph_metrics() -> (
+    None
+):
+    layout = report_layout_plan(
+        ReportPlan(
+            title="변환 보고서",
+            introduction=("보고서 도입 문단",),
+            sections=(
+                ReportSection(
+                    title="1. 변환 결과",
+                    paragraphs=("보고서 본문 문단",),
+                    bullets=("보고서 글머리 문단",),
+                ),
+            ),
+        )
+    )
+
+    paragraphs = tuple(
+        block for block in layout.blocks if isinstance(block, ParagraphBlock)
+    )
+    title, introduction, section, body, bullet = paragraphs
+
+    assert title.font_size_pt == 16
+    assert title.bold is True
+    assert section.font_size_pt == 13
+    assert section.bold is True
+    for paragraph in (introduction, body, bullet):
+        assert paragraph.font_size_pt == 10
+        assert paragraph.bold is False
+    for paragraph in paragraphs:
+        assert paragraph.font_name == "맑은 고딕"
+        assert paragraph.text_color == (0, 0, 0)
+        assert paragraph.alignment == "left"
+        assert paragraph.line_spacing_percent is not None
+        assert paragraph.line_spacing_percent >= 150
+        assert paragraph.left_margin_mm == 0
+        assert paragraph.right_margin_mm == 0
+        assert paragraph.indentation_mm == 0
 
 
 def test_report_builder_handles_public_policy_and_research_scenarios() -> None:
@@ -73,7 +115,9 @@ def test_report_builder_handles_public_policy_and_research_scenarios() -> None:
                 sections=(
                     ReportSection(
                         title="요약",
-                        tables=(ReportTable(title=title, headers=headers, rows=(row,)),),
+                        tables=(
+                            ReportTable(title=title, headers=headers, rows=(row,)),
+                        ),
                     ),
                 ),
             )
@@ -84,7 +128,9 @@ def test_report_builder_handles_public_policy_and_research_scenarios() -> None:
         assert table.column_width_weights is not None
 
 
-def test_report_builder_sets_readable_width_and_height_floors_for_dense_tables() -> None:
+def test_report_builder_sets_readable_width_and_height_floors_for_dense_tables() -> (
+    None
+):
     headers = (
         "층",
         "근린생활시설(m²)",
@@ -143,7 +189,16 @@ def test_report_builder_can_repeat_multiple_identifier_columns_when_split() -> N
                     tables=(
                         ReportTable(
                             headers=("용도", "형/층", "전용", "공용", "공급", "계약"),
-                            rows=(("오피스텔", "27A", "38.402", "21.287", "59.689", "89.414"),),
+                            rows=(
+                                (
+                                    "오피스텔",
+                                    "27A",
+                                    "38.402",
+                                    "21.287",
+                                    "59.689",
+                                    "89.414",
+                                ),
+                            ),
                             repeat_key_columns=2,
                         ),
                     ),

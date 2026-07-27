@@ -178,7 +178,9 @@ def table_formula_selection_region(
 ) -> tuple[str, ...]:
     if topology.rows * topology.columns > 81:
         raise HwpLiveError(
-            "9×9보다 큰 표 선택은 TableFormula 안전 한도를 넘어 주소를 읽지 않습니다"
+            "대상 표의 행×열 격자가 81셀을 초과해 TableFormula로 선택 주소를 "
+            + "안전하게 확인할 수 없습니다. 표 서식은 cell로 대상 셀을 지정하고, "
+            + "행렬 표 채움은 start_cell을 지정해 다시 요청하세요"
         )
     try:
         field = application.HParameterSet.HFieldCtrl

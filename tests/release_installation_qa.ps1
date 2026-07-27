@@ -88,15 +88,27 @@ $manifest = Get-Content -LiteralPath (Join-Path $pluginRoot "compatibility-manif
 $mcp = Get-Content -LiteralPath (Join-Path $pluginRoot ".mcp.json") -Raw -Encoding UTF8 |
     ConvertFrom-Json
 $projectMetadata = Get-Content -LiteralPath (Join-Path $pluginRoot "pyproject.toml") -Raw -Encoding UTF8
+$pluginVersion = [string]$plugin.version
+$projectBlock = [regex]::Match(
+    $projectMetadata,
+    '(?ms)^\[project\]\s*(?<body>.*?)(?=^\[|\z)'
+)
+$projectVersionMatch = [regex]::Match(
+    $projectBlock.Groups["body"].Value,
+    '(?m)^version\s*=\s*"(?<version>[^"]+)"\s*$'
+)
 
 Assert-Equal -Expected "gsg-hwp" -Actual $plugin.name -Message "Plugin name mismatch"
-Assert-Equal -Expected "1.1.0" -Actual $plugin.version -Message "Plugin version mismatch"
+Assert-True -Condition ($pluginVersion -match '^\d+\.\d+\.\d+$') `
+    -Message "Plugin version must use major.minor.patch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.author.name -Message "Plugin author mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.interface.developerName `
     -Message "Plugin developer metadata mismatch"
-Assert-Equal -Expected "1.1.0" -Actual $manifest.distribution -Message "Distribution version mismatch"
-Assert-Equal -Expected "0.5.73-dev.1" -Actual $manifest.source_version `
-    -Message "Source version mismatch"
+Assert-Equal -Expected $pluginVersion -Actual ([string]$manifest.distribution) `
+    -Message "Plugin and compatibility manifest versions differ"
+Assert-True -Condition (
+    [string]$manifest.source_version -match '^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+) -Message "Source version format mismatch"
 Assert-Equal -Expected "inodesign" -Actual $manifest.developer -Message "Manifest developer mismatch"
 Assert-Equal -Expected "MIT" -Actual $manifest.license -Message "Distribution license mismatch"
 Assert-Equal -Expected "LICENSE" -Actual $manifest.license_file -Message "License file metadata mismatch"
@@ -120,9 +132,13 @@ $pluginNoticesHash = (Get-FileHash -LiteralPath (Join-Path $pluginRoot "THIRD_PA
     -Algorithm SHA256).Hash
 Assert-Equal -Expected $rootNoticesHash -Actual $pluginNoticesHash `
     -Message "Root and plugin notice copies differ"
-Assert-Equal -Expected "0.3.89" -Actual $manifest.mcp -Message "MCP version mismatch"
-Assert-Equal -Expected "0.5.121" -Actual $manifest.native_bridge `
-    -Message "Native bridge version mismatch"
+Assert-True -Condition $projectBlock.Success -Message "Python project metadata is missing"
+Assert-True -Condition $projectVersionMatch.Success -Message "Python project version is missing"
+Assert-Equal -Expected $projectVersionMatch.Groups["version"].Value `
+    -Actual ([string]$manifest.mcp) -Message "MCP and Python project versions differ"
+Assert-True -Condition (
+    [string]$manifest.native_bridge -match '^\d+\.\d+\.\d+$'
+) -Message "Native bridge version format mismatch"
 Assert-Equal -Expected 44 -Actual @($manifest.production_tools).Count `
     -Message "Production tool count mismatch"
 Assert-True -Condition ($manifest.production_tools -contains "hwp_insert_layout") `
@@ -260,7 +276,7 @@ $automationModulesKey = "$registryRoot\AutomationModules"
 $localAppData = Join-Path ([System.IO.Path]::GetTempPath()) "GsgHwpReleaseQa-$testId"
 $paths = Get-GsgHwpPaths -PackageRoot $pluginRoot -LocalAppData $localAppData
 Assert-Equal -Expected (
-    Join-Path $localAppData "GSG_HWP\runtime\1.1.0\.venv"
+    Join-Path $localAppData ("GSG_HWP\runtime\{0}\.venv" -f $pluginVersion)
 ) -Actual $paths.RuntimeEnvironment `
     -Message "Runtime must use a distribution-specific .venv"
 $originalDll = [byte[]](10, 20, 30, 40)
@@ -298,7 +314,7 @@ try {
         $automationKey.Dispose()
     }
 
-    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion "1.1.0" `
+    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion $pluginVersion `
         -ModulesKeyPath $modulesKey -AutomationModulesKeyPath $automationModulesKey
     Assert-True -Condition $installResult.Changed -Message "Native install did not report a change"
     Assert-True -Condition (Test-Path -LiteralPath $paths.ActiveState) `

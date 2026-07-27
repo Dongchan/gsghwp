@@ -31,6 +31,7 @@ from hwp_live_native_action_commands import (
     ParameterActionCommand as ParameterActionCommand,
     PasteTableCommand as PasteTableCommand,
     ReplaceSelectionCommand as ReplaceSelectionCommand,
+    RestoreDocumentFileCommand as RestoreDocumentFileCommand,
     RunCommand as RunCommand,
     SaveDocumentFileCommand as SaveDocumentFileCommand,
     SelectControlCommand as SelectControlCommand,

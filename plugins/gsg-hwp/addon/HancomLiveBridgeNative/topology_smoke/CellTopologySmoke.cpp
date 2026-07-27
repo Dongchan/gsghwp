@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -42,6 +43,7 @@ int Fail(const char* const message) {
 bool ReferenceLayoutSpecSmoke();
 bool ReferenceLayoutExecutorSmoke();
 bool ReferenceLayoutPatchSmoke();
+bool ReferenceLayoutPatchTextSmoke();
 
 int wmain() {
     if (!ReferenceLayoutSpecSmoke()) {
@@ -52,6 +54,9 @@ int wmain() {
     }
     if (!ReferenceLayoutPatchSmoke()) {
         return Fail("reference-layout patch recreated or over-applied the table");
+    }
+    if (!ReferenceLayoutPatchTextSmoke()) {
+        return Fail("reference-layout text patch was not applied and verified in place");
     }
     std::vector<std::wstring> selectedAddresses;
     if (!ParseSelectedCellAddresses(
@@ -75,6 +80,38 @@ int wmain() {
             },
             &error)) {
         return Fail("irregular topology did not build");
+    }
+
+    std::vector<CellTopologyCell> measuredCells{
+        Cell(L"A1", 1, 1, L"B1", L""),
+        Cell(L"B1", 1, 1, L"", L""),
+    };
+    measuredCells[0].width = 1200;
+    measuredCells[0].height = 3400;
+    measuredCells[1].width = 5600;
+    measuredCells[1].height = 7800;
+    CellTopology geometryInvalidation;
+    if (!geometryInvalidation.Build(std::move(measuredCells), &error)) {
+        return Fail("measured topology did not build");
+    }
+    geometryInvalidation.InvalidateGeometry();
+    const CellTopologyCell* const measuredA1 =
+        geometryInvalidation.Find(L"A1");
+    const CellTopologyCell* const measuredB1 =
+        geometryInvalidation.OwnerAt(1, 2);
+    if (geometryInvalidation.Empty() ||
+        geometryInvalidation.Rows() != 1 ||
+        geometryInvalidation.Columns() != 2 ||
+        measuredA1 == nullptr ||
+        measuredB1 == nullptr ||
+        measuredA1->rowSpan != 1 ||
+        measuredA1->columnSpan != 1 ||
+        measuredB1->address != L"B1" ||
+        measuredA1->width != -1 ||
+        measuredA1->height != -1 ||
+        measuredB1->width != -1 ||
+        measuredB1->height != -1) {
+        return Fail("geometry invalidation discarded structure or retained stale dimensions");
     }
 
     CellTopology geometryOnlyChange;
@@ -156,5 +193,6 @@ int wmain() {
         first != L"A1" || last != L"C1" || region.size() != 2 || path.size() != 1) {
         return Fail("cell selection was not normalized from physical addresses");
     }
+    std::cout << "CELL_TOPOLOGY_GEOMETRY_INVALIDATION 1\n";
     return 0;
 }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Final
 
-from hwp_errors import HwpLiveError
+from hwp_errors import HwpLiveError, HwpTargetProcessLostError
 from hwp_mcp_result_arguments import (
     ProductionWorkflowId,
     production_tool_name,
@@ -30,6 +30,23 @@ _TABLE_TARGET_WORKFLOWS: Final[frozenset[ProductionWorkflowId]] = frozenset(
         "table.split_cells",
     )
 )
+_DIALOG_REASON_PREFIXES: Final[tuple[str, ...]] = (
+    "대상 한컴 창에 대화상자가 떠 있습니다",
+    "고아 한컴 오류 대화상자가 남아 있습니다",
+    "추가 한컴 대화상자가 남아 있습니다",
+)
+_DEADLINE_REASON_PREFIX: Final = "한컴 COM 전체 제한시간을 초과했습니다"
+
+
+def _reason_tokens(reason: str) -> frozenset[str]:
+    return frozenset(part.strip() for part in reason.split(";") if part.strip())
+
+
+def _is_internal_pre_mutation_wrapper(error: HwpLiveError) -> bool:
+    cause = error.__cause__
+    return isinstance(cause, HwpLiveError) and error.reason == (
+        f"{cause.reason}; mutation_started=false"
+    )
 
 
 def _table_candidate(
@@ -95,7 +112,11 @@ def _normalized_status(
     result: OperationResult,
     candidates: tuple[WorkflowTargetCandidate, ...],
 ) -> OperationStatus:
-    if result.status == "needs_input" and _target_is_missing(result) and len(candidates) > 1:
+    if (
+        result.status == "needs_input"
+        and _target_is_missing(result)
+        and len(candidates) > 1
+    ):
         return "ambiguous"
     if result.status == "operation_failed" and _has_partial_change(result):
         return "partial_change"
@@ -158,9 +179,7 @@ def normalize_production_result(
     candidates = _generated_candidates(result, workflow)
     status = _normalized_status(result, candidates)
     retryable = (
-        status == "needs_input"
-        or status == "ambiguous"
-        or result.retry_safe is True
+        status == "needs_input" or status == "ambiguous" or result.retry_safe is True
     )
     missing_fields = (
         ("target.candidate_id",)
@@ -184,7 +203,9 @@ def normalize_production_result(
             "missing_fields": missing_fields,
             "target_candidates": candidates,
             "next_tool": production_tool_name(workflow) if retryable else None,
-            "next_arguments": wrapper_arguments(workflow, inputs) if retryable else None,
+            "next_arguments": wrapper_arguments(workflow, inputs)
+            if retryable
+            else None,
         }
     )
 
@@ -197,20 +218,52 @@ def transport_error_result(
     mutation_started: bool = True,
 ) -> OperationResult:
     workflow = canonical_workflow(inputs)
-    reconcile_required = "reconcile_required=true" in error.reason
+    reason_tokens = _reason_tokens(error.reason)
+    dialog_context = error.reason.startswith(_DIALOG_REASON_PREFIXES) and (
+        "target_modal_dialog=true" in reason_tokens
+    )
+    target_process_lost = isinstance(error, HwpTargetProcessLostError)
+    structured_transport = (
+        dialog_context
+        or target_process_lost
+        or error.reason.startswith(_DEADLINE_REASON_PREFIX)
+    )
+    reconcile_required = (
+        structured_transport and "reconcile_required=true" in reason_tokens
+    )
+    dialog_detected = dialog_context and "dialog_detected=true" in reason_tokens
+    dialog_user_action_required = (
+        dialog_detected and "dialog_user_action_required=true" in reason_tokens
+    )
+    pre_mutation_marker = _is_internal_pre_mutation_wrapper(error) or (
+        structured_transport and "mutation_started=false" in reason_tokens
+    )
+    effective_mutation_started = mutation_started and not pre_mutation_marker
     return OperationResult(
         status="transport_error",
-        changed=mutation_started,
+        changed=effective_mutation_started,
         verified=False,
-        retry_safe=not mutation_started and not reconcile_required,
+        retry_safe=(
+            not effective_mutation_started
+            and not reconcile_required
+            and not dialog_user_action_required
+        ),
         reconcile_required=reconcile_required,
         request_id=inputs.request_id,
         selected_operation=workflow,
         query=intent or workflow or "hwp_operate",
         registry_entries=1,
         lookup_microseconds=0,
-        failure_stage="transport" if mutation_started else "connection",
-        partial_change=mutation_started,
+        failure_stage=(
+            "dialog"
+            if dialog_detected and dialog_user_action_required
+            else "process_lost"
+            if target_process_lost
+            else "transport"
+            if effective_mutation_started
+            else "connection"
+        ),
+        partial_change=effective_mutation_started,
         missing_fields=(),
         target_candidates=(),
         next_tool=None,

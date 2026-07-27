@@ -6,6 +6,7 @@ import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 from pydantic import JsonValue
 
+from hwp_mcp_registry import ToolEffect
 from hwp_mcp_worker_protocol import (
     HwpWorkerCallTimeout,
     HwpWorkerProtocolError,
@@ -31,7 +32,7 @@ async def call_worker_before_deadline(
     arguments: dict[str, JsonValue],
     timeout_seconds: float,
     *,
-    mutation: bool,
+    effect: ToolEffect,
 ) -> WorkerToolResult:
     state = WorkerCallState()
     dispatched = False
@@ -52,5 +53,5 @@ async def call_worker_before_deadline(
         timeout_seconds,
         dispatched=dispatched,
         started=state.started.is_set(),
-        mutation=mutation,
+        effect=effect,
     )

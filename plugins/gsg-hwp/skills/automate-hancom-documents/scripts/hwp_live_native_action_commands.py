@@ -150,6 +150,12 @@ class SaveDocumentFileCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class RestoreDocumentFileCommand:
+    path: Path
+    expected_page_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class ApplyCopiedTableAnchorCommand:
     instance_id: str
 
@@ -250,6 +256,7 @@ type NativeActionCommand = (
     | DeleteControlCommand
     | CopyControlCommand
     | SaveDocumentFileCommand
+    | RestoreDocumentFileCommand
     | ApplyCopiedTableAnchorCommand
     | PasteTableCommand
     | CaptureTableCommand

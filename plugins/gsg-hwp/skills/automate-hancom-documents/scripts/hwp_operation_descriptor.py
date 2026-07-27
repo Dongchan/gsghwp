@@ -17,8 +17,23 @@ OperationVerificationMode = Literal[
     "native_save_result",
     "native_save_reopen_result",
 ]
+ATOMIC_ACTION_VERIFICATION_MODES: Final[tuple[OperationVerificationMode, ...]] = (
+    "native_snapshot_before_after",
+)
 DescriptorExecution = Literal["recipe", "official", "catalog_only"]
 DescriptorAtomicity = Literal["native_batch", "transactional"]
+
+
+class OperationDescriptorError(RuntimeError):
+    workflow_id: HwpWorkflowId
+    tool_name: str
+
+    def __init__(self, workflow_id: HwpWorkflowId, tool_name: str) -> None:
+        super().__init__(
+            f"{workflow_id} operation descriptor has an invalid adapter: {tool_name}"
+        )
+        self.workflow_id = workflow_id
+        self.tool_name = tool_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +55,14 @@ class OperationDescriptor:
     public_tools: tuple[str, ...] = ()
     verification_modes: tuple[OperationVerificationMode, ...] = ()
     mutation: bool = True
+    adapter_tools: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for adapter in self.adapter_tools:
+            if adapter not in self.public_tools:
+                raise OperationDescriptorError(self.workflow_id, adapter)
+        if self.public_tools and self.public_tools[0] in self.adapter_tools:
+            raise OperationDescriptorError(self.workflow_id, self.public_tools[0])
 
 
 def _recipe(
@@ -120,8 +143,13 @@ _DESCRIPTORS: Final = (
             ("MoveDocEnd", "ApplyLayout"),
             "transactional",
         ),
-        public_tools=("hwp_append_layout",),
+        public_tools=(
+            "hwp_append_layout",
+            "hwp_append_report",
+            "hwp_append_excel_table",
+        ),
         verification_modes=("native_snapshot_before_after",),
+        adapter_tools=("hwp_append_report", "hwp_append_excel_table"),
     ),
     OperationDescriptor(
         "document.insert_layout",
@@ -288,7 +316,10 @@ _DESCRIPTORS: Final = (
             ("ResolvePosition", "InsertImages", "VerifyStructure"),
         ),
         public_tools=("hwp_insert_image",),
-        verification_modes=("native_snapshot_before_after",),
+        verification_modes=(
+            "native_snapshot_before_after",
+            "native_detailed_structure_before_after",
+        ),
     ),
     OperationDescriptor(
         "image.replace",
@@ -399,6 +430,74 @@ _DESCRIPTORS: Final = (
         ("native_operation_specific_readback",),
     ),
     OperationDescriptor(
+        "document.navigate",
+        "official",
+        ("ResolveNavigation", "RunAction"),
+        (),
+        mutation=False,
+    ),
+    OperationDescriptor(
+        "document.rebuild",
+        "recipe",
+        ("InspectStructure", "RebuildDocument", "VerifyStructure"),
+        ("inputs.layout",),
+    ),
+    OperationDescriptor(
+        "document.page_break",
+        "official",
+        ("BreakPage",),
+        (),
+    ),
+    OperationDescriptor(
+        "document.insert_page",
+        "recipe",
+        ("ResolvePosition", "InsertPageLayout"),
+        ("inputs.target", "inputs.layout"),
+    ),
+    OperationDescriptor(
+        "table.inspect",
+        "recipe",
+        ("InspectPage", "ResolveTable"),
+        ("inputs.target",),
+        mutation=False,
+    ),
+    OperationDescriptor(
+        "table.create",
+        "recipe",
+        ("ResolvePosition", "TableCreate", "VerifyTable"),
+        ("inputs.target", "inputs.layout"),
+    ),
+    OperationDescriptor(
+        "table.resize",
+        "recipe",
+        ("ResolveTable", "ResizeTable", "VerifyStructure"),
+        ("inputs.target", "inputs.data"),
+    ),
+    OperationDescriptor(
+        "table.propagate",
+        "recipe",
+        ("ResolveSourceTable", "ResolveTargetTables", "PropagateCells"),
+        ("inputs.target", "inputs.data"),
+    ),
+    OperationDescriptor(
+        "table.import_data",
+        "recipe",
+        ("ReadDataSource", "ResolveTable", "MapRowsToCells", "FillCells"),
+        ("inputs.target", "inputs.data"),
+    ),
+    OperationDescriptor(
+        "image.resize",
+        "recipe",
+        ("ResolvePicture", "ResizePicture", "VerifyPicture"),
+        ("inputs.target", "inputs.data"),
+    ),
+    OperationDescriptor(
+        "hyperlink.modify",
+        "official",
+        ("ResolveHyperlink", "ModifyHyperlink"),
+        (),
+    ),
+    OperationDescriptor(
         "document.save",
         "recipe",
         ("SaveDocument", "VerifySavedDocument"),
@@ -430,15 +529,18 @@ _BY_WORKFLOW: Final = MappingProxyType(
 _BY_TOOL: Final = MappingProxyType(
     {
         tool: tuple(
-            descriptor
-            for descriptor in _DESCRIPTORS
-            if tool in descriptor.public_tools
+            descriptor for descriptor in _DESCRIPTORS if tool in descriptor.public_tools
         )
         for tool in {
-            tool
-            for descriptor in _DESCRIPTORS
-            for tool in descriptor.public_tools
+            tool for descriptor in _DESCRIPTORS for tool in descriptor.public_tools
         }
+    }
+)
+_ADAPTER_TARGET_BY_TOOL: Final = MappingProxyType(
+    {
+        adapter: descriptor.public_tools[0]
+        for descriptor in _DESCRIPTORS
+        for adapter in descriptor.adapter_tools
     }
 )
 
@@ -456,7 +558,8 @@ def operation_descriptor(
 def descriptor_workflows_for_tool(
     tool_name: str,
 ) -> tuple[HwpWorkflowId, ...]:
-    return tuple(
-        descriptor.workflow_id
-        for descriptor in _BY_TOOL.get(tool_name, ())
-    )
+    return tuple(descriptor.workflow_id for descriptor in _BY_TOOL.get(tool_name, ()))
+
+
+def descriptor_adapter_target(tool_name: str) -> str | None:
+    return _ADAPTER_TARGET_BY_TOOL.get(tool_name)

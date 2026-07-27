@@ -23,6 +23,14 @@ from hwp_mcp_worker_protocol import (
 from hwp_runtime_identity import RuntimeStatus
 
 
+class HwpWorkerTransportLost(HwpWorkerProtocolError):
+    tool_name: str
+
+    def __init__(self, tool_name: str, error: Exception) -> None:
+        self.tool_name = tool_name
+        super().__init__(f"HWP worker transport lost during {tool_name}: {error}")
+
+
 @dataclass(frozen=True, slots=True)
 class HwpWorkerLaunch:
     python_executable: Path
@@ -57,7 +65,13 @@ async def open_worker_session(
 ) -> AsyncGenerator[ClientSession]:
     parameters = StdioServerParameters(
         command=str(launch.python_executable),
-        args=["-B", str(launch.worker_script), *launch.worker_arguments],
+        args=[
+            "-X",
+            "utf8",
+            "-B",
+            str(launch.worker_script),
+            *launch.worker_arguments,
+        ],
         cwd=launch.worker_script.parent,
     )
     async with stdio_client(parameters) as streams:
@@ -91,7 +105,10 @@ async def respond_to_worker_request(
     cycle: WorkerCycle,
 ) -> None:
     if isinstance(request, WorkerCallTool):
-        result = await cycle.session.call_tool(request.name, request.arguments)
+        try:
+            result = await cycle.session.call_tool(request.name, request.arguments)
+        except Exception as error:
+            raise HwpWorkerTransportLost(request.name, error) from error
         await send_reply(request.reply, WorkerToolResult(result, cycle.reloaded))
         return
     if isinstance(request, WorkerReload):

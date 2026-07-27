@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import final
 
@@ -34,7 +37,60 @@ from hwp_live_workflow import (
 )
 from hwp_mcp_dispatch import McpThreadDispatcher
 from hwp_office_table import OfficeTableSource
-from hwp_official_api_live import OfficialApiLiveBatchResult, OfficialApiLiveCategory
+from hwp_official_api_live import (
+    OfficialApiLiveBatchResult,
+    OfficialApiLiveCategory,
+    OfficialApiLiveItem,
+)
+from hwp_official_api_policy import (
+    OfficialApiPolicyDecision,
+    assess_official_api_payload,
+    official_api_policy_decision,
+    official_api_policy_error_response,
+    select_official_api_requests,
+)
+from hwp_official_api_requests import OfficialApiNativeRequest
+
+
+def _blocked_official_api_item(
+    *,
+    ordinal: int,
+    request: OfficialApiNativeRequest,
+    category: OfficialApiLiveCategory,
+    decision: OfficialApiPolicyDecision,
+) -> OfficialApiLiveItem:
+    safety = request.safety
+    evidence = {
+        "kind": "policy",
+        "decision": decision.code,
+        "effect": safety.effect,
+        "target_scope": safety.target_scope,
+        "fixture_scope": safety.fixture_scope,
+        "fixture_isolation_guaranteed": safety.fixture_isolation_guaranteed,
+        "native_invoked": False,
+        "operation_effect_verified": False,
+        "evidence_scope": "policy_preflight_only",
+    }
+    return OfficialApiLiveItem(
+        ordinal=ordinal,
+        case_id=request.case_id,
+        category=category,
+        name=request.name,
+        owner=request.owner,
+        member_kind=request.member_kind,
+        source_page=request.source_page,
+        input_lines=request.input_lines,
+        status="failed",
+        wall_ms=0,
+        native_elapsed_us=None,
+        native_response=None,
+        evidence_json=json.dumps(
+            evidence,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        error=decision.reason,
+    )
 
 
 @final
@@ -53,12 +109,14 @@ class McpQaHandlers:
         path: str,
         reference_selector: str | None = None,
         new_tab: bool = True,
+        restore_reference: bool = True,
     ) -> OpenDocument:
         return await self._dispatcher.run(
             self._bridge.open_document,
             path,
             reference_selector,
             new_tab,
+            restore_reference,
         )
 
     async def hwp_inspect_window_state(self, window_handle: int) -> HancomWindowState:
@@ -80,12 +138,23 @@ class McpQaHandlers:
         start: int = 1,
         limit: int = 25,
     ) -> OfficialApiLiveBatchResult:
-        return await self._dispatcher.run(
-            self._bridge.run_official_api_batch,
-            session_id,
+        async def invoke(
+            chunk_start: int,
+            chunk_limit: int,
+        ) -> OfficialApiLiveBatchResult:
+            return await self._dispatcher.run(
+                self._bridge.run_official_api_batch,
+                session_id,
+                category,
+                chunk_start,
+                chunk_limit,
+            )
+
+        return await self._guarded_official_api_batch(
             category,
             start,
             limit,
+            invoke,
         )
 
     async def hwp_probe_official_api_batch(
@@ -95,12 +164,23 @@ class McpQaHandlers:
         start: int = 1,
         limit: int = 25,
     ) -> OfficialApiLiveBatchResult:
-        return await self._dispatcher.run(
-            self._bridge.probe_official_api_batch,
-            window_handle,
+        async def invoke(
+            chunk_start: int,
+            chunk_limit: int,
+        ) -> OfficialApiLiveBatchResult:
+            return await self._dispatcher.run(
+                self._bridge.probe_official_api_batch,
+                window_handle,
+                category,
+                chunk_start,
+                chunk_limit,
+            )
+
+        return await self._guarded_official_api_batch(
             category,
             start,
             limit,
+            invoke,
         )
 
     async def hwp_probe_official_api_payload(
@@ -108,10 +188,66 @@ class McpQaHandlers:
         window_handle: int,
         payload: str,
     ) -> str:
+        assessment = assess_official_api_payload(payload)
+        decision = official_api_policy_decision(
+            assessment.request,
+            destructive_opt_in=assessment.destructive_opt_in,
+            owned_isolation_verified=False,
+        )
+        if not decision.allowed:
+            return official_api_policy_error_response(decision)
         return await self._dispatcher.run(
             self._bridge.probe_official_api_payload,
             window_handle,
-            payload,
+            assessment.forwarded_payload,
+        )
+
+    async def _guarded_official_api_batch(
+        self,
+        category: OfficialApiLiveCategory,
+        start: int,
+        limit: int,
+        invoke: Callable[[int, int], Awaitable[OfficialApiLiveBatchResult]],
+    ) -> OfficialApiLiveBatchResult:
+        selection = select_official_api_requests(category, start, limit)
+        started = time.perf_counter()
+        items: list[OfficialApiLiveItem] = []
+        offset = 0
+        while offset < len(selection.requests):
+            request = selection.requests[offset]
+            decision = official_api_policy_decision(request)
+            if not decision.allowed:
+                items.append(
+                    _blocked_official_api_item(
+                        ordinal=start + offset,
+                        request=request,
+                        category=category,
+                        decision=decision,
+                    )
+                )
+                offset += 1
+                continue
+            safe_start = offset
+            while offset < len(selection.requests):
+                candidate = selection.requests[offset]
+                if not official_api_policy_decision(candidate).allowed:
+                    break
+                offset += 1
+            chunk = await invoke(start + safe_start, offset - safe_start)
+            items.extend(chunk.items)
+
+        return OfficialApiLiveBatchResult(
+            category=category,
+            start=start,
+            requested=limit,
+            executed=len(items),
+            total_in_category=selection.total_in_category,
+            passed=sum(item.status == "passed" for item in items),
+            failed=sum(item.status == "failed" for item in items),
+            unavailable=sum(item.status == "unavailable" for item in items),
+            transport_errors=sum(item.status == "transport_error" for item in items),
+            wall_ms=(time.perf_counter() - started) * 1_000,
+            items=tuple(items),
         )
 
     async def hwp_watch_state(
@@ -249,4 +385,6 @@ class McpQaHandlers:
         page: int = 0,
         dpi: int = 144,
     ) -> PreviewResult:
-        return await self._dispatcher.run(self._bridge.render_page, session_id, page, dpi)
+        return await self._dispatcher.run(
+            self._bridge.render_page, session_id, page, dpi
+        )

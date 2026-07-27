@@ -26,6 +26,35 @@ def _matches_document(document: OpenDocument, requested: str) -> bool:
     return bool(normalized) and _normalized_path(document.full_name) == normalized
 
 
+def _basename_candidates(
+    documents: tuple[OpenDocument, ...],
+    requested: str,
+) -> tuple[OpenDocument, ...]:
+    if ntpath.basename(requested) != requested:
+        return ()
+    requested_name = requested.casefold()
+    return tuple(
+        document
+        for document in documents
+        if ntpath.basename(document.full_name).casefold() == requested_name
+    )
+
+
+def _document_candidate_message(candidates: tuple[OpenDocument, ...]) -> str:
+    shown = candidates[:8]
+    details = "; ".join(
+        (
+            f"selector={document.selector}, "
+            + f"document_id={document.document_id}, "
+            + f"path={document.full_name}"
+        )
+        for document in shown
+    )
+    omitted = len(candidates) - len(shown)
+    suffix = f"; 그 외 {omitted}개" if omitted else ""
+    return details + suffix
+
+
 def select_operation_document(
     listing: OpenDocumentList,
     requested: str | None,
@@ -48,8 +77,18 @@ def select_operation_document(
                 "지정한 문서 경로 또는 문서 ID가 여러 HWP 프로세스와 일치합니다. "
                 + "hwp_list_open_documents의 selector를 지정하세요"
             )
+        basename_matches = _basename_candidates(editable, requested)
+        if basename_matches:
+            raise HwpLiveError(
+                "파일명만으로 한컴 문서를 선택하지 않습니다. "
+                + f"일치 후보 {len(basename_matches)}개: "
+                + _document_candidate_message(basename_matches)
+                + ". 전체 경로, document_id:<ID> 또는 selector를 지정하세요"
+            )
         raise HwpLiveError(
-            "hwp_operate의 document와 일치하는 편집 문서를 찾을 수 없습니다"
+            "document_selector와 일치하는 편집 문서를 찾을 수 없습니다. "
+            + "전체 경로, document_id:<ID> 또는 "
+            + "hwp_list_open_documents의 selector를 지정하세요"
         )
     active = tuple(document for document in editable if document.active)
     if len(active) == 1:

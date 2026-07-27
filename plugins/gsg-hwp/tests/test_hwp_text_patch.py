@@ -229,6 +229,7 @@ def test_production_exposes_one_atomic_text_patch_tool() -> None:
             "expected_text",
             "formatting",
             "document_path",
+            "document_selector",
         )
     )
 

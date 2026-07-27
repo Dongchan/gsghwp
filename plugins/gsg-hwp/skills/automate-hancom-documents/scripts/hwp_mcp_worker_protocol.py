@@ -9,6 +9,7 @@ from mcp.client.session import ClientSession
 from mcp.types import CallToolResult, Tool
 from pydantic import JsonValue
 
+from hwp_mcp_registry import ToolEffect
 from hwp_runtime_identity import RuntimeStatus
 
 
@@ -22,6 +23,8 @@ class HwpWorkerCallTimeout(HwpWorkerProtocolError, TimeoutError):
     dispatched: bool
     started: bool
     reconcile_required: bool
+    retry_safe: bool
+    effect: ToolEffect
 
     def __init__(
         self,
@@ -30,25 +33,26 @@ class HwpWorkerCallTimeout(HwpWorkerProtocolError, TimeoutError):
         *,
         dispatched: bool,
         started: bool,
-        mutation: bool,
+        effect: ToolEffect,
     ) -> None:
         self.tool_name = tool_name
         self.timeout_seconds = timeout_seconds
         self.dispatched = dispatched
         self.started = started
-        self.reconcile_required = mutation and started
+        self.effect = effect
+        self.reconcile_required = started and effect in {"document", "file"}
+        self.retry_safe = not started or effect in {"read", "artifact"}
         phase = "running" if started else "queued" if dispatched else "queue_wait"
         isolation = "; worker_isolation_required=true" if started else ""
         recovery = (
-            "; reconcile_required=true; retry_safe=false"
-            if self.reconcile_required
-            else "; reconcile_required=false; retry_safe=true"
+            f"; reconcile_required={'true' if self.reconcile_required else 'false'}"
+            f"; retry_safe={'true' if self.retry_safe else 'false'}"
         )
         super().__init__(
             "".join(
                 (
                     f"HWP worker total deadline exceeded for {tool_name} ",
-                    f"after {timeout_seconds:g}s; phase={phase}",
+                    f"after {timeout_seconds:g}s; phase={phase}; effect={effect}",
                     isolation,
                     recovery,
                 )

@@ -4,7 +4,6 @@ from collections import Counter
 from dataclasses import dataclass
 import os
 from pathlib import Path
-from time import perf_counter_ns
 from typing import Protocol
 
 from hwp_errors import HwpLiveError
@@ -25,6 +24,7 @@ from hwp_live_native_action_models import (
     NativeActionCommand,
     NativeActionRequest,
     NativePageControl,
+    RestoreDocumentFileCommand,
 )
 from hwp_live_native_batch import (
     execute_native_actions,
@@ -130,55 +130,33 @@ def _restore_checkpoint(
         raise HwpLiveError("복구할 문서 체크포인트 파일을 확인하지 못했습니다") from error
     if actual_size != checkpoint.bytes:
         raise HwpLiveError("복구할 문서 체크포인트 파일 크기가 변경되었습니다")
-    payload = checkpoint.path.read_bytes()
-    magic = b"GSG_HWP_ENCODED_BLOCK_V1\n"
-    if not payload.startswith(magic):
-        raise HwpLiveError("복구할 문서 체크포인트 형식이 올바르지 않습니다")
-    try:
-        target_document = payload[len(magic) :].decode("ascii")
-    except UnicodeDecodeError as error:
-        raise HwpLiveError("복구할 문서 체크포인트 인코딩이 올바르지 않습니다") from error
-    if not target_document:
-        raise HwpLiveError("복구할 문서 체크포인트 내용이 비어 있습니다")
-
-    application = candidate.application
+    native = execute_native_actions(
+        candidate.window_handle,
+        NativeActionRequest(
+            document_id,
+            full_name,
+            (
+                RestoreDocumentFileCommand(
+                    checkpoint.path,
+                    checkpoint.page_count,
+                ),
+            ),
+        ),
+        minimum_version=12,
+    )
+    if native is None:
+        raise HwpLiveError("한컴 네이티브 문서 체크포인트 복원기를 사용할 수 없습니다")
+    snapshot = read_native_snapshot(candidate.window_handle)
+    if snapshot is None:
+        raise HwpLiveError("체크포인트 적용 후 네이티브 문서 상태를 읽지 못했습니다")
     expected_key = document_id, os.path.normcase(os.path.abspath(full_name))
-
-    def require_identity(expected_pages: int) -> None:
-        current = application.XHwpDocuments.Active_XHwpDocument
-        actual_key = (
-            int(current.DocumentID),
-            os.path.normcase(os.path.abspath(str(current.FullName))),
-        )
-        if actual_key != expected_key or int(application.PageCount) != expected_pages:
-            raise HwpLiveError("체크포인트 적용 후 문서 식별값 또는 페이지 수가 바뀌었습니다")
-
-    def replace_document(encoded: str) -> None:
-        for action in ("MoveDocBegin", "SelectAll", "Delete"):
-            application.Run(action)
-        if not bool(application.SetTextFile(encoded, "HWP", "insertfile")):
-            raise HwpLiveError("체크포인트 HWP 문서 삽입이 실패했습니다")
-        application.Run("MoveDocBegin")
-
-    started = perf_counter_ns()
-    rollback_document = str(application.GetTextFile("HWP", ""))
-    rollback_pages = int(application.PageCount)
-    if not rollback_document:
-        raise HwpLiveError("체크포인트 적용 전 롤백 문서를 캡처하지 못했습니다")
-    try:
-        replace_document(target_document)
-        require_identity(checkpoint.page_count)
-    except Exception as restore_error:
-        try:
-            replace_document(rollback_document)
-            require_identity(rollback_pages)
-        except Exception as rollback_error:
-            raise HwpLiveError(
-                "체크포인트 복구 실패 후 직전 문서 롤백도 검증하지 못했습니다"
-            ) from rollback_error
-        raise HwpLiveError("문서 체크포인트 복구가 실패해 직전 상태로 롤백했습니다") from restore_error
-    elapsed_microseconds = (perf_counter_ns() - started) // 1_000
-    return 1, elapsed_microseconds
+    actual_key = (
+        snapshot.document_id,
+        os.path.normcase(os.path.abspath(snapshot.full_name)),
+    )
+    if actual_key != expected_key or snapshot.page_count != checkpoint.page_count:
+        raise HwpLiveError("체크포인트 적용 후 문서 식별값 또는 페이지 수가 바뀌었습니다")
+    return native.commands_executed, native.elapsed_microseconds
 
 
 def prepare_control_deletion(
@@ -302,7 +280,7 @@ def _restore_prepared_before_failure(
     candidate: HwpDocumentCandidate,
     prepared: PreparedDocumentEdit,
 ) -> None:
-    _restore_checkpoint(
+    _ = _restore_checkpoint(
         candidate,
         prepared.document_id,
         prepared.full_name,

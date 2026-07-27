@@ -118,3 +118,4 @@ def test_ocr_evidence_is_optional_and_does_not_replace_model_text_by_default() -
 
     assert layout.ocr_mode == "off"
     assert layout.text_anchors[0].text == "건 축 개 요"
+

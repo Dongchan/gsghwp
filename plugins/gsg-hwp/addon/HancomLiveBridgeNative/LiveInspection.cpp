@@ -1,10 +1,11 @@
 #include "LiveInspection.h"
 
+#include "ComState.h"
 #include "DispatchInvoke.h"
 #include "ParagraphFormatting.h"
+#include "ProtocolEncoding.h"
 #include "TableInspection.h"
 
-#include <WinCrypt.h>
 #include <atlbase.h>
 #include <atlcomcli.h>
 
@@ -13,42 +14,32 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace hancom::inspection {
 namespace {
 
+using hancom::com_state::CanRestoreSelection;
+using hancom::com_state::CaptureSelection;
+using hancom::com_state::Position;
+using hancom::com_state::RestoreSelection;
+using hancom::com_state::SamePosition;
+using hancom::com_state::Selection;
+using hancom::com_state::SelectionCapturePolicy;
+using hancom::com_state::kSelectionCells;
+using hancom::com_state::kSelectionControl;
+using hancom::com_state::kSelectionModeMask;
+using hancom::com_state::kSelectionNone;
+using hancom::com_state::kSelectionStrict;
+using hancom::com_state::kSelectionText;
 using hancom::dispatch::AsBool;
 using hancom::dispatch::AsDispatch;
 using hancom::dispatch::AsLong;
 using hancom::dispatch::AsString;
 using hancom::dispatch::Method;
 using hancom::dispatch::PropertyGet;
-
-struct Position {
-    LONG list = 0;
-    LONG paragraph = 0;
-    LONG character = 0;
-};
-
-struct Selection {
-    bool selected = false;
-    LONG mode = 0;
-    Position start;
-    Position end;
-    std::wstring controlType;
-    std::wstring controlInstance;
-    std::vector<std::wstring> cellAddresses;
-    std::wstring cellAddressError;
-};
-
-constexpr LONG kSelectionModeMask = 0x0F;
-constexpr LONG kSelectionNone = 0;
-constexpr LONG kSelectionText = 1;
-constexpr LONG kSelectionColumn = 2;
-constexpr LONG kSelectionCells = 3;
-constexpr LONG kSelectionControl = 4;
-constexpr LONG kSelectionStrict = 0x10;
+using hancom::encoding::EncodeUtf8Base64;
 
 bool ControlIdentity(
     IDispatch* control,
@@ -75,51 +66,6 @@ struct Formatting {
     LONG nextSpacing = 0;
 };
 
-std::wstring EncodeUtf8Base64(const std::wstring& value) {
-    const int byteCount = WideCharToMultiByte(
-        CP_UTF8,
-        WC_ERR_INVALID_CHARS,
-        value.c_str(),
-        static_cast<int>(value.size()),
-        nullptr,
-        0,
-        nullptr,
-        nullptr);
-    if (byteCount < 0) {
-        return L"";
-    }
-    std::vector<BYTE> bytes(static_cast<size_t>(byteCount));
-    if (byteCount != 0 && WideCharToMultiByte(
-            CP_UTF8,
-            WC_ERR_INVALID_CHARS,
-            value.c_str(),
-            static_cast<int>(value.size()),
-            reinterpret_cast<LPSTR>(bytes.data()),
-            byteCount,
-            nullptr,
-            nullptr) != byteCount) {
-        return L"";
-    }
-    DWORD encodedCount = 0;
-    if (!CryptBinaryToStringW(
-            bytes.data(),
-            static_cast<DWORD>(bytes.size()),
-            CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-            nullptr,
-            &encodedCount)) {
-        return L"";
-    }
-    std::vector<wchar_t> encoded(encodedCount);
-    if (!CryptBinaryToStringW(
-            bytes.data(),
-            static_cast<DWORD>(bytes.size()),
-            CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-            encoded.data(),
-            &encodedCount)) {
-        return L"";
-    }
-    return std::wstring(encoded.data());
-}
 
 std::wstring ErrorResponse(const wchar_t* const code, const std::wstring& message) {
     return L"HCI1\tERROR\t" + std::wstring(code) + L'\t' + EncodeUtf8Base64(message);
@@ -152,33 +98,16 @@ bool BoolProperty(IDispatch* const object, const wchar_t* const name, bool* cons
 }
 
 bool GetPosition(IDispatch* const hwp, Position* const position) {
-    CComVariant list;
-    list.vt = VT_I4 | VT_BYREF;
-    list.plVal = &position->list;
-    CComVariant paragraph;
-    paragraph.vt = VT_I4 | VT_BYREF;
-    paragraph.plVal = &position->paragraph;
-    CComVariant character;
-    character.vt = VT_I4 | VT_BYREF;
-    character.plVal = &position->character;
-    return SUCCEEDED(Method(hwp, L"GetPos", {list, paragraph, character}, nullptr));
+    return SUCCEEDED(hancom::com_state::CapturePosition(hwp, position));
 }
 
 bool SetPosition(IDispatch* const hwp, const Position& position) {
-    CComVariant returned;
-    if (FAILED(Method(
-            hwp,
-            L"SetPos",
-            {
-                CComVariant(position.list),
-                CComVariant(position.paragraph),
-                CComVariant(position.character),
-            },
-            &returned))) {
-        return false;
-    }
-    bool positioned = false;
-    return SUCCEEDED(AsBool(returned, &positioned)) && positioned;
+    const hancom::com_state::PositionResult result = hancom::com_state::ApplyPosition(
+        hwp,
+        position,
+        hancom::com_state::EmptyPositionResult::Reject);
+    return SUCCEEDED(result.invokeStatus) && SUCCEEDED(result.conversionStatus) &&
+        result.positioned;
 }
 
 bool CreateSet(IDispatch* const hwp, const wchar_t* const name, CComPtr<IDispatch>& set) {
@@ -194,59 +123,13 @@ bool SetItemLong(IDispatch* const set, const wchar_t* const name, LONG* const va
 }
 
 bool GetSelection(IDispatch* const hwp, Selection* const selection) {
-    CComPtr<IDispatch> start;
-    CComPtr<IDispatch> end;
-    if (!LongProperty(hwp, L"SelectionMode", &selection->mode) ||
-        !CreateSet(hwp, L"ListParaPos", start) || !CreateSet(hwp, L"ListParaPos", end)) {
-        return false;
-    }
-    CComVariant raw;
-    if (FAILED(Method(hwp, L"GetSelectedPosBySet", {CComVariant(start), CComVariant(end)}, &raw)) ||
-        FAILED(AsBool(raw, &selection->selected)) ||
-        !SetItemLong(start, L"List", &selection->start.list) ||
-        !SetItemLong(start, L"Para", &selection->start.paragraph) ||
-        !SetItemLong(start, L"Pos", &selection->start.character) ||
-        !SetItemLong(end, L"List", &selection->end.list) ||
-        !SetItemLong(end, L"Para", &selection->end.paragraph) ||
-        !SetItemLong(end, L"Pos", &selection->end.character)) {
-        return false;
-    }
-    const LONG baseMode = selection->mode & kSelectionModeMask;
-    if (baseMode == kSelectionCells || baseMode == kSelectionControl) {
-        CurrentControl(hwp, &selection->controlType, &selection->controlInstance);
-    }
-    if (baseMode == kSelectionCells && (selection->mode & kSelectionStrict) != 0) {
-        static_cast<void>(ReadSelectedCellAddresses(
-            hwp,
-            &selection->cellAddresses,
-            &selection->cellAddressError));
-    }
-    return true;
+    return CaptureSelection(
+        hwp,
+        selection,
+        SelectionCapturePolicy::BestEffortControl,
+        nullptr);
 }
 
-bool CanRestoreSelection(const Selection& selection) noexcept {
-    const LONG baseMode = selection.mode & kSelectionModeMask;
-    if (baseMode == kSelectionNone) {
-        return true;
-    }
-    if (baseMode == kSelectionText) {
-        return selection.selected && selection.start.list == selection.end.list;
-    }
-    if (baseMode == kSelectionCells) {
-        return (selection.selected || !selection.cellAddresses.empty()) &&
-            selection.controlType == L"tbl" &&
-            !selection.controlInstance.empty();
-    }
-    if (baseMode == kSelectionControl) {
-        return !selection.controlInstance.empty();
-    }
-    return false;
-}
-
-bool RestoreSelection(
-    IDispatch* const hwp,
-    const Position& cursor,
-    const Selection& selection);
 
 bool ActiveDocument(
     IDispatch* const hwp,
@@ -465,6 +348,93 @@ void TableDimensions(
     }
 }
 
+std::wstring LogicalCellAddress(const long row, long column) {
+    if (row < 1 || column < 1) {
+        return L"";
+    }
+    std::wstring columnName;
+    while (column > 0) {
+        const long remainder = (column - 1) % 26;
+        columnName.push_back(static_cast<wchar_t>(L'A' + remainder));
+        column = (column - 1) / 26;
+    }
+    std::reverse(columnName.begin(), columnName.end());
+    return columnName + std::to_wstring(row);
+}
+
+bool ExpandLogicalSelectionAddresses(
+    const CellTopology& topology,
+    const std::vector<std::wstring>& physical,
+    std::vector<std::wstring>* const logical,
+    std::wstring* const error) noexcept {
+    try {
+        if (logical == nullptr || physical.empty()) {
+            if (error != nullptr) {
+                *error = L"selected cell owner addresses are unavailable";
+            }
+            return false;
+        }
+        bool hasMergedCell = false;
+        std::vector<std::pair<long, long>> coordinates;
+        for (const std::wstring& address : physical) {
+            const CellTopologyCell* const cell = topology.Find(address);
+            if (cell == nullptr) {
+                if (error != nullptr) {
+                    *error = L"selected cell address is not a physical topology owner";
+                }
+                return false;
+            }
+            hasMergedCell =
+                hasMergedCell || cell->rowSpan > 1 || cell->columnSpan > 1;
+            for (long rowOffset = 0; rowOffset < cell->rowSpan; ++rowOffset) {
+                for (long columnOffset = 0;
+                     columnOffset < cell->columnSpan;
+                     ++columnOffset) {
+                    coordinates.emplace_back(
+                        cell->row + rowOffset,
+                        cell->column + columnOffset);
+                }
+            }
+        }
+        if (!hasMergedCell) {
+            *logical = physical;
+            return true;
+        }
+        std::sort(coordinates.begin(), coordinates.end());
+        coordinates.erase(
+            std::unique(coordinates.begin(), coordinates.end()),
+            coordinates.end());
+        logical->clear();
+        logical->reserve(coordinates.size());
+        for (const auto& [row, column] : coordinates) {
+            const std::wstring address = LogicalCellAddress(row, column);
+            if (address.empty()) {
+                if (error != nullptr) {
+                    *error = L"selected logical cell address could not be encoded";
+                }
+                logical->clear();
+                return false;
+            }
+            logical->push_back(address);
+        }
+        return !logical->empty();
+    } catch (...) {
+        try {
+            if (logical != nullptr) {
+                logical->clear();
+            }
+        } catch (...) {
+        }
+        try {
+            if (error != nullptr) {
+                *error = L"selected logical cell expansion failed unexpectedly";
+            }
+        } catch (...) {
+        }
+        return false;
+    }
+}
+
 bool DefaultParameter(
     IDispatch* const hwp,
     const wchar_t* const actionName,
@@ -531,10 +501,6 @@ struct CaptionRecord {
     LONG pageEnd = 0;
 };
 
-bool SamePosition(const Position& left, const Position& right) noexcept {
-    return left.list == right.list && left.paragraph == right.paragraph &&
-        left.character == right.character;
-}
 
 bool CallBoolean(
     IDispatch* const object,
@@ -559,125 +525,9 @@ bool RunHwpAction(IDispatch* const hwp, const wchar_t* const actionName) {
         CallBoolean(action, L"Run", {CComVariant(actionName)}, &result) && result;
 }
 
-bool RestoreTextSelection(IDispatch* const hwp, const Selection& selection) {
-    if (!SetPosition(hwp, Position{selection.start.list, 0, 0})) {
-        return false;
-    }
-    CComVariant raw;
-    if (FAILED(Method(
-            hwp,
-            L"SelectText",
-            {
-                CComVariant(selection.start.paragraph),
-                CComVariant(selection.start.character),
-                CComVariant(selection.end.paragraph),
-                CComVariant(selection.end.character),
-            },
-            &raw))) {
-        return false;
-    }
-    bool selected = false;
-    LONG mode = 0;
-    return SUCCEEDED(AsBool(raw, &selected)) && selected &&
-        LongProperty(hwp, L"SelectionMode", &mode) &&
-        (mode & kSelectionModeMask) == kSelectionText;
-}
 
-bool RestoreCellSelection(IDispatch* const hwp, const Selection& selection) {
-    CellTopology topology;
-    std::wstring error;
-    if (!InspectTableTopology(
-            hwp,
-            selection.controlInstance,
-            &topology,
-            &error)) {
-        return false;
-    }
-    std::wstring first;
-    std::wstring last;
-    std::vector<CellTopologyStep> path;
-    std::vector<std::wstring> region;
-    const bool planned = selection.cellAddresses.empty()
-        ? topology.PlanRectangularSelection(
-            selection.start.list,
-            selection.end.list,
-            &first,
-            &last,
-            &path,
-            &region,
-            &error)
-        : topology.PlanRectangularSelection(
-            selection.cellAddresses,
-            &first,
-            &last,
-            &path,
-            &region,
-            &error);
-    if (!planned) {
-        return false;
-    }
-    const CellTopologyCell* const firstCell = topology.Find(first);
-    if (firstCell == nullptr ||
-        !SetPosition(hwp, Position{firstCell->listId, 0, 0}) ||
-        !RunHwpAction(hwp, L"TableCellBlock")) {
-        return false;
-    }
-    if (region.size() > 1) {
-        if (!RunHwpAction(hwp, L"TableCellBlockExtend")) {
-            return false;
-        }
-        for (const CellTopologyStep& step : path) {
-            const wchar_t* const action = step.direction == CellDirection::Right
-                ? L"TableRightCell"
-                : L"TableLowerCell";
-            if (!RunHwpAction(hwp, action) || CellAddress(hwp) != step.destination) {
-                return false;
-            }
-        }
-    }
-    LONG mode = 0;
-    return LongProperty(hwp, L"SelectionMode", &mode) &&
-        (mode & kSelectionModeMask) == kSelectionCells;
-}
 
-bool RestoreControlSelection(IDispatch* const hwp, const Selection& selection) {
-    if (selection.controlType == L"tbl" &&
-        SelectTableControl(hwp, selection.controlInstance)) {
-        return true;
-    }
-    CComVariant ignored;
-    static_cast<void>(Method(
-        hwp,
-        L"SelectCtrl",
-        {CComVariant(selection.controlInstance.c_str()), CComVariant(1L)},
-        &ignored));
-    CComPtr<IDispatch> selected;
-    std::wstring type;
-    std::wstring instance;
-    return DispatchProperty(hwp, L"CurSelectedCtrl", selected) &&
-        ControlIdentity(selected, &type, &instance) &&
-        type == selection.controlType && instance == selection.controlInstance;
-}
 
-bool RestoreSelection(
-    IDispatch* const hwp,
-    const Position& cursor,
-    const Selection& selection) {
-    const LONG baseMode = selection.mode & kSelectionModeMask;
-    if (baseMode == kSelectionNone) {
-        return SetPosition(hwp, cursor);
-    }
-    if (baseMode == kSelectionText) {
-        return RestoreTextSelection(hwp, selection);
-    }
-    if (baseMode == kSelectionCells) {
-        return RestoreCellSelection(hwp, selection);
-    }
-    if (baseMode == kSelectionControl) {
-        return RestoreControlSelection(hwp, selection);
-    }
-    return false;
-}
 
 bool ReadCurrentStyle(
     IDispatch* const hwp,
@@ -698,14 +548,21 @@ bool ReadCurrentStyle(
 bool ReadControlRecords(
     IDispatch* const hwp,
     IDispatch* const info,
+    const LONG requestedPage,
+    const LONG pageCount,
     std::vector<DetailedControlRecord>* const records,
     std::wstring* const error) {
     records->clear();
+    const bool scoped = requestedPage > 0;
+    const bool backward = scoped && requestedPage > pageCount / 2;
     CComPtr<IDispatch> control;
-    if (!DispatchProperty(hwp, L"HeadCtrl", control)) {
+    if (!DispatchProperty(hwp, backward ? L"LastCtrl" : L"HeadCtrl", control)) {
         return true;
     }
     size_t visited = 0;
+    bool scopeComplete = false;
+    bool directTable = false;
+    LONG precedingTablePage = 0;
     while (control != nullptr && visited < 20'000) {
         ++visited;
         DetailedControlRecord record;
@@ -724,18 +581,42 @@ bool ReadControlRecords(
             record.width = ParameterLong(properties, L"Width");
             record.height = ParameterLong(properties, L"Height");
         }
+        if (scoped && !backward && record.topLevel &&
+            record.anchorPage > requestedPage) {
+            scopeComplete = true;
+            break;
+        }
+        if (backward && record.topLevel) {
+            if (record.anchorPage == requestedPage && record.type == L"tbl") {
+                directTable = true;
+            }
+            if (record.anchorPage < requestedPage) {
+                if (directTable ||
+                    (precedingTablePage > 0 &&
+                     record.anchorPage < precedingTablePage)) {
+                    scopeComplete = true;
+                    break;
+                }
+                if (record.type == L"tbl") {
+                    precedingTablePage = record.anchorPage;
+                }
+            }
+        }
         records->push_back(std::move(record));
 
         CComPtr<IDispatch> next;
-        if (!DispatchProperty(control, L"Next", next)) {
+        if (!DispatchProperty(control, backward ? L"Prev" : L"Next", next)) {
             control.Release();
             break;
         }
         control = next;
     }
-    if (control != nullptr) {
+    if (control != nullptr && !scopeComplete) {
         *error = L"control linked list exceeded the inspection limit";
         return false;
+    }
+    if (backward) {
+        std::reverse(records->begin(), records->end());
     }
     return true;
 }
@@ -870,12 +751,62 @@ std::wstring Snapshot(IDispatch* const hwp) noexcept {
         CurrentControl(hwp, &controlType, &controlInstance);
         const std::wstring selectedText = SelectedText(hwp, selection.selected);
         const std::wstring cell = CellAddress(hwp);
+        std::vector<std::wstring> logicalCellAddresses;
+        std::wstring logicalAddressError;
+        const bool logicalSelectionAttempted = !selection.cellAddresses.empty();
+        if (logicalSelectionAttempted) {
+            const Selection physicalSelection = selection;
+            logicalAddressError.clear();
+            if (!CanRestoreSelection(physicalSelection)) {
+                logicalAddressError =
+                    L"selected cell logical topology expansion requires a safely restorable table selection";
+            } else {
+                CellTopology topology;
+                std::wstring topologyError;
+                const bool inspected = InspectTableTopology(
+                    hwp,
+                    selection.controlInstance,
+                    &topology,
+                    &topologyError);
+                const bool expanded = inspected && ExpandLogicalSelectionAddresses(
+                    topology,
+                    physicalSelection.cellAddresses,
+                    &logicalCellAddresses,
+                    &logicalAddressError);
+                bool restoredModified = modified;
+                if (!RestoreSelection(hwp, cursor, physicalSelection) ||
+                    !BoolProperty(hwp, L"IsModified", &restoredModified)) {
+                    return ErrorResponse(
+                        L"RESTORE_STATE",
+                        L"cursor or selection could not be restored after selected-cell topology inspection");
+                }
+                if (restoredModified != modified) {
+                    return ErrorResponse(
+                        L"DOCUMENT_CHANGED",
+                        L"selected-cell topology inspection unexpectedly changed the document");
+                }
+                if (!expanded) {
+                    const std::wstring detail = inspected
+                        ? logicalAddressError
+                        : topologyError;
+                    logicalAddressError =
+                        L"selected cell logical topology expansion failed: " + detail;
+                }
+            }
+        }
         std::wostringstream selectedCells;
         for (size_t index = 0; index < selection.cellAddresses.size(); ++index) {
             if (index != 0) {
                 selectedCells << L',';
             }
             selectedCells << selection.cellAddresses[index];
+        }
+        std::wostringstream logicalSelectedCells;
+        for (size_t index = 0; index < logicalCellAddresses.size(); ++index) {
+            if (index != 0) {
+                logicalSelectedCells << L',';
+            }
+            logicalSelectedCells << logicalCellAddresses[index];
         }
         std::wostringstream output;
         output << L"HCS1\nDOC\t" << documentId << L'\t' << EncodeUtf8Base64(fullName)
@@ -889,8 +820,12 @@ std::wstring Snapshot(IDispatch* const hwp) noexcept {
                << selection.start.character << L'\t' << selection.end.list << L'\t'
                << selection.end.paragraph << L'\t' << selection.end.character << L'\t'
                << EncodeUtf8Base64(selectedCells.str()) << L'\t'
-               << EncodeUtf8Base64(selection.cellAddressError)
-               << L"\nTEXT\t" << EncodeUtf8Base64(selectedText)
+               << EncodeUtf8Base64(selection.cellAddressError);
+        if (logicalSelectionAttempted) {
+            output << L'\t' << EncodeUtf8Base64(logicalSelectedCells.str()) << L'\t'
+                   << EncodeUtf8Base64(logicalAddressError);
+        }
+        output << L"\nTEXT\t" << EncodeUtf8Base64(selectedText)
                << L"\nCONTEXT\t" << EncodeUtf8Base64(controlType) << L'\t'
                << EncodeUtf8Base64(controlInstance) << L'\t' << EncodeUtf8Base64(cell)
                << L"\nSTYLE\t" << formatting.styleId
@@ -930,9 +865,10 @@ void AppendPageControl(
     const bool anchorFormatRead = type != L"tbl" ||
         SUCCEEDED(hancom::formatting::ReadParagraphFormat(hwp, &anchorFormat));
     std::vector<TableCellRecord> cells;
+    std::wstring tableErrorCode = L"TABLE_INSPECTION";
     std::wstring tableError;
     const bool tableInspected = type != L"tbl" || !includeTableCells ||
-        InspectTableCells(hwp, instance, &cells, &tableError);
+        InspectTableCells(hwp, instance, &cells, &tableError, &tableErrorCode);
     if (type == L"tbl" && includeTableCells && tableInspected) {
         TableDimensions(cells, &rows, &columns);
     }
@@ -958,7 +894,7 @@ void AppendPageControl(
     }
     if (includeTableCells && !tableInspected) {
         *controls << L"CTRL_ERROR\t" << EncodeUtf8Base64(instance) << L'\t'
-                  << EncodeUtf8Base64(L"TABLE_INSPECTION") << L'\t'
+                  << EncodeUtf8Base64(tableErrorCode) << L'\t'
                   << EncodeUtf8Base64(tableError) << L'\n';
     } else if (includeTableCells) {
         for (const TableCellRecord& cell : cells) {
@@ -1237,8 +1173,14 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
         if (!ActiveDocument(hwp, document, info) ||
             !LongProperty(document, L"DocumentID", &documentId) ||
             !StringProperty(document, L"FullName", &fullName) ||
-            !LongProperty(hwp, L"PageCount", &pageCount) ||
-            requestedPage < 1 || requestedPage > pageCount) {
+            !LongProperty(hwp, L"PageCount", &pageCount)) {
+            return ErrorResponse(L"BAD_PAGE", L"requested page is outside the active document");
+        }
+        LONG targetPage = requestedPage < 0 ? -requestedPage : requestedPage;
+        if (targetPage == 0 && !CurrentPageFromInfo(info, &targetPage)) {
+            return ErrorResponse(L"CURRENT_PAGE", L"current page could not be read");
+        }
+        if (targetPage < 1 || targetPage > pageCount) {
             return ErrorResponse(L"BAD_PAGE", L"requested page is outside the active document");
         }
         CComVariant textValue;
@@ -1246,7 +1188,7 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
         if (FAILED(Method(
                 hwp,
                 L"GetPageText",
-                {CComVariant(requestedPage - 1), CComVariant(static_cast<LONG>(-1))},
+                {CComVariant(targetPage - 1), CComVariant(static_cast<LONG>(-1))},
                 &textValue)) ||
             FAILED(AsString(textValue, &pageText))) {
             return ErrorResponse(L"PAGE_TEXT", L"requested page text could not be read");
@@ -1267,7 +1209,13 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
 
         std::vector<DetailedControlRecord> records;
         std::wstring error;
-        if (!ReadControlRecords(hwp, info, &records, &error)) {
+        if (!ReadControlRecords(
+                hwp,
+                info,
+                requestedPage > 0 ? targetPage : 0,
+                pageCount,
+                &records,
+                &error)) {
             return RestoreInspectionState(
                 hwp,
                 cursor,
@@ -1280,7 +1228,7 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
         bool directTable = false;
         for (size_t index = 0; index < records.size(); ++index) {
             const DetailedControlRecord& control = records[index];
-            if (control.topLevel && control.anchorPage == requestedPage) {
+            if (control.topLevel && control.anchorPage == targetPage) {
                 candidates[index] = true;
                 directTable = directTable || control.type == L"tbl";
             }
@@ -1289,7 +1237,7 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
             LONG precedingPage = 0;
             for (const DetailedControlRecord& control : records) {
                 if (control.topLevel && control.type == L"tbl" &&
-                    control.anchorPage < requestedPage) {
+                    control.anchorPage < targetPage) {
                     precedingPage = (std::max)(precedingPage, control.anchorPage);
                 }
             }
@@ -1322,7 +1270,13 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
             }
 
             std::vector<TableCellRecord> cells;
-            if (!InspectTableCells(hwp, control.instance, &cells, &error)) {
+            std::wstring tableErrorCode = L"TABLE_INSPECTION";
+            if (!InspectTableCells(
+                    hwp,
+                    control.instance,
+                    &cells,
+                    &error,
+                    &tableErrorCode)) {
                 WriteDetailedControl(
                     body,
                     control,
@@ -1331,7 +1285,7 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
                     -1,
                     -1);
                 body << L"CTRL_ERROR\t" << EncodeUtf8Base64(control.instance) << L'\t'
-                     << EncodeUtf8Base64(L"TABLE_INSPECTION") << L'\t'
+                     << EncodeUtf8Base64(tableErrorCode) << L'\t'
                      << EncodeUtf8Base64(error) << L'\n';
                 continue;
             }
@@ -1357,7 +1311,7 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
                 pageStart = (std::min)(pageStart, caption.pageStart);
                 pageEnd = (std::max)(pageEnd, caption.pageEnd);
             }
-            if (requestedPage < pageStart || requestedPage > pageEnd) {
+            if (targetPage < pageStart || targetPage > pageEnd) {
                 continue;
             }
 
@@ -1400,7 +1354,7 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
 
         std::wostringstream output;
         output << L"HDS1\nDOC\t" << documentId << L'\t' << EncodeUtf8Base64(fullName)
-               << L"\nPAGE\t" << requestedPage << L'\t' << pageCount << L'\t'
+               << L"\nPAGE\t" << targetPage << L'\t' << pageCount << L'\t'
                << EncodeUtf8Base64(pageText) << L'\n' << body.str() << L"END";
         return RestoreInspectionState(
             hwp,

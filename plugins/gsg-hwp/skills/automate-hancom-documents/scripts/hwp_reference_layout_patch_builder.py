@@ -52,6 +52,6 @@ def build_reference_layout_patch(
         placement_edges=block.visible_edges,
         placement_styles=block.styles,
         placement_style_regions=block.style_regions,
-        text_styles=block.styles,
+        text_styles=block.styles if block.text_anchors else (),
         text_anchors=block.text_anchors,
     )

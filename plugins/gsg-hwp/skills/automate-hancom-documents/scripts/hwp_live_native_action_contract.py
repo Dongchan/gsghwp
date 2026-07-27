@@ -52,6 +52,7 @@ from hwp_live_native_action_models import (
     ParameterActionCommand,
     PasteTableCommand,
     ReplaceSelectionCommand,
+    RestoreDocumentFileCommand,
     RunCommand,
     SaveDocumentFileCommand,
     SelectControlCommand,
@@ -99,6 +100,20 @@ class NativeActionFailure(HwpLiveError):
         super().__init__(
             f"네이티브 액션 {evidence.code}{suffix}: {evidence.message}"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _DecodedNativeSelection(NativeSelection):
+    logical_cell_addresses: tuple[str, ...] = ()
+    logical_cell_address_error: str = ""
+
+
+def decoded_logical_cell_selection(
+    selection: NativeSelection,
+) -> tuple[tuple[str, ...], str] | None:
+    if not isinstance(selection, _DecodedNativeSelection):
+        return None
+    return selection.logical_cell_addresses, selection.logical_cell_address_error
 
 
 def _encode(value: str) -> str:
@@ -236,6 +251,16 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
             return (f"COPY_CONTROL\t{_encode(instance_id)}",)
         case SaveDocumentFileCommand(path=path):
             return (f"SAVE_DOCUMENT_FILE\t{_encode(_absolute_path(path))}",)
+        case RestoreDocumentFileCommand(
+            path=path,
+            expected_page_count=expected_page_count,
+        ):
+            if expected_page_count < 1:
+                raise HwpLiveError("네이티브 복원 문서의 예상 쪽 수는 1 이상이어야 합니다")
+            return (
+                "RESTORE_DOCUMENT_FILE\t"
+                + f"{_encode(_absolute_path(path))}\t{expected_page_count}",
+            )
         case ApplyCopiedTableAnchorCommand(instance_id=instance_id):
             if not instance_id:
                 raise HwpLiveError("네이티브 표 앵커 적용 개체 ID가 비어 있습니다")
@@ -620,6 +645,7 @@ def decode_snapshot(payload: str) -> NativeSnapshot:
     current_selection = len(selection) == 9 and selection[0] == "SELECTION"
     addressed_selection = len(selection) == 10 and selection[0] == "SELECTION"
     diagnostic_selection = len(selection) == 11 and selection[0] == "SELECTION"
+    logical_selection = len(selection) in {12, 13} and selection[0] == "SELECTION"
     if (
         len(document) != 3
         or document[0] != "DOC"
@@ -632,6 +658,7 @@ def decode_snapshot(payload: str) -> NativeSnapshot:
             or current_selection
             or addressed_selection
             or diagnostic_selection
+            or logical_selection
         )
         or len(text) != 2
         or text[0] != "TEXT"
@@ -653,27 +680,63 @@ def decode_snapshot(payload: str) -> NativeSnapshot:
             for address in _decode(selection[9]).split(",")
             if address.strip()
         )
-        if addressed_selection or diagnostic_selection
+        if addressed_selection or diagnostic_selection or logical_selection
         else ()
     )
-    selected = NativeSelection(
-        selected=_boolean(selection[1], "선택 상태"),
-        start=NativePosition(
-            *(
-                _integer(value, "선택 시작")
-                for value in selection[selection_position : selection_position + 3]
-            )
-        ),
-        end=NativePosition(
-            *(
-                _integer(value, "선택 끝")
-                for value in selection[selection_position + 3 : selection_position + 6]
-            )
-        ),
-        mode=0 if legacy_selection else _integer(selection[2], "선택 모드"),
-        cell_addresses=selected_cells,
-        cell_address_error=_decode(selection[10]) if diagnostic_selection else "",
+    logical_selected_cells = (
+        tuple(
+            address.strip().upper()
+            for address in _decode(selection[11]).split(",")
+            if address.strip()
+        )
+        if logical_selection
+        else ()
     )
+    selected_state = _boolean(selection[1], "선택 상태")
+    selected_start = NativePosition(
+        *(
+            _integer(value, "선택 시작")
+            for value in selection[selection_position : selection_position + 3]
+        )
+    )
+    selected_end = NativePosition(
+        *(
+            _integer(value, "선택 끝")
+            for value in selection[
+                selection_position + 3 : selection_position + 6
+            ]
+        )
+    )
+    selected_mode = (
+        0 if legacy_selection else _integer(selection[2], "선택 모드")
+    )
+    selected_error = (
+        _decode(selection[10])
+        if diagnostic_selection or logical_selection
+        else ""
+    )
+    if logical_selection:
+        selected = _DecodedNativeSelection(
+            selected=selected_state,
+            start=selected_start,
+            end=selected_end,
+            mode=selected_mode,
+            cell_addresses=selected_cells,
+            cell_address_error=selected_error,
+            logical_cell_addresses=logical_selected_cells,
+            logical_cell_address_error=(
+                _decode(selection[12]) if len(selection) == 13 else ""
+            ),
+        )
+    else:
+        selected = NativeSelection(
+            selected=selected_state,
+            start=selected_start,
+            end=selected_end,
+            mode=selected_mode,
+            cell_addresses=selected_cells,
+            cell_address_error=selected_error,
+        )
     return NativeSnapshot(
         document_id=_integer(document[1], "문서 ID"),
         full_name=_decode(document[2]),

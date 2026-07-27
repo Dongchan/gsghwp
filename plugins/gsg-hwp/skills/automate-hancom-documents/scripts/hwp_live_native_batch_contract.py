@@ -79,6 +79,10 @@ class NativeLifecycleResult:
     after_text_hash: str | None
     after_document_hash: str | None
     elapsed_microseconds: int
+    before_document_length: int | None = None
+    after_document_length: int | None = None
+    before_document_section_hashes: tuple[str, ...] | None = None
+    after_document_section_hashes: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +105,12 @@ class NativeSaveResult:
     after_text_hash: str | None
     after_document_hash: str | None
     file_size: int
+    file_write_time_100ns: int | None
     elapsed_microseconds: int
+    before_document_length: int | None = None
+    after_document_length: int | None = None
+    before_document_section_hashes: tuple[str, ...] | None = None
+    after_document_section_hashes: tuple[str, ...] | None = None
 
 
 def _encode(value: str) -> str:
@@ -238,10 +247,89 @@ def _lifecycle_return(value: str, label: str) -> int:
     return result
 
 
+def _diagnostic_nonnegative_integer(value: str, label: str) -> int:
+    if (
+        not value.isascii()
+        or not value.isdecimal()
+        or (len(value) > 1 and value.startswith("0"))
+    ):
+        raise HwpLiveError(
+            f"네이티브 저장·재개방 {label} 진단 숫자가 올바르지 않습니다"
+        )
+    result = int(value)
+    if result > 0xFFFF_FFFF_FFFF_FFFF:
+        raise HwpLiveError(
+            f"네이티브 저장·재개방 {label} 진단 숫자가 올바르지 않습니다"
+        )
+    return result
+
+
+def _document_fingerprint_diagnostics(
+    document_length_value: str,
+    sections_value: str,
+    label: str,
+) -> tuple[int, tuple[str, ...]]:
+    document_length = _diagnostic_nonnegative_integer(
+        document_length_value,
+        f"{label} 문서 길이",
+    )
+    section_hashes = tuple(sections_value.split(",")) if sections_value else ()
+    expected_section_count = (document_length + 65_535) // 65_536
+    if len(section_hashes) != expected_section_count:
+        raise HwpLiveError(
+            f"네이티브 저장·재개방 {label} 구간 해시 수가 일치하지 않습니다"
+        )
+    if any(
+        len(section_hash) != 16
+        or not section_hash.isascii()
+        or any(character not in "0123456789abcdef" for character in section_hash)
+        for section_hash in section_hashes
+    ):
+        raise HwpLiveError(
+            f"네이티브 저장·재개방 {label} 구간 해시 형식이 올바르지 않습니다"
+        )
+    return document_length, section_hashes
+
+
+def _optional_document_fingerprint_diagnostics(
+    fields: list[str],
+    base_field_count: int,
+) -> tuple[
+    int | None,
+    int | None,
+    tuple[str, ...] | None,
+    tuple[str, ...] | None,
+]:
+    if len(fields) == base_field_count:
+        return None, None, None, None
+    before_length, before_section_hashes = _document_fingerprint_diagnostics(
+        fields[base_field_count],
+        fields[base_field_count + 2],
+        "저장 전",
+    )
+    after_length, after_section_hashes = _document_fingerprint_diagnostics(
+        fields[base_field_count + 1],
+        fields[base_field_count + 3],
+        "저장 후",
+    )
+    return (
+        before_length,
+        after_length,
+        before_section_hashes,
+        after_section_hashes,
+    )
+
+
 def decode_lifecycle_result(payload: str) -> NativeLifecycleResult:
     fields = payload.split("\t")
-    if len(fields) != 26 or fields[0] != "HCL12":
+    if len(fields) not in {26, 30} or fields[0] != "HCL12":
         raise HwpLiveError("네이티브 저장·재개방 응답 형식이 올바르지 않습니다")
+    (
+        before_document_length,
+        after_document_length,
+        before_document_section_hashes,
+        after_document_section_hashes,
+    ) = _optional_document_fingerprint_diagnostics(fields, 26)
     reopened_path = _decode(fields[2]) or None
     before_page_count = _lifecycle_optional_nonnegative(fields[3], "저장 전 쪽 수")
     before_control_count = _lifecycle_optional_nonnegative(fields[5], "저장 전 개체 수")
@@ -288,6 +376,10 @@ def decode_lifecycle_result(payload: str) -> NativeLifecycleResult:
         after_text_hash=_lifecycle_hash(fields[23], "재개방 후 본문"),
         after_document_hash=_lifecycle_hash(fields[24], "재개방 후 문서"),
         elapsed_microseconds=elapsed_microseconds,
+        before_document_length=before_document_length,
+        after_document_length=after_document_length,
+        before_document_section_hashes=before_document_section_hashes,
+        after_document_section_hashes=after_document_section_hashes,
     )
     fingerprint_matches = (
         result.before_page_count == result.after_page_count
@@ -316,8 +408,11 @@ def decode_lifecycle_result(payload: str) -> NativeLifecycleResult:
         raise HwpLiveError("네이티브 저장·재개방 성공 응답의 readback 근거가 일치하지 않습니다")
     if result.recovered and not (
         not result.verified
+        and result.reopened_path is not None
         and result.recovery_hresult >= 0
         and result.recovery_return == 1
+        and result.post_save_modified is False
+        and result.after_modified is False
         and fingerprint_matches
     ):
         raise HwpLiveError("네이티브 저장·재개방 복구 응답의 문서 지문이 일치하지 않습니다")
@@ -334,18 +429,37 @@ def _lifecycle_hash(value: str, label: str) -> str | None:
 
 def decode_save_result(payload: str) -> NativeSaveResult:
     fields = payload.split("\t")
-    if len(fields) != 20 or fields[0] != "HLS1":
+    if len(fields) not in {20, 21, 25} or fields[0] != "HLS1":
         raise HwpLiveError("네이티브 일반 저장 응답 형식이 올바르지 않습니다")
+    base_field_count = 21 if len(fields) == 25 else len(fields)
+    (
+        before_document_length,
+        after_document_length,
+        before_document_section_hashes,
+        after_document_section_hashes,
+    ) = _optional_document_fingerprint_diagnostics(fields, base_field_count)
     before_page_count = _lifecycle_optional_nonnegative(fields[3], "저장 전 쪽 수")
     before_control_count = _lifecycle_optional_nonnegative(fields[5], "저장 전 개체 수")
     after_page_count = _lifecycle_optional_nonnegative(fields[12], "저장 후 쪽 수")
     after_control_count = _lifecycle_optional_nonnegative(fields[14], "저장 후 개체 수")
     file_size = _lifecycle_integer(fields[18], "파일 크기")
-    elapsed_microseconds = _lifecycle_integer(fields[19], "처리 시간")
+    file_write_time_100ns = (
+        None
+        if base_field_count == 20
+        else _lifecycle_integer(fields[19], "파일 수정 시각")
+    )
+    elapsed_microseconds = _lifecycle_integer(
+        fields[base_field_count - 1],
+        "처리 시간",
+    )
     for page_count in (before_page_count, after_page_count):
         if page_count == 0:
             raise HwpLiveError("네이티브 일반 저장 쪽 수는 1 이상이어야 합니다")
-    if file_size < 0 or elapsed_microseconds < 0:
+    if (
+        file_size < 0
+        or (file_write_time_100ns is not None and file_write_time_100ns < 0)
+        or elapsed_microseconds < 0
+    ):
         raise HwpLiveError("네이티브 일반 저장 크기 또는 처리 시간이 음수입니다")
     result = NativeSaveResult(
         verified=_lifecycle_boolean(fields[1], "검증 상태"),
@@ -366,7 +480,12 @@ def decode_save_result(payload: str) -> NativeSaveResult:
         after_text_hash=_lifecycle_hash(fields[16], "저장 후 본문"),
         after_document_hash=_lifecycle_hash(fields[17], "저장 후 문서"),
         file_size=file_size,
+        file_write_time_100ns=file_write_time_100ns,
         elapsed_microseconds=elapsed_microseconds,
+        before_document_length=before_document_length,
+        after_document_length=after_document_length,
+        before_document_section_hashes=before_document_section_hashes,
+        after_document_section_hashes=after_document_section_hashes,
     )
     if result.verified and not (
         result.saved_path is not None
@@ -384,6 +503,11 @@ def decode_save_result(payload: str) -> NativeSaveResult:
         and result.before_text_hash == result.after_text_hash
         and result.before_document_hash is not None
         and result.before_document_hash == result.after_document_hash
+        and result.file_size > 0
+        and (
+            result.file_write_time_100ns is None
+            or result.file_write_time_100ns > 0
+        )
     ):
         raise HwpLiveError("네이티브 일반 저장 성공 응답의 readback 근거가 일치하지 않습니다")
     return result

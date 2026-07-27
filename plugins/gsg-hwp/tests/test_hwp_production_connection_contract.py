@@ -96,6 +96,7 @@ def test_bridge_error_includes_visible_hwp_popup_text() -> None:
 
     assert "RPC 서버를 사용할 수 없습니다(-2147023174)" in captured.value.reason
     assert "PopupBorderImpl" in captured.value.reason
+    assert "popup_ownership=unverified" in captured.value.reason
 
 
 def test_production_read_tools_need_no_session_preflight() -> None:

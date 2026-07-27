@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ntpath
 from collections.abc import Callable, Mapping
+from typing import Final
 
 from hwp_errors import HwpLiveError
 from hwp_live_api import LiveHwpApplication
@@ -8,10 +10,11 @@ from hwp_live_native_action_models import (
     NativeActionRequest,
     NativePosition,
 )
-from hwp_live_native_action_results import NativeActionResult
-from hwp_live_native_batch import execute_native_actions
+from hwp_live_native_action_results import NativeActionResult, NativeSnapshot
+from hwp_live_native_batch import execute_native_actions, read_native_snapshot
 from hwp_live_rot import HwpDocumentCandidate
 from hwp_live_safety import require_writable_document, run_layout_mutation
+from hwp_native_failure_result import ATOMIC_ACTION_MINIMUM_NATIVE_PROTOCOL
 from hwp_operation_command import plan_operation_command
 from hwp_operation_certification import certified_atomic_action
 from hwp_operation_contract import (
@@ -22,6 +25,130 @@ from hwp_operation_contract import (
     OperationStatus,
 )
 from hwp_operation_registry import resolve_operation
+
+
+_SNAPSHOT_READBACK_ACTIONS: Final = frozenset(
+    {
+        "MoveDocBegin",
+        "MoveListBegin",
+        "MoveNextParaBegin",
+        "MovePageDown",
+        "MovePageUp",
+        "MoveParaBegin",
+        "MovePrevParaBegin",
+        "MoveSelDocBegin",
+        "MoveSelListBegin",
+        "MoveSelNextParaBegin",
+        "MoveSelParaBegin",
+        "MoveSelPrevParaBegin",
+    }
+)
+
+
+def _same_document(
+    snapshot: NativeSnapshot,
+    candidate: HwpDocumentCandidate,
+) -> bool:
+    return snapshot.document_id == candidate.document_id and ntpath.normcase(
+        ntpath.normpath(snapshot.full_name)
+    ) == ntpath.normcase(ntpath.normpath(candidate.full_name))
+
+
+def _selection_has_endpoints(
+    snapshot: NativeSnapshot,
+    first: NativePosition,
+    second: NativePosition,
+) -> bool:
+    selection = snapshot.selection
+    return selection.selected and (
+        (selection.start == first and selection.end == second)
+        or (selection.start == second and selection.end == first)
+    )
+
+
+def _snapshot_postcondition_verified(
+    action: str,
+    candidate: HwpDocumentCandidate,
+    before: NativeSnapshot | None,
+    after: NativeSnapshot | None,
+) -> bool:
+    if (
+        before is None
+        or after is None
+        or not _same_document(before, candidate)
+        or not _same_document(after, candidate)
+        or before.page_count != after.page_count
+        or before.modified != after.modified
+        or before.selection.selected
+    ):
+        return False
+
+    cursor = before.cursor
+    after_cursor = after.cursor
+    if action == "MoveDocBegin":
+        return (
+            not after.selection.selected
+            and after.current_page == 1
+            and after_cursor == NativePosition(0, 0, 0)
+        )
+    if action == "MoveListBegin":
+        return not after.selection.selected and after_cursor == NativePosition(
+            cursor.list_id, 0, 0
+        )
+    if action == "MoveParaBegin":
+        return not after.selection.selected and after_cursor == NativePosition(
+            cursor.list_id, cursor.paragraph, 0
+        )
+    if action == "MoveNextParaBegin":
+        return not after.selection.selected and after_cursor == NativePosition(
+            cursor.list_id, cursor.paragraph + 1, 0
+        )
+    if action == "MovePrevParaBegin":
+        return (
+            cursor.paragraph > 0
+            and not after.selection.selected
+            and after_cursor == NativePosition(cursor.list_id, cursor.paragraph - 1, 0)
+        )
+    if action == "MovePageDown":
+        return (
+            cursor.list_id == 0
+            and not after.selection.selected
+            and after_cursor.list_id == 0
+            and after.current_page == before.current_page + 1
+        )
+    if action == "MovePageUp":
+        return (
+            cursor.list_id == 0
+            and before.current_page > 1
+            and not after.selection.selected
+            and after_cursor.list_id == 0
+            and after.current_page == before.current_page - 1
+        )
+
+    selection_target = {
+        "MoveSelDocBegin": NativePosition(0, 0, 0),
+        "MoveSelListBegin": NativePosition(cursor.list_id, 0, 0),
+        "MoveSelNextParaBegin": NativePosition(
+            cursor.list_id,
+            cursor.paragraph + 1,
+            0,
+        ),
+        "MoveSelParaBegin": NativePosition(
+            cursor.list_id,
+            cursor.paragraph,
+            0,
+        ),
+        "MoveSelPrevParaBegin": NativePosition(
+            cursor.list_id,
+            cursor.paragraph - 1,
+            0,
+        ),
+    }.get(action)
+    return (
+        selection_target is not None
+        and selection_target != cursor
+        and _selection_has_endpoints(after, cursor, selection_target)
+    )
 
 
 def _not_executed(
@@ -140,23 +267,28 @@ def operate_validated(
             operation,
         )
     request = NativeActionRequest(
-        document_id=candidate.document.DocumentID,
-        full_name=candidate.document.FullName,
+        document_id=candidate.document_id,
+        full_name=candidate.full_name,
         commands=(command_plan.command,),
         expected_cursor=(
             None if expected_cursor is None else NativePosition(*expected_cursor)
         ),
     )
+
     def execute() -> NativeActionResult:
         native_result = execute_native_actions(
             candidate.window_handle,
             request,
-            minimum_version=9,
+            minimum_version=ATOMIC_ACTION_MINIMUM_NATIVE_PROTOCOL,
         )
         if native_result is None:
             raise HwpLiveError("한컴 네이티브 단일 작업 실행기를 사용할 수 없습니다")
         return native_result
 
+    snapshot_readback = operation.name in _SNAPSHOT_READBACK_ACTIONS
+    before = (
+        read_native_snapshot(candidate.window_handle) if snapshot_readback else None
+    )
     if operation.execution_policy == "document_change":
         require_writable_document(unsafe_selectors, candidate.selector)
         guard()
@@ -167,6 +299,26 @@ def operate_validated(
         )
     else:
         native = execute()
+    after = read_native_snapshot(candidate.window_handle) if snapshot_readback else None
+    verified = _snapshot_postcondition_verified(
+        operation.name,
+        candidate,
+        before,
+        after,
+    )
+    if snapshot_readback:
+        message = (
+            "공식 이동·선택 Action을 실행하고 네이티브 snapshot 후조건을 확인했습니다"
+            if verified
+            else "공식 이동·선택 Action은 실행됐지만 네이티브 snapshot 후조건이 일치하지 않았습니다"
+        )
+        verification = "native_snapshot_before_after"
+    else:
+        message = (
+            "공식 Action은 실행됐지만 이 유형의 관찰 가능한 후조건 readback이 "
+            "없어 검증하지 않았습니다"
+        )
+        verification = "native_action_result"
 
     return OperationResult(
         status="executed",
@@ -175,10 +327,15 @@ def operate_validated(
         lookup_microseconds=resolution.lookup_microseconds,
         operation=operation,
         candidates=resolution.candidates,
-        message="공식 API를 프로토콜 9 C++/ATL 네이티브 엔진에서 한 건 실행했습니다",
+        message=message,
         execution_mode="native_in_process",
-        native_protocol=9,
-        verification="native_action_result",
+        native_protocol=ATOMIC_ACTION_MINIMUM_NATIVE_PROTOCOL,
+        verification=verification,
+        verified=verified,
         commands_executed=native.commands_executed,
+        native_actions_executed=native.actions_executed,
         native_elapsed_microseconds=native.elapsed_microseconds,
+        current_page=None if after is None else after.current_page,
+        page_count=None if after is None else after.page_count,
+        modified=None if after is None else after.modified,
     )

@@ -23,7 +23,11 @@ from hwp_live_native_action_models import (
     RunCommand,
 )
 from hwp_live_native_layout_format import cell_format_commands
-from hwp_live_native_text_format import ParagraphFormatting, paragraph_command, style_command
+from hwp_live_native_text_format import (
+    ParagraphFormatting,
+    paragraph_command,
+    style_command,
+)
 from hwp_live_table_contract import TableBlock, TableCell
 from hwp_table_address import cell_address
 
@@ -50,7 +54,9 @@ def _table_create(block: TableBlock) -> ParameterActionCommand:
     widths = block.column_widths_mm
     if widths is None:
         widths = tuple(169.0 / columns for _ in range(columns))
-    height = sum(block.row_heights_mm) if block.row_heights_mm is not None else rows * 8.0
+    height = (
+        sum(block.row_heights_mm) if block.row_heights_mm is not None else rows * 8.0
+    )
     return ParameterActionCommand(
         action="TableCreate",
         parameter_set="HTableCreation",
@@ -97,11 +103,15 @@ def _geometry_commands(block: TableBlock) -> tuple[NativeActionCommand, ...]:
     columns = len(block.rows[0])
     if block.column_widths_mm is not None:
         for column, width in enumerate(block.column_widths_mm):
-            commands.extend(_select_range(cell_address(0, column), "TableLowerCell", rows - 1))
+            commands.extend(
+                _select_range(cell_address(0, column), "TableLowerCell", rows - 1)
+            )
             commands.extend((_size_action("Width", width), RunCommand("Cancel")))
     if block.row_heights_mm is not None:
         for row, height in enumerate(block.row_heights_mm):
-            commands.extend(_select_range(cell_address(row, 0), "TableRightCell", columns - 1))
+            commands.extend(
+                _select_range(cell_address(row, 0), "TableRightCell", columns - 1)
+            )
             commands.extend((_size_action("Height", height), RunCommand("Cancel")))
     return tuple(commands)
 
@@ -144,9 +154,7 @@ def table_commands(
     block: TableBlock,
     assets: Mapping[Path, Path],
     styles: Mapping[str, int],
-    text_formats: Mapping[
-        str, tuple[NativeCharacterFormat, NativeParagraphFormat]
-    ],
+    text_formats: Mapping[str, tuple[NativeCharacterFormat, NativeParagraphFormat]],
     caption_format_sources: Mapping[str, NativePosition],
 ) -> tuple[NativeActionCommand, ...]:
     base_style = _style_id(
@@ -166,10 +174,18 @@ def table_commands(
     )
     if paragraph is not None:
         commands.append(paragraph)
-    commands.extend((_table_create(block), *_geometry_commands(block)))
+    commands.append(_table_create(block))
+    # repeat_header 는 의도적으로 적용하지 않는다.
+    # 라이브 검증(LV9)에서 45x4 표 3/3 회 모두 2쪽이 완전히 비고 데이터 행이 렌더되지 않았다.
+    # 원인 추정: 다른 TablePropertyDialog 명령이 함께 보내는 문맥 setter
+    # (HSet/ShapeType, HSet/ShapeCellSize) 없이 ShapeTableCell/Header 만 보내
+    # 표 속성이 어긋난다. 문맥을 갖춘 형태로 다시 만들기 전까지는 적용하지 않는다.
+    commands.extend(_geometry_commands(block))
     for row, cells in enumerate(block.rows):
         for column, cell in enumerate(cells):
-            commands.extend((CellCommand(cell_address(row, column)), style_command(base_style)))
+            commands.extend(
+                (CellCommand(cell_address(row, column)), style_command(base_style))
+            )
             commands.extend(cell_format_commands(cell))
             if cell.text:
                 for line_index, line in enumerate(cell.text.split("\n")):
@@ -209,6 +225,18 @@ def table_commands(
                     character,
                     paragraph,
                     format_source,
+                )
+            )
+        if format_source is not None:
+            # The attached caption contributes "표 " + its number field + a space.
+            # Hierarchical numbering comes from the copied paragraph format.
+            commands.extend(
+                (
+                    RunCommand("ShapeObjAttachCaption"),
+                    RunCommand("MoveParaBegin"),
+                    *(RunCommand("MoveSelRight") for _ in range(4)),
+                    RunCommand("Delete"),
+                    RunCommand("CloseEx"),
                 )
             )
     commands.append(LeaveTableCommand())

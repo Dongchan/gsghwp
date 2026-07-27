@@ -1,5 +1,7 @@
 #include "BatchExecutor.h"
 
+#include "ComError.h"
+#include "ComState.h"
 #include "DispatchInvoke.h"
 #include "TableInspection.h"
 
@@ -21,6 +23,18 @@
 namespace hancom::batch {
 namespace {
 
+using hancom::com::FormatHResult;
+using hancom::com_state::CanRestoreSelection;
+using hancom::com_state::CaptureSelection;
+using hancom::com_state::Position;
+using hancom::com_state::RestoreSelection;
+using hancom::com_state::Selection;
+using hancom::com_state::SelectionCaptureFailure;
+using hancom::com_state::SelectionCapturePolicy;
+using hancom::com_state::SelectionCaptureStage;
+using hancom::com_state::kSelectionModeMask;
+using hancom::com_state::kSelectionNone;
+using hancom::com_state::kSelectionText;
 using hancom::dispatch::AsBool;
 using hancom::dispatch::AsDispatch;
 using hancom::dispatch::AsLong;
@@ -35,30 +49,6 @@ struct ResolvedOperation {
     LONG listId = 0;
 };
 
-struct Position {
-    LONG list = 0;
-    LONG paragraph = 0;
-    LONG character = 0;
-};
-
-struct Selection {
-    bool selected = false;
-    LONG mode = 0;
-    Position start;
-    Position end;
-    std::wstring controlType;
-    std::wstring controlInstance;
-    std::vector<std::wstring> cellAddresses;
-    std::wstring cellAddressError;
-};
-
-constexpr LONG kSelectionModeMask = 0x0F;
-constexpr LONG kSelectionNone = 0;
-constexpr LONG kSelectionText = 1;
-constexpr LONG kSelectionCells = 3;
-constexpr LONG kSelectionControl = 4;
-constexpr LONG kSelectionStrict = 0x10;
-
 bool SetError(
     ExecutionResult* const result,
     std::wstring code,
@@ -70,12 +60,6 @@ bool SetError(
     return false;
 }
 
-std::wstring HResultText(const wchar_t* const operation, const HRESULT status) {
-    std::wostringstream text;
-    text << operation << L" failed (HRESULT 0x" << std::hex
-         << static_cast<unsigned long>(status) << L')';
-    return text.str();
-}
 
 bool GetDispatchProperty(
     IDispatch* const object,
@@ -89,7 +73,7 @@ bool GetDispatchProperty(
         status = AsDispatch(property, value);
     }
     if (FAILED(status)) {
-        return SetError(result, L"COM_PROPERTY", address, HResultText(name, status));
+        return SetError(result, L"COM_PROPERTY", address, FormatHResult(name, status));
     }
     return true;
 }
@@ -104,7 +88,7 @@ bool CallBooleanMethod(
     CComVariant value;
     HRESULT status = Method(object, name, arguments, &value);
     if (FAILED(status)) {
-        return SetError(result, L"COM_METHOD", address, HResultText(name, status));
+        return SetError(result, L"COM_METHOD", address, FormatHResult(name, status));
     }
     if (value.vt == VT_EMPTY) {
         *returned = true;
@@ -112,7 +96,7 @@ bool CallBooleanMethod(
     }
     status = AsBool(value, returned);
     if (FAILED(status)) {
-        return SetError(result, L"COM_RESULT", address, HResultText(name, status));
+        return SetError(result, L"COM_RESULT", address, FormatHResult(name, status));
     }
     return true;
 }
@@ -163,191 +147,69 @@ bool GetPosition(
     LONG* const paragraph,
     LONG* const position,
     ExecutionResult* const result) {
-    CComVariant listArgument;
-    listArgument.vt = VT_I4 | VT_BYREF;
-    listArgument.plVal = listId;
-    CComVariant paragraphArgument;
-    paragraphArgument.vt = VT_I4 | VT_BYREF;
-    paragraphArgument.plVal = paragraph;
-    CComVariant positionArgument;
-    positionArgument.vt = VT_I4 | VT_BYREF;
-    positionArgument.plVal = position;
-    const HRESULT status = Method(
-        hwp,
-        L"GetPos",
-        {listArgument, paragraphArgument, positionArgument},
-        nullptr);
+    Position captured{*listId, *paragraph, *position};
+    const HRESULT status = hancom::com_state::CapturePosition(hwp, &captured);
+    *listId = captured.list;
+    *paragraph = captured.paragraph;
+    *position = captured.character;
     if (FAILED(status)) {
-        return SetError(result, L"COM_METHOD", L"", HResultText(L"GetPos", status));
+        return SetError(result, L"COM_METHOD", L"", FormatHResult(L"GetPos", status));
     }
     return true;
 }
 
-bool SetExactPosition(IDispatch* const hwp, const Position& position) {
-    CComVariant returned;
-    if (FAILED(Method(
-            hwp,
-            L"SetPos",
-            {
-                CComVariant(position.list),
-                CComVariant(position.paragraph),
-                CComVariant(position.character),
-            },
-            &returned))) {
-        return false;
-    }
-    bool positioned = false;
-    return SUCCEEDED(AsBool(returned, &positioned)) && positioned;
-}
 
 bool GetSelection(
     IDispatch* const hwp,
     Selection* const selection,
     ExecutionResult* const result) {
-    CComVariant modeValue;
-    HRESULT status = PropertyGet(hwp, L"SelectionMode", &modeValue);
-    if (SUCCEEDED(status)) {
-        status = AsLong(modeValue, &selection->mode);
-    }
-    if (FAILED(status)) {
-        return SetError(result, L"STATE_CAPTURE", L"", HResultText(L"SelectionMode", status));
-    }
-    CComVariant startValue;
-    CComVariant endValue;
-    status = Method(hwp, L"CreateSet", {CComVariant(L"ListParaPos")}, &startValue);
-    CComPtr<IDispatch> start;
-    if (SUCCEEDED(status)) {
-        status = AsDispatch(startValue, start);
-    }
-    if (FAILED(status)) {
-        return SetError(result, L"STATE_CAPTURE", L"", HResultText(L"CreateSet", status));
-    }
-    status = Method(hwp, L"CreateSet", {CComVariant(L"ListParaPos")}, &endValue);
-    CComPtr<IDispatch> end;
-    if (SUCCEEDED(status)) {
-        status = AsDispatch(endValue, end);
-    }
-    if (FAILED(status)) {
-        return SetError(result, L"STATE_CAPTURE", L"", HResultText(L"CreateSet", status));
-    }
-
-    CComVariant selectedValue;
-    status = Method(
-        hwp,
-        L"GetSelectedPosBySet",
-        {CComVariant(start), CComVariant(end)},
-        &selectedValue);
-    if (SUCCEEDED(status)) {
-        status = AsBool(selectedValue, &selection->selected);
-    }
-    if (FAILED(status)) {
-        return SetError(
-            result,
-            L"STATE_CAPTURE",
-            L"",
-            HResultText(L"GetSelectedPosBySet", status));
-    }
-
-    const auto readItem = [result](
-                              IDispatch* const set,
-                              const wchar_t* const name,
-                              LONG* const value) {
-        CComVariant raw;
-        HRESULT itemStatus = Method(set, L"Item", {CComVariant(name)}, &raw);
-        if (SUCCEEDED(itemStatus)) {
-            itemStatus = AsLong(raw, value);
-        }
-        if (FAILED(itemStatus)) {
-            return SetError(result, L"STATE_CAPTURE", L"", HResultText(name, itemStatus));
-        }
-        return true;
-    };
-    if (!readItem(start, L"List", &selection->start.list) ||
-        !readItem(start, L"Para", &selection->start.paragraph) ||
-        !readItem(start, L"Pos", &selection->start.character) ||
-        !readItem(end, L"List", &selection->end.list) ||
-        !readItem(end, L"Para", &selection->end.paragraph) ||
-        !readItem(end, L"Pos", &selection->end.character)) {
-        return false;
-    }
-    const LONG baseMode = selection->mode & kSelectionModeMask;
-    if (baseMode == kSelectionCells || baseMode == kSelectionControl) {
-        CComVariant controlValue;
-        CComPtr<IDispatch> control;
-        const wchar_t* const property = baseMode == kSelectionControl
-            ? L"CurSelectedCtrl"
-            : L"ParentCtrl";
-        status = PropertyGet(hwp, property, &controlValue);
-        if (SUCCEEDED(status)) {
-            status = AsDispatch(controlValue, control);
-        }
-        CComVariant typeValue;
-        if (SUCCEEDED(status)) {
-            status = PropertyGet(control, L"CtrlID", &typeValue);
-        }
-        if (SUCCEEDED(status)) {
-            status = AsString(typeValue, &selection->controlType);
-        }
-        CComVariant instanceValue;
-        if (SUCCEEDED(status)) {
-            status = Method(control, L"GetCtrlInstID", {}, &instanceValue);
-        }
-        if (SUCCEEDED(status)) {
-            status = AsString(instanceValue, &selection->controlInstance);
-        }
-        if (FAILED(status)) {
-            return SetError(result, L"STATE_CAPTURE", L"", HResultText(property, status));
-        }
-    }
-    if (baseMode == kSelectionCells && (selection->mode & kSelectionStrict) != 0) {
-        static_cast<void>(hancom::inspection::ReadSelectedCellAddresses(
+    SelectionCaptureFailure failure;
+    if (CaptureSelection(
             hwp,
-            &selection->cellAddresses,
-            &selection->cellAddressError));
-    }
-    return true;
-}
-
-bool CanRestoreSelection(const Selection& selection) noexcept {
-    const LONG baseMode = selection.mode & kSelectionModeMask;
-    if (baseMode == kSelectionNone) {
+            selection,
+            SelectionCapturePolicy::RequiredControl,
+            &failure)) {
         return true;
     }
-    if (baseMode == kSelectionText) {
-        return selection.selected && selection.start.list == selection.end.list;
+    const wchar_t* operation = failure.detail;
+    if (failure.stage == SelectionCaptureStage::CreateSet) {
+        operation = L"CreateSet";
+    } else if (failure.stage == SelectionCaptureStage::SelectedPositions) {
+        operation = L"GetSelectedPosBySet";
     }
-    if (baseMode == kSelectionCells) {
-        return (selection.selected || !selection.cellAddresses.empty()) &&
-            selection.controlType == L"tbl" &&
-            !selection.controlInstance.empty();
-    }
-    if (baseMode == kSelectionControl) {
-        return !selection.controlInstance.empty();
-    }
-    return false;
+    return SetError(
+        result,
+        L"STATE_CAPTURE",
+        L"",
+        FormatHResult(operation, failure.status));
 }
 
-bool RestoreSelection(
-    IDispatch* const hwp,
-    const Position& cursor,
-    const Selection& selection);
 
 bool SetPosition(
     IDispatch* const hwp,
     const LONG listId,
     ExecutionResult* const result,
     const std::wstring& address) {
-    bool returned = false;
-    if (!CallBooleanMethod(
+    const hancom::com_state::PositionResult positioned =
+        hancom::com_state::ApplyPosition(
             hwp,
-            L"SetPos",
-            {CComVariant(listId), CComVariant(0L), CComVariant(0L)},
-            &returned,
+            Position{listId, 0, 0},
+            hancom::com_state::EmptyPositionResult::TreatAsSuccess);
+    if (FAILED(positioned.invokeStatus)) {
+        return SetError(
             result,
-            address)) {
-        return false;
+            L"COM_METHOD",
+            address,
+            FormatHResult(L"SetPos", positioned.invokeStatus));
     }
-    if (!returned) {
+    if (FAILED(positioned.conversionStatus)) {
+        return SetError(
+            result,
+            L"COM_RESULT",
+            address,
+            FormatHResult(L"SetPos", positioned.conversionStatus));
+    }
+    if (!positioned.positioned) {
         return SetError(result, L"POSITION_FAILED", address, L"SetPos returned false");
     }
     return true;
@@ -364,7 +226,7 @@ bool GetControlInstanceId(
         status = AsString(value, controlId);
     }
     if (FAILED(status)) {
-        return SetError(result, L"CONTROL_ID", address, HResultText(L"GetCtrlInstID", status));
+        return SetError(result, L"CONTROL_ID", address, FormatHResult(L"GetCtrlInstID", status));
     }
     return true;
 }
@@ -398,14 +260,14 @@ bool GetControlAnchorList(
         status = AsDispatch(raw, anchor);
     }
     if (FAILED(status)) {
-        return SetError(result, L"PICTURE_SCAN", L"", HResultText(L"GetAnchorPos", status));
+        return SetError(result, L"PICTURE_SCAN", L"", FormatHResult(L"GetAnchorPos", status));
     }
     status = Method(anchor, L"Item", {CComVariant(L"List")}, &raw);
     if (SUCCEEDED(status)) {
         status = AsLong(raw, listId);
     }
     if (FAILED(status)) {
-        return SetError(result, L"PICTURE_SCAN", L"", HResultText(L"Item(List)", status));
+        return SetError(result, L"PICTURE_SCAN", L"", FormatHResult(L"Item(List)", status));
     }
     return true;
 }
@@ -438,7 +300,7 @@ bool IsPictureControl(
             result,
             L"PICTURE_SCAN",
             L"",
-            HResultText(L"ShapeDrawImageAttr", status));
+            FormatHResult(L"ShapeDrawImageAttr", status));
     }
     if (imageAttributes.vt == VT_EMPTY || imageAttributes.vt == VT_NULL) {
         return true;
@@ -450,7 +312,7 @@ bool IsPictureControl(
             result,
             L"PICTURE_SCAN",
             L"",
-            HResultText(L"ShapeDrawImageAttr", dispatchStatus));
+            FormatHResult(L"ShapeDrawImageAttr", dispatchStatus));
     }
     *isPicture = imageAttributeSet != nullptr;
     return true;
@@ -615,7 +477,7 @@ bool GetCellAddress(
         if (controlName != nullptr) {
             SysFreeString(controlName);
         }
-        return SetError(result, L"CELL_ADDRESS", L"", HResultText(L"KeyIndicator", status));
+        return SetError(result, L"CELL_ADDRESS", L"", FormatHResult(L"KeyIndicator", status));
     }
     const std::wstring indicator = controlName == nullptr
         ? std::wstring()
@@ -633,138 +495,9 @@ bool GetCellAddress(
     return true;
 }
 
-bool RestoreTextSelection(IDispatch* const hwp, const Selection& selection) {
-    if (!SetExactPosition(hwp, Position{selection.start.list, 0, 0})) {
-        return false;
-    }
-    CComVariant returned;
-    if (FAILED(Method(
-            hwp,
-            L"SelectText",
-            {
-                CComVariant(selection.start.paragraph),
-                CComVariant(selection.start.character),
-                CComVariant(selection.end.paragraph),
-                CComVariant(selection.end.character),
-            },
-            &returned))) {
-        return false;
-    }
-    bool selected = false;
-    CComVariant modeValue;
-    LONG mode = 0;
-    return SUCCEEDED(AsBool(returned, &selected)) && selected &&
-        SUCCEEDED(PropertyGet(hwp, L"SelectionMode", &modeValue)) &&
-        SUCCEEDED(AsLong(modeValue, &mode)) &&
-        (mode & kSelectionModeMask) == kSelectionText;
-}
 
-bool RestoreCellSelection(IDispatch* const hwp, const Selection& selection) {
-    hancom::inspection::CellTopology topology;
-    std::wstring error;
-    if (!hancom::inspection::InspectTableTopology(
-            hwp,
-            selection.controlInstance,
-            &topology,
-            &error)) {
-        return false;
-    }
-    std::wstring first;
-    std::wstring last;
-    std::vector<hancom::inspection::CellTopologyStep> path;
-    std::vector<std::wstring> region;
-    const bool planned = selection.cellAddresses.empty()
-        ? topology.PlanRectangularSelection(
-            selection.start.list,
-            selection.end.list,
-            &first,
-            &last,
-            &path,
-            &region,
-            &error)
-        : topology.PlanRectangularSelection(
-            selection.cellAddresses,
-            &first,
-            &last,
-            &path,
-            &region,
-            &error);
-    if (!planned) {
-        return false;
-    }
-    const hancom::inspection::CellTopologyCell* const firstCell = topology.Find(first);
-    CComPtr<IDispatch> action;
-    ExecutionResult local;
-    if (firstCell == nullptr ||
-        !GetDispatchProperty(hwp, L"HAction", action, &local) ||
-        !SetExactPosition(hwp, Position{firstCell->listId, 0, 0}) ||
-        !RunAction(action, L"TableCellBlock", &local)) {
-        return false;
-    }
-    if (region.size() > 1) {
-        if (!RunAction(action, L"TableCellBlockExtend", &local)) {
-            return false;
-        }
-        for (const hancom::inspection::CellTopologyStep& step : path) {
-            const wchar_t* const actionName =
-                step.direction == hancom::inspection::CellDirection::Right
-                ? L"TableRightCell"
-                : L"TableLowerCell";
-            std::wstring current;
-            if (!RunAction(action, actionName, &local) ||
-                !GetCellAddress(hwp, &current, &local) ||
-                current != step.destination) {
-                return false;
-            }
-        }
-    }
-    CComVariant modeValue;
-    LONG mode = 0;
-    return SUCCEEDED(PropertyGet(hwp, L"SelectionMode", &modeValue)) &&
-        SUCCEEDED(AsLong(modeValue, &mode)) &&
-        (mode & kSelectionModeMask) == kSelectionCells;
-}
 
-bool RestoreControlSelection(IDispatch* const hwp, const Selection& selection) {
-    if (selection.controlType == L"tbl" &&
-        hancom::inspection::SelectTableControl(hwp, selection.controlInstance)) {
-        return true;
-    }
-    CComVariant ignored;
-    static_cast<void>(Method(
-        hwp,
-        L"SelectCtrl",
-        {CComVariant(selection.controlInstance.c_str()), CComVariant(1L)},
-        &ignored));
-    CComPtr<IDispatch> selected;
-    std::wstring type;
-    std::wstring instance;
-    ExecutionResult local;
-    return TryDispatchProperty(hwp, L"CurSelectedCtrl", selected) &&
-        TryStringProperty(selected, L"CtrlID", &type) &&
-        GetControlInstanceId(selected, &instance, &local) &&
-        type == selection.controlType && instance == selection.controlInstance;
-}
 
-bool RestoreSelection(
-    IDispatch* const hwp,
-    const Position& cursor,
-    const Selection& selection) {
-    const LONG baseMode = selection.mode & kSelectionModeMask;
-    if (baseMode == kSelectionNone) {
-        return SetExactPosition(hwp, cursor);
-    }
-    if (baseMode == kSelectionText) {
-        return RestoreTextSelection(hwp, selection);
-    }
-    if (baseMode == kSelectionCells) {
-        return RestoreCellSelection(hwp, selection);
-    }
-    if (baseMode == kSelectionControl) {
-        return RestoreControlSelection(hwp, selection);
-    }
-    return false;
-}
 
 bool VerifyCellContext(
     IDispatch* const hwp,
@@ -946,7 +679,7 @@ bool ReadSelectedText(
         {CComVariant(L"UNICODE"), CComVariant(L"saveblock:true")},
         &value);
     if (FAILED(status)) {
-        return SetError(result, L"READ_CELL", address, HResultText(L"GetTextFile", status));
+        return SetError(result, L"READ_CELL", address, FormatHResult(L"GetTextFile", status));
     }
     if (value.vt == VT_EMPTY || value.vt == VT_NULL) {
         text->clear();
@@ -954,7 +687,7 @@ bool ReadSelectedText(
     }
     status = AsString(value, text);
     if (FAILED(status)) {
-        return SetError(result, L"READ_CELL", address, HResultText(L"GetTextFile", status));
+        return SetError(result, L"READ_CELL", address, FormatHResult(L"GetTextFile", status));
     }
     return true;
 }
@@ -1026,7 +759,7 @@ bool ValidateDocumentIdentity(
         status = AsLong(documentIdValue, &documentId);
     }
     if (FAILED(status)) {
-        return SetError(result, L"DOCUMENT_ID", L"", HResultText(L"DocumentID", status));
+        return SetError(result, L"DOCUMENT_ID", L"", FormatHResult(L"DocumentID", status));
     }
 
     CComVariant fullNameValue;
@@ -1036,7 +769,7 @@ bool ValidateDocumentIdentity(
         status = AsString(fullNameValue, &fullName);
     }
     if (FAILED(status)) {
-        return SetError(result, L"DOCUMENT_PATH", L"", HResultText(L"FullName", status));
+        return SetError(result, L"DOCUMENT_PATH", L"", FormatHResult(L"FullName", status));
     }
     auto normalize = [](std::wstring value) {
         std::replace(value.begin(), value.end(), L'/', L'\\');
@@ -1049,17 +782,18 @@ bool ValidateDocumentIdentity(
     return true;
 }
 
-bool InsertText(
+bool InsertTextSegment(
     IDispatch* const hwp,
     IDispatch* const action,
-    const CellOperation& operation,
+    const std::wstring& text,
+    const std::wstring& address,
     ExecutionResult* const result) {
     CComPtr<IDispatch> parameterSets;
     CComPtr<IDispatch> insertText;
     CComPtr<IDispatch> parameterSet;
-    if (!GetDispatchProperty(hwp, L"HParameterSet", parameterSets, result, operation.address) ||
-        !GetDispatchProperty(parameterSets, L"HInsertText", insertText, result, operation.address) ||
-        !GetDispatchProperty(insertText, L"HSet", parameterSet, result, operation.address)) {
+    if (!GetDispatchProperty(hwp, L"HParameterSet", parameterSets, result, address) ||
+        !GetDispatchProperty(parameterSets, L"HInsertText", insertText, result, address) ||
+        !GetDispatchProperty(insertText, L"HSet", parameterSet, result, address)) {
         return false;
     }
     CComVariant ignored;
@@ -1069,11 +803,11 @@ bool InsertText(
         {CComVariant(L"InsertText"), CComVariant(parameterSet)},
         &ignored);
     if (FAILED(status)) {
-        return SetError(result, L"INSERT_TEXT", operation.address, HResultText(L"GetDefault", status));
+        return SetError(result, L"INSERT_TEXT", address, FormatHResult(L"GetDefault", status));
     }
-    status = PropertyPut(insertText, L"Text", CComVariant(operation.value.c_str()));
+    status = PropertyPut(insertText, L"Text", CComVariant(text.c_str()));
     if (FAILED(status)) {
-        return SetError(result, L"INSERT_TEXT", operation.address, HResultText(L"Text", status));
+        return SetError(result, L"INSERT_TEXT", address, FormatHResult(L"Text", status));
     }
     bool executed = false;
     if (!CallBooleanMethod(
@@ -1082,11 +816,53 @@ bool InsertText(
             {CComVariant(L"InsertText"), CComVariant(parameterSet)},
             &executed,
             result,
-            operation.address)) {
+            address)) {
         return false;
     }
     if (!executed) {
-        return SetError(result, L"INSERT_TEXT", operation.address, L"InsertText returned false");
+        return SetError(result, L"INSERT_TEXT", address, L"InsertText returned false");
+    }
+    return true;
+}
+
+bool InsertText(
+    IDispatch* const hwp,
+    IDispatch* const action,
+    const CellOperation& operation,
+    ExecutionResult* const result) {
+    size_t offset = 0;
+    bool first = true;
+    while (offset <= operation.value.size()) {
+        const size_t newline =
+            operation.value.find_first_of(L"\r\n", offset);
+        const size_t end = newline == std::wstring::npos
+            ? operation.value.size()
+            : newline;
+        if (!first &&
+            !RunAction(action, L"BreakPara", result, operation.address)) {
+            return false;
+        }
+        const std::wstring segment =
+            operation.value.substr(offset, end - offset);
+        if (!segment.empty() &&
+            !InsertTextSegment(
+                hwp,
+                action,
+                segment,
+                operation.address,
+                result)) {
+            return false;
+        }
+        first = false;
+        if (newline == std::wstring::npos) {
+            break;
+        }
+        offset = newline + 1;
+        if (operation.value[newline] == L'\r' &&
+            offset < operation.value.size() &&
+            operation.value[offset] == L'\n') {
+            ++offset;
+        }
     }
     return true;
 }
@@ -1111,7 +887,7 @@ bool SetParameterItem(
         {CComVariant(name), value},
         &ignored);
     if (FAILED(status)) {
-        return SetError(result, L"IMAGE_CELL_FORMAT", operation.address, HResultText(name, status));
+        return SetError(result, L"IMAGE_CELL_FORMAT", operation.address, FormatHResult(name, status));
     }
     return true;
 }
@@ -1163,7 +939,7 @@ bool ConfigureImageCell(
         {CComVariant(L"TablePropertyDialog"), CComVariant(shapeSet)},
         &ignored);
     if (FAILED(status)) {
-        return SetError(result, L"IMAGE_CELL_FORMAT", operation.address, HResultText(L"GetDefault", status));
+        return SetError(result, L"IMAGE_CELL_FORMAT", operation.address, FormatHResult(L"GetDefault", status));
     }
     if (!SetParameterItem(shapeSet, L"ShapeType", CComVariant(3L), operation, result) ||
         !SetParameterItem(shapeSet, L"ShapeCellSize", CComVariant(0L), operation, result) ||
@@ -1180,7 +956,7 @@ bool ConfigureImageCell(
     for (const auto& [name, value] : cellValues) {
         status = PropertyPut(shapeTableCell, name, CComVariant(value));
         if (FAILED(status)) {
-            return SetError(result, L"IMAGE_CELL_FORMAT", operation.address, HResultText(name, status));
+            return SetError(result, L"IMAGE_CELL_FORMAT", operation.address, FormatHResult(name, status));
         }
     }
     bool executed = false;
@@ -1213,7 +989,7 @@ bool ConfigureImageCell(
         {CComVariant(L"ParagraphShape"), CComVariant(paragraphSet)},
         &ignored);
     if (FAILED(status)) {
-        return SetError(result, L"IMAGE_CELL_FORMAT", operation.address, HResultText(L"GetDefault", status));
+        return SetError(result, L"IMAGE_CELL_FORMAT", operation.address, FormatHResult(L"GetDefault", status));
     }
     const wchar_t* const paragraphValues[] = {
         L"LeftMargin",
@@ -1225,7 +1001,7 @@ bool ConfigureImageCell(
     for (const wchar_t* const name : paragraphValues) {
         status = PropertyPut(paragraphShape, name, CComVariant(0L));
         if (FAILED(status)) {
-            return SetError(result, L"IMAGE_CELL_FORMAT", operation.address, HResultText(name, status));
+            return SetError(result, L"IMAGE_CELL_FORMAT", operation.address, FormatHResult(name, status));
         }
     }
     return ExecuteParameterAction(
@@ -1265,7 +1041,7 @@ bool InsertImage(
         dispatchStatus = AsDispatch(pictureValue, picture);
     }
     if (FAILED(dispatchStatus)) {
-        return SetError(result, L"INSERT_IMAGE", operation.address, HResultText(L"InsertPicture", dispatchStatus));
+        return SetError(result, L"INSERT_IMAGE", operation.address, FormatHResult(L"InsertPicture", dispatchStatus));
     }
 
     CComPtr<IDispatch> properties;
@@ -1279,11 +1055,11 @@ bool InsertImage(
         {CComVariant(L"TreatAsChar"), BooleanVariant(true)},
         &ignored);
     if (FAILED(setStatus)) {
-        return SetError(result, L"INSERT_IMAGE", operation.address, HResultText(L"SetItem", setStatus));
+        return SetError(result, L"INSERT_IMAGE", operation.address, FormatHResult(L"SetItem", setStatus));
     }
     const HRESULT putStatus = PropertyPut(picture, L"Properties", CComVariant(properties));
     if (FAILED(putStatus)) {
-        return SetError(result, L"INSERT_IMAGE", operation.address, HResultText(L"Properties", putStatus));
+        return SetError(result, L"INSERT_IMAGE", operation.address, FormatHResult(L"Properties", putStatus));
     }
     return true;
 }

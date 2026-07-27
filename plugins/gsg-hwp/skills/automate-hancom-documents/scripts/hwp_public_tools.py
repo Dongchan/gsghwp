@@ -5,6 +5,7 @@ from types import MappingProxyType
 from typing import Annotated, Final, Protocol, final
 from pydantic import Field
 
+from hwp_live_structure_contract import DocumentStructure
 from hwp_operation_contract import (
     HwpOperateGuards,
     HwpOperateInputs,
@@ -19,7 +20,13 @@ from hwp_public_contract import (
     refresh_public_target_ids,
     to_public_action_result,
 )
+from hwp_public_table_plan import (
+    PublicTableResolutionRequest,
+    ResolvedPublicTable,
+    resolve_public_table,
+)
 from hwp_public_table_target import (
+    CanonicalPublicTableTarget,
     PublicTableDataInput,
     PublicTableTargetStore,
     UnknownPublicTargetError,
@@ -31,9 +38,7 @@ _FILL_TABLE_INTENT: Final = "기존 표 채우기"
 _FILL_TABLE_INPUT_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "inputs.target": "target_id",
-        "inputs.policy.numeric_value_mode": (
-            "cells (format_candidates.replacement 중 확인한 값)"
-        ),
+        "inputs.policy.numeric_value_mode": "cells",
     }
 )
 
@@ -45,6 +50,12 @@ class PublicOperationExecutor(Protocol):
         inputs: HwpOperateInputs,
         guards: HwpOperateGuards | None,
     ) -> OperationResult: ...
+
+    async def read_table_structure(
+        self,
+        document_path: str | None,
+        page: int,
+    ) -> DocumentStructure: ...
 
 
 @final
@@ -69,11 +80,15 @@ class HwpPublicTools:
         cells: dict[str, str] | None = None,
         rows: Annotated[
             list[list[str]] | None,
-            Field(description="start_cell 또는 현재 한컴 표 셀·선택 셀 블록에서 시작하는 행렬"),
+            Field(
+                description="start_cell 또는 현재 한컴 표 셀·선택 셀 블록에서 시작하는 행렬"
+            ),
         ] = None,
         start_cell: Annotated[
             str | None,
-            Field(description="rows의 명시 시작 셀. 생략하면 현재 한컴 표 셀·선택 셀 블록·선택 표를 사용"),
+            Field(
+                description="rows의 명시 시작 셀. 생략하면 현재 한컴 표 셀·선택 셀 블록·선택 표를 사용"
+            ),
         ] = None,
         fill_blanks_only: bool = False,
         document_path: str | None = None,
@@ -112,24 +127,59 @@ class HwpPublicTools:
             fill_blanks_only=fill_blanks_only,
         )
         request_id = operation_id
-        try:
-            selected = self._targets.resolve(target)
-        except UnknownPublicTargetError as error:
-            failed = unknown_public_target_result(
-                error,
-                request_id=request_id,
-                query=_FILL_TABLE_INTENT,
-            )
-            target_ids = refresh_public_target_ids(
+        selected_id = target.target_id
+        if target.target_id is None and (
+            target.page is not None
+            or target.caption is not None
+            or bool(target.headers)
+            or target.table_index is not None
+        ):
+            resolved = await resolve_public_table(
+                self._executor,
                 self._targets,
-                failed,
-                document_path,
+                PublicTableResolutionRequest(
+                    target=target,
+                    request_id=request_id,
+                    query=_FILL_TABLE_INTENT,
+                ),
             )
-            return to_public_action_result(
-                failed,
-                target_ids,
-                _FILL_TABLE_INPUT_ALIASES,
-            )
+            match resolved:  # noqa: E501  # noqa: MATCH_OK — closed union is exhaustive.
+                case ResolvedPublicTable() as table:
+                    selected = CanonicalPublicTableTarget(
+                        table.document_path,
+                        table.target,
+                    )
+                    selected_id = table.table.control_instance_id
+                case OperationResult() as failed:
+                    target_ids = refresh_public_target_ids(
+                        self._targets,
+                        failed,
+                        document_path,
+                    )
+                    return to_public_action_result(
+                        failed,
+                        target_ids,
+                        _FILL_TABLE_INPUT_ALIASES,
+                    )
+        else:
+            try:
+                selected = self._targets.resolve(target)
+            except UnknownPublicTargetError as error:
+                failed = unknown_public_target_result(
+                    error,
+                    request_id=request_id,
+                    query=_FILL_TABLE_INTENT,
+                )
+                target_ids = refresh_public_target_ids(
+                    self._targets,
+                    failed,
+                    document_path,
+                )
+                return to_public_action_result(
+                    failed,
+                    target_ids,
+                    _FILL_TABLE_INPUT_ALIASES,
+                )
         data = requested.to_canonical_data()
         record_count = max(len(data.records), len(data.cells), len(data.rows))
         inputs = HwpOperateInputs(
@@ -158,4 +208,5 @@ class HwpPublicTools:
             result,
             target_ids,
             _FILL_TABLE_INPUT_ALIASES,
+            selected_target_id=selected_id,
         )

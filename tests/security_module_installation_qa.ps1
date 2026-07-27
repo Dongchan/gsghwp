@@ -84,6 +84,9 @@ function Remove-SecurityFixture {
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $pluginRoot = Join-Path $repositoryRoot "plugins\gsg-hwp"
 $modulePath = Join-Path $pluginRoot "scripts\GsgHwp.Installation.psm1"
+$plugin = Get-Content -LiteralPath (Join-Path $pluginRoot ".codex-plugin\plugin.json") `
+    -Raw -Encoding UTF8 | ConvertFrom-Json
+$packageVersion = [string]$plugin.version
 Import-Module -Name $modulePath -Force
 
 # Existing security DLL and registry values must round-trip exactly.
@@ -138,7 +141,7 @@ try {
         $automation.Dispose()
     }
 
-    $install = Install-GsgHwpNative -Paths $fixture.Paths -PackageVersion "1.1.0" `
+    $install = Install-GsgHwpNative -Paths $fixture.Paths -PackageVersion $packageVersion `
         -ModulesKeyPath $fixture.ModulesKey `
         -AutomationModulesKeyPath $fixture.AutomationModulesKey
     Assert-Equal -Expected $fixture.Paths.SecurityDll -Actual $install.SecurityDll `
@@ -204,7 +207,7 @@ finally {
 # A clean PC must receive the security module, and uninstall must remove only what GSG HWP added.
 $cleanFixture = New-SecurityFixture -PluginRoot $pluginRoot -TestId ([Guid]::NewGuid().ToString("N"))
 try {
-    $null = Install-GsgHwpNative -Paths $cleanFixture.Paths -PackageVersion "1.1.0" `
+    $null = Install-GsgHwpNative -Paths $cleanFixture.Paths -PackageVersion $packageVersion `
         -ModulesKeyPath $cleanFixture.ModulesKey `
         -AutomationModulesKeyPath $cleanFixture.AutomationModulesKey
     Assert-True -Condition (Test-Path -LiteralPath $cleanFixture.Paths.SecurityDll -PathType Leaf) `
@@ -296,7 +299,7 @@ try {
         $automation.Dispose()
     }
 
-    $null = Install-GsgHwpNative -Paths $upgradeFixture.Paths -PackageVersion "1.1.0" `
+    $null = Install-GsgHwpNative -Paths $upgradeFixture.Paths -PackageVersion $packageVersion `
         -ModulesKeyPath $upgradeFixture.ModulesKey `
         -AutomationModulesKeyPath $upgradeFixture.AutomationModulesKey
     $migrated = Get-Content -LiteralPath $backupFile -Raw -Encoding UTF8 | ConvertFrom-Json

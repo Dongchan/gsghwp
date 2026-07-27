@@ -26,6 +26,7 @@ from hwp_public_action_contract import (
 )
 from hwp_public_contract import (
     PublicActionResult,
+    PublicTargetCandidate,
     refresh_public_target_ids,
     to_public_action_result,
 )
@@ -60,16 +61,53 @@ class HwpPublicObjectTools:
         result = await self._executor.execute(intent, inputs, None)
         return self._public_result(result, inputs.document)
 
-    @staticmethod
-    def _unknown_target(request_id: str) -> PublicActionResult:
+    async def _unknown_target(
+        self,
+        request_id: str,
+        document_path: str | None,
+        *,
+        picture_only: bool,
+    ) -> PublicActionResult:
+        inspection = await self._executor.inspect_page_fast(document_path, 0, False)
+        allowed_types = (
+            frozenset(("gso", "pic", "picture"))
+            if picture_only
+            else frozenset(("tbl", "gso", "pic", "picture"))
+        )
+        table_index = 0
+        candidates: list[PublicTargetCandidate] = []
+        for control in inspection.controls:
+            if control.control_type == "tbl":
+                table_index += 1
+            if control.control_type not in allowed_types or not control.instance_id:
+                continue
+            candidates.append(
+                PublicTargetCandidate(
+                    target_id=control.instance_id,
+                    page=inspection.page,
+                    table_index=table_index if control.control_type == "tbl" else None,
+                    rows=control.rows,
+                    columns=control.columns,
+                )
+            )
+            if len(candidates) == 3:
+                break
         return PublicActionResult(
             status="needs_target",
-            message="앞선 후보 응답에서 반환된 target_id가 필요합니다",
+            message=(
+                "현재 쪽에서 다시 조회한 실제 대상 후보를 반환했습니다"
+                if candidates
+                else (
+                    "현재 쪽에서 대상 후보를 찾지 못했습니다. hwp_inspect_page_fast로 "
+                    "대상 쪽을 다시 조회한 뒤 instance_id를 target_id로 전달하세요"
+                )
+            ),
             request_id=request_id,
             runtime=RUNTIME_BUILD_INFO,
             verified=False,
             modified=False,
             required_inputs=("target_id",),
+            target_candidates=tuple(candidates),
             retry_safe=True,
         )
 
@@ -115,12 +153,19 @@ class HwpPublicObjectTools:
         operation_id: PublicOperationId,
         path: Path,
         target_id: str | None = None,
+        width_mm: PublicImageWidth | None = None,
+        height_mm: PublicImageHeight | None = None,
         document_path: str | None = None,
     ) -> PublicActionResult:
         request_id = operation_id
+        size = PublicImageSize(width_mm=width_mm, height_mm=height_mm)
         resolved = self._targets.resolve_picture(target_id, document_path)
         if resolved is None:
-            return self._unknown_target(request_id)
+            return await self._unknown_target(
+                request_id,
+                document_path,
+                picture_only=True,
+            )
         return await self._execute(
             metadata.REPLACE_IMAGE_INTENT,
             HwpOperateInputs(
@@ -129,6 +174,10 @@ class HwpPublicObjectTools:
                 operation="image.replace",
                 target=resolved.target,
                 assets=HwpOperateAssets(images={"image": path}),
+                recipe=HwpPriorityRecipeInputs(
+                    picture_width_mm=size.width_mm,
+                    picture_height_mm=size.height_mm,
+                ),
                 policy=HwpOperatePolicy(ambiguity="return_candidates"),
                 postconditions=HwpOperatePostconditions(verify_structure=True),
             ),
@@ -146,7 +195,11 @@ class HwpPublicObjectTools:
         request_id = operation_id
         resolved = self._targets.resolve_control(target_id, document_path)
         if resolved is None:
-            return self._unknown_target(request_id)
+            return await self._unknown_target(
+                request_id,
+                document_path,
+                picture_only=False,
+            )
         return await self._execute(
             metadata.ADD_CAPTION_INTENT,
             HwpOperateInputs(

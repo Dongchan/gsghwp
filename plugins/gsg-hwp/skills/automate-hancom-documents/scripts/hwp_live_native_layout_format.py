@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import assert_never
 
 from hwp_live_native_action_models import (
+    CellCommand,
     EnumerationValue,
     IntegerValue,
     MillimeterValue,
@@ -18,7 +20,29 @@ from hwp_live_native_text_format import (
     rgb_value,
     style_command,
 )
-from hwp_live_table_contract import CellBorders, TableCell
+from hwp_live_table_contract import CellBorders, CellPadding, TableBlock, TableCell
+from hwp_table_address import cell_address
+
+
+@dataclass(frozen=True, slots=True)
+class CellPaddingRange:
+    anchor: str
+    right_steps: int
+    down_steps: int
+    addresses: tuple[str, ...]
+    action: ParameterActionCommand
+
+    @property
+    def commands(self) -> tuple[NativeActionCommand, ...]:
+        return (
+            CellCommand(self.anchor),
+            RunCommand("TableCellBlock"),
+            RunCommand("TableCellBlockExtend"),
+            *(RunCommand("TableRightCell") for _ in range(self.right_steps)),
+            *(RunCommand("TableLowerCell") for _ in range(self.down_steps)),
+            self.action,
+            RunCommand("Cancel"),
+        )
 
 
 def _padding_command(cell: TableCell) -> ParameterActionCommand | None:
@@ -33,11 +57,88 @@ def _padding_command(cell: TableCell) -> ParameterActionCommand | None:
             NativeSetter("HSet/ShapeCellSize", IntegerValue(0)),
             NativeSetter("ShapeTableCell/HasMargin", IntegerValue(1)),
             NativeSetter("ShapeTableCell/MarginLeft", MillimeterValue(padding.left_mm)),
-            NativeSetter("ShapeTableCell/MarginRight", MillimeterValue(padding.right_mm)),
+            NativeSetter(
+                "ShapeTableCell/MarginRight", MillimeterValue(padding.right_mm)
+            ),
             NativeSetter("ShapeTableCell/MarginTop", MillimeterValue(padding.top_mm)),
-            NativeSetter("ShapeTableCell/MarginBottom", MillimeterValue(padding.bottom_mm)),
+            NativeSetter(
+                "ShapeTableCell/MarginBottom", MillimeterValue(padding.bottom_mm)
+            ),
         ),
     )
+
+
+def is_padding_command(command: NativeActionCommand) -> bool:
+    return (
+        isinstance(command, ParameterActionCommand)
+        and command.action == "TablePropertyDialog"
+        and command.parameter_set == "HShapeObject"
+        and any(setter.path == "ShapeTableCell/HasMargin" for setter in command.setters)
+    )
+
+
+def _padding_key(padding: CellPadding) -> tuple[float, float, float, float]:
+    return (
+        padding.left_mm,
+        padding.right_mm,
+        padding.top_mm,
+        padding.bottom_mm,
+    )
+
+
+def cell_padding_ranges(block: TableBlock) -> tuple[CellPaddingRange, ...]:
+    grouped: dict[
+        tuple[float, float, float, float],
+        list[tuple[int, int, TableCell]],
+    ] = {}
+    for row, cells in enumerate(block.rows):
+        for column, cell in enumerate(cells):
+            if cell.padding is not None:
+                grouped.setdefault(_padding_key(cell.padding), []).append(
+                    (row, column, cell)
+                )
+
+    merged = {
+        (row, column)
+        for merge in block.merges
+        for row in range(merge.row, merge.row + merge.row_span)
+        for column in range(merge.column, merge.column + merge.column_span)
+    }
+    ranges: list[CellPaddingRange] = []
+    for cells in grouped.values():
+        # A single cell already has one padding action. Turning it into a block
+        # selection would add work without reducing topology rebuilds.
+        if len(cells) < 2:
+            continue
+        coordinates = {(row, column) for row, column, _ in cells}
+        top = min(row for row, _, _ in cells)
+        bottom = max(row for row, _, _ in cells)
+        left = min(column for _, column, _ in cells)
+        right = max(column for _, column, _ in cells)
+        rectangle = {
+            (row, column)
+            for row in range(top, bottom + 1)
+            for column in range(left, right + 1)
+        }
+        if coordinates != rectangle or rectangle.intersection(merged):
+            continue
+        action = _padding_command(cells[0][2])
+        if action is None:
+            continue
+        ranges.append(
+            CellPaddingRange(
+                anchor=cell_address(top, left),
+                right_steps=right - left,
+                down_steps=bottom - top,
+                addresses=tuple(
+                    cell_address(row, column)
+                    for row in range(top, bottom + 1)
+                    for column in range(left, right + 1)
+                ),
+                action=action,
+            )
+        )
+    return tuple(ranges)
 
 
 def _fill_command(cell: TableCell) -> ParameterActionCommand | None:
@@ -102,7 +203,9 @@ def _border_command(borders: CellBorders | None) -> ParameterActionCommand | Non
                     f"HSet/BorderWidth{side}",
                     EnumerationValue("HwpLineWidth", border.width),
                 ),
-                NativeSetter(f"HSet/{color_name}", IntegerValue(rgb_value(border.color))),
+                NativeSetter(
+                    f"HSet/{color_name}", IntegerValue(rgb_value(border.color))
+                ),
             )
         )
     if not setters:

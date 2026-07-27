@@ -21,7 +21,7 @@ from winreg import (
 from hwp_errors import HwpLiveError
 
 
-NATIVE_BRIDGE_VERSION = "0.5.121"
+NATIVE_BRIDGE_VERSION = "0.5.124"
 MODULE_NAME = "한컴브릿지"
 MODULES_KEY = r"Software\HNC\HwpUserAction\Modules"
 USES_KEY = rf"{MODULES_KEY}\Uses"

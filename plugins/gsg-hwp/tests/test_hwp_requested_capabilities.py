@@ -48,6 +48,7 @@ from hwp_live_native_format_target import ResolvedTable  # noqa: E402
 from hwp_live_native_table_layout import table_commands  # noqa: E402
 from hwp_live_session import LiveHwpController  # noqa: E402
 from hwp_live_structure_contract import (  # noqa: E402
+    DocumentStructure,
     FastPageCell,
     FastPageControl,
     FastPageInspection,
@@ -97,6 +98,14 @@ class _CompatibilityManifest(BaseModel):
 
 
 class _AmbiguousExecutor:
+    async def read_table_structure(
+        self,
+        document_path: str | None,
+        page: int,
+    ) -> DocumentStructure:
+        _ = document_path, page
+        raise AssertionError("unnarrowed target must not pre-read structure")
+
     async def execute(
         self,
         intent: str,
@@ -374,29 +383,30 @@ def test_native_cell_formatting_requires_post_action_property_readback() -> None
 
 
 def test_native_cell_format_readback_reenters_the_last_target_cell() -> None:
-    source = (
-        Path(__file__).resolve().parents[1]
-        / "addon"
-        / "HancomLiveBridgeNative"
-        / "ActionExecutor.cpp"
-    ).read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[1] / "addon" / "HancomLiveBridgeNative"
+    context_source = (root / "ActionExecutorInternal.h").read_text(encoding="utf-8")
+    table_source = (root / "ActionTable.cpp").read_text(encoding="utf-8")
+    action_source = (root / "ActionExecutor.cpp").read_text(encoding="utf-8")
 
-    assert "std::wstring currentCell;" in source
-    assert "context->currentCell = address;" in source
-    assert "!GoToCell(context, context->currentCell)" in source
+    assert "std::wstring currentCell;" in context_source
+    assert "context->currentCell = address;" in table_source
+    assert "!GoToCell(context, context->currentCell)" in action_source
 
 
 def test_native_table_scans_include_locally_split_cells_beyond_grid_end() -> None:
     root = Path(__file__).resolve().parents[1] / "addon" / "HancomLiveBridgeNative"
-    action_source = (root / "ActionExecutor.cpp").read_text(encoding="utf-8")
+    action_source = (root / "ActionTable.cpp").read_text(encoding="utf-8")
+    state_source = (root / "ComState.cpp").read_text(encoding="utf-8")
     inspection_source = (root / "TableInspection.cpp").read_text(encoding="utf-8")
 
     assert "InspectTableTopology" in action_source
+    assert "InspectTableTopology" in state_source
+    assert "bool InspectTableTopology(" in inspection_source
     assert "ExtendTableListEnd" in inspection_source
     assert "lastList = ExtendTableListEnd" in inspection_source
 
 
-def test_format_table_schema_exposes_existing_row_and_column_dimensions() -> None:
+def test_format_table_schema_exposes_dimensions_and_optional_padding_edges() -> None:
     server = build_server(LiveHwpController(), profile="production")
 
     tools = anyio.run(server.list_tools)
@@ -407,6 +417,24 @@ def test_format_table_schema_exposes_existing_row_and_column_dimensions() -> Non
     properties = schemas["hwp_format_table"].properties
     assert "row_height_mm" in properties
     assert "column_width_mm" in properties
+    for name in (
+        "padding_left_mm",
+        "padding_right_mm",
+        "padding_top_mm",
+        "padding_bottom_mm",
+    ):
+        assert name in properties
+        assert name not in schemas["hwp_format_table"].required
+        padding_schema = properties[name]
+        assert isinstance(padding_schema, dict)
+        assert padding_schema["default"] is None
+        variants = padding_schema["anyOf"]
+        assert isinstance(variants, list)
+        assert {
+            "maximum": 20,
+            "minimum": 0,
+            "type": "number",
+        } in variants
     assert "cell" not in schemas["hwp_format_table"].required
 
 

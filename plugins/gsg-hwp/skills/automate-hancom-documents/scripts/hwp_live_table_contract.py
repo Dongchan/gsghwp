@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 from unicodedata import category, normalize
 
 from pydantic import Field, model_validator
 
-from hwp_live_values import Alignment, ContractModel, Rgb
+from hwp_color_normalization import ColorInput
+from hwp_live_values import Alignment, ContractModel
 
 
 VerticalAlignment = Literal["inherit", "top", "center", "bottom"]
@@ -44,6 +47,121 @@ BorderWidth = Literal[
     "5.0mm",
 ]
 
+_HWPUNIT_PER_INCH: Final = Decimal(7_200)
+_MILLIMETERS_PER_INCH: Final = Decimal("25.4")
+_HWPUNIT_PER_POINT: Final = Decimal(100)
+
+
+@dataclass(frozen=True, slots=True)
+class BorderWidthSnapTarget:
+    width: BorderWidth
+    millimeters: Decimal
+
+    @property
+    def hwpunit(self) -> Decimal:
+        return self.millimeters * _HWPUNIT_PER_INCH / _MILLIMETERS_PER_INCH
+
+    def payload(self) -> dict[str, str | float]:
+        return {
+            "border_width": self.width,
+            "millimeters": float(self.millimeters),
+            "hwpunit": round(float(self.hwpunit), 10),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BorderWidthSnap:
+    source_linewidth_pt: float
+    source_hwpunit: int
+    hwpunit_quantization_error_pt: float
+    source_mm: float
+    width: BorderWidth
+    snapped_mm: float
+    snapped_hwpunit: float
+    residual_mm: float
+    absolute_error_mm: float
+    residual_hwpunit: float
+    absolute_error_hwpunit: float
+
+    def payload(self) -> dict[str, str | int | float]:
+        return {
+            "source_linewidth_pt": self.source_linewidth_pt,
+            "source_hwpunit": self.source_hwpunit,
+            "source_linewidth_hwpunit": self.source_hwpunit,
+            "hwpunit_quantization_error_pt": self.hwpunit_quantization_error_pt,
+            "source_mm": self.source_mm,
+            "snapped_border_width": self.width,
+            "border_width": self.width,
+            "snapped_mm": self.snapped_mm,
+            "snapped_hwpunit": self.snapped_hwpunit,
+            "residual_mm": self.residual_mm,
+            "border_width_snap_error_mm": self.residual_mm,
+            "absolute_error_mm": self.absolute_error_mm,
+            "border_width_snap_abs_error_mm": self.absolute_error_mm,
+            "residual_hwpunit": self.residual_hwpunit,
+            "absolute_error_hwpunit": self.absolute_error_hwpunit,
+        }
+
+
+_BORDER_WIDTH_VALUES: Final[tuple[BorderWidth, ...]] = (
+    "0.1mm",
+    "0.12mm",
+    "0.15mm",
+    "0.2mm",
+    "0.25mm",
+    "0.3mm",
+    "0.4mm",
+    "0.5mm",
+    "0.6mm",
+    "0.7mm",
+    "1.0mm",
+    "1.5mm",
+    "2.0mm",
+    "3.0mm",
+    "4.0mm",
+    "5.0mm",
+)
+BORDER_WIDTH_SNAP_TARGETS: Final[tuple[BorderWidthSnapTarget, ...]] = tuple(
+    BorderWidthSnapTarget(
+        width=width,
+        millimeters=Decimal(width.removesuffix("mm")),
+    )
+    for width in _BORDER_WIDTH_VALUES
+)
+
+
+def snap_pdf_linewidth(linewidth_pt: float) -> BorderWidthSnap:
+    points = Decimal(str(linewidth_pt))
+    if not points.is_finite() or points < 0:
+        raise ValueError("PDF linewidth must be a finite non-negative point value")
+    source_hwpunit = int(
+        (points * _HWPUNIT_PER_POINT).to_integral_value(rounding=ROUND_HALF_UP)
+    )
+    quantization_error_pt = Decimal(source_hwpunit) / _HWPUNIT_PER_POINT - points
+    source_mm = Decimal(source_hwpunit) * _MILLIMETERS_PER_INCH / _HWPUNIT_PER_INCH
+    target = min(
+        BORDER_WIDTH_SNAP_TARGETS,
+        key=lambda candidate: (
+            abs(source_mm - candidate.millimeters),
+            candidate.millimeters,
+        ),
+    )
+    residual_mm = source_mm - target.millimeters
+    residual_hwpunit = Decimal(source_hwpunit) - target.hwpunit
+    return BorderWidthSnap(
+        source_linewidth_pt=float(points),
+        source_hwpunit=source_hwpunit,
+        hwpunit_quantization_error_pt=round(float(quantization_error_pt), 10),
+        source_mm=round(float(source_mm), 10),
+        width=target.width,
+        snapped_mm=float(target.millimeters),
+        snapped_hwpunit=round(float(target.hwpunit), 10),
+        residual_mm=round(float(residual_mm), 10),
+        absolute_error_mm=round(float(abs(residual_mm)), 10),
+        residual_hwpunit=round(float(residual_hwpunit), 10),
+        absolute_error_hwpunit=round(float(abs(residual_hwpunit)), 10),
+    )
+
 
 def _caption_separator(character: str) -> bool:
     character_category = category(character)
@@ -76,7 +194,7 @@ def _starts_with_manual_table_number(value: str) -> bool:
 class CellBorder(ContractModel):
     style: BorderStyle = "solid"
     width: BorderWidth = "0.12mm"
-    color: Rgb = (0, 0, 0)
+    color: ColorInput = (0, 0, 0)
 
 
 class CellBorders(ContractModel):
@@ -115,11 +233,11 @@ class TableCell(ContractModel):
     bold: bool | None = None
     font_name: str | None = Field(default=None, max_length=100)
     font_size_pt: float | None = Field(default=None, ge=1, le=96)
-    text_color: Rgb | None = None
+    text_color: ColorInput | None = None
     alignment: Alignment = "inherit"
     vertical_alignment: VerticalAlignment = "inherit"
     line_spacing_percent: int | None = Field(default=None, ge=50, le=500)
-    fill_color: Rgb | None = None
+    fill_color: ColorInput | None = None
     padding: CellPadding | None = None
     borders: CellBorders | None = None
 
@@ -175,7 +293,9 @@ class TableBlock(ContractModel):
         if self.base_style_name is not None and self.base_style_id is not None:
             raise ValueError("base style name and id are mutually exclusive")
         if self.caption is not None and _starts_with_manual_table_number(self.caption):
-            raise ValueError("caption must contain only the title; HWP inserts the table number")
+            raise ValueError(
+                "caption must contain only the title; HWP inserts the table number"
+            )
         columns = len(self.rows[0])
         if columns < 1 or columns > 50:
             raise ValueError("table must contain 1 to 50 columns")
@@ -209,7 +329,9 @@ class TableBlock(ContractModel):
                 raise ValueError("column width cannot be below its readable minimum")
         if self.repeat_key_columns >= columns:
             if self.repeat_key_columns != 0:
-                raise ValueError("repeated key columns must leave at least one data column")
+                raise ValueError(
+                    "repeated key columns must leave at least one data column"
+                )
         if self.repeat_key_columns and not self.split_wide_table:
             raise ValueError("repeated key columns require wide-table splitting")
         if self.row_heights_mm is not None:
@@ -224,7 +346,10 @@ class TableBlock(ContractModel):
         occupied: set[tuple[int, int]] = set()
         owners: dict[tuple[int, int], tuple[int, int]] = {}
         for merge in self.merges:
-            if merge.row + merge.row_span > len(self.rows) or merge.column + merge.column_span > columns:
+            if (
+                merge.row + merge.row_span > len(self.rows)
+                or merge.column + merge.column_span > columns
+            ):
                 raise ValueError("merge is outside table bounds")
             region = {
                 (row, column)
@@ -240,5 +365,7 @@ class TableBlock(ContractModel):
             for row, column in region - {anchor}:
                 cell = self.rows[row][column]
                 if cell.model_dump(exclude_defaults=True):
-                    raise ValueError("merge covered cells must be empty and unformatted")
+                    raise ValueError(
+                        "merge covered cells must be empty and unformatted"
+                    )
         return owners

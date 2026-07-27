@@ -3,6 +3,7 @@ from __future__ import annotations
 # noqa: E501  # noqa: SIZE_OK — journal transitions stay together as one atomic state machine.
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -30,7 +31,11 @@ from hwp_operation_journal_retention import (
     JournalPruneReport,
     JournalRetentionPolicy,
 )
-from hwp_operation_journal_store import OperationJournalStore
+from hwp_operation_journal_store import (
+    JournalLookupIssue,
+    OperationJournalStore,
+)
+from hwp_save_fingerprint import SaveFileFingerprint, normalized_save_path
 
 
 DEFAULT_STALE_TIMEOUT: Final = timedelta(minutes=2)
@@ -38,6 +43,7 @@ HEARTBEAT_INTERVAL_SECONDS: Final = 10
 __all__: Final = (
     "OperationJournal",
     "OperationJournalError",
+    "JournalRequestLookup",
     "default_operation_journal_path",
     "document_session_key",
     "operation_result_digest",
@@ -47,6 +53,12 @@ __all__: Final = (
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class JournalRequestLookup:
+    decisions: tuple[JournalDecision, ...]
+    issues: tuple[JournalLookupIssue, ...]
 
 
 @final
@@ -109,12 +121,21 @@ class OperationJournal:
         request_id: str,
         request_digest: str,
         recovery: HwpOperateRecovery | None = None,
+        *,
+        document_path: str | None = None,
+        operation: str | None = None,
+        save_fingerprint_before: SaveFileFingerprint | None = None,
     ) -> JournalDecision:
         with self._lock, self._store.transaction():
             path = self._store.entry_path(document_session, request_id)
             now = self._clock()
             record = JournalRecord(
                 request_digest=request_digest,
+                request_id=request_id,
+                document_session=document_session,
+                document_path=document_path,
+                operation=operation,
+                save_fingerprint_before=save_fingerprint_before,
                 state="accepted",
                 started_at=now,
                 updated_at=now,
@@ -167,25 +188,90 @@ class OperationJournal:
             if not path.exists():
                 return None
             record = self._store.read(path)
-            active_decision: JournalDecisionKind = (
-                "in_progress"
-                if self._clock() - record.heartbeat_at < self._stale_timeout
-                else "stale"
-            )
-            decisions: dict[OperationJournalState, JournalDecisionKind] = {
-                "accepted": active_decision,
-                "executing": active_decision,
-                "verified": "replay",
-                "committed": "replay",
-                "failed": "failed",
-                "aborted": "aborted",
-            }
-            decision = decisions[record.state]
-            return record.decision(
-                decision,
-                document_session,
-                self.stale_after_seconds,
-            )
+            return self._observable_decision(record, document_session)
+
+    def _observable_decision(
+        self,
+        record: JournalRecord,
+        document_session: str,
+    ) -> JournalDecision:
+        active_decision: JournalDecisionKind = (
+            "in_progress"
+            if self._clock() - record.heartbeat_at < self._stale_timeout
+            else "stale"
+        )
+        decisions: dict[OperationJournalState, JournalDecisionKind] = {
+            "accepted": active_decision,
+            "executing": active_decision,
+            "verified": "replay",
+            "committed": "replay",
+            "failed": "failed",
+            "aborted": "aborted",
+        }
+        return record.decision(
+            decisions[record.state],
+            document_session,
+            self.stale_after_seconds,
+        )
+
+    def lookup_request(
+        self,
+        request_id: str,
+        document_path: str | None,
+    ) -> tuple[JournalDecision, ...]:
+        return self.lookup_request_with_issues(request_id, document_path).decisions
+
+    def lookup_request_with_issues(
+        self,
+        request_id: str,
+        document_path: str | None,
+    ) -> JournalRequestLookup:
+        normalized_path = (
+            None if document_path is None else normalized_save_path(document_path)
+        )
+        with self._lock, self._store.transaction():
+            decisions: list[JournalDecision] = []
+            issues: list[JournalLookupIssue] = []
+            for path in self._store.record_paths():
+                metadata = self._store.read_lookup_metadata(path)
+                if isinstance(metadata, JournalLookupIssue):
+                    issues.append(metadata)
+                    continue
+                if metadata.request_id != request_id:
+                    continue
+                document_session = metadata.document_session
+                if document_session is None:
+                    issues.append(
+                        JournalLookupIssue(
+                            path,
+                            "incompatible",
+                            "MissingDocumentSession",
+                            "matched",
+                        )
+                    )
+                    continue
+                if (
+                    normalized_path is not None
+                    and metadata.document_path is not None
+                    and normalized_save_path(metadata.document_path) != normalized_path
+                ):
+                    continue
+                if normalized_path is not None and metadata.document_path is None:
+                    issues.append(
+                        JournalLookupIssue(
+                            path,
+                            "incompatible",
+                            "MissingDocumentPath",
+                            "matched",
+                        )
+                    )
+                    continue
+                record = self._store.read_for_lookup(path)
+                if isinstance(record, JournalLookupIssue):
+                    issues.append(record.as_matched())
+                    continue
+                decisions.append(self._observable_decision(record, document_session))
+            return JournalRequestLookup(tuple(decisions), tuple(issues))
 
     def mark_executing(self, document_session: str, request_id: str) -> None:
         with self._lock, self._store.transaction():
@@ -293,6 +379,35 @@ class OperationJournal:
                 path,
                 record.model_copy(update={"state": "committed", "updated_at": self._clock()}),
             )
+
+    def record_save_reconciliation(
+        self,
+        document_session: str,
+        request_id: str,
+        result: OperationResult,
+        result_digest: str,
+        *,
+        confirmed: bool,
+    ) -> None:
+        with self._lock, self._store.transaction():
+            path = self._store.entry_path(document_session, request_id)
+            record = self._store.read(path)
+            if record.state != "failed":
+                return
+            now = self._clock()
+            updated = record.model_copy(
+                update={
+                    "state": "committed" if confirmed else "failed",
+                    "updated_at": now,
+                    "heartbeat_at": now,
+                    "failure_code": (
+                        None
+                        if confirmed
+                        else "save_fingerprint_changed_unconfirmed"
+                    ),
+                }
+            ).with_result(result, result_digest)
+            self._store.replace(path, updated)
 
     def snapshot(self, document_session: str, request_id: str) -> JournalSnapshot:
         with self._lock, self._store.transaction():

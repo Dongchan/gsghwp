@@ -5,6 +5,7 @@ from typing import final
 from hwp_mcp_wrapper_inputs import HwpStyleCopyInput
 from hwp_mcp_wrappers import (
     HwpOperateDispatcher,
+    compact_structured_result,
     dispatch_wrapper,
     new_wrapper_request_id,
 )
@@ -24,8 +25,11 @@ class McpDocumentRecipeWrappers:
     def __init__(self, operation: HwpOperateDispatcher) -> None:
         self._operation = operation
 
-    async def hwp_copy_style(self, style: HwpStyleCopyInput) -> OperationResult:
-        return await dispatch_wrapper(
+    async def hwp_copy_style(
+        self,
+        style: HwpStyleCopyInput,
+    ) -> OperationResult:
+        result = await dispatch_wrapper(
             self._operation,
             HwpOperateInputs(
                 request_id=new_wrapper_request_id(),
@@ -37,5 +41,12 @@ class McpDocumentRecipeWrappers:
                 ),
                 policy=HwpOperatePolicy(),
                 postconditions=HwpOperatePostconditions(),
+            ),
+        )
+        return compact_structured_result(
+            result,
+            summary=(
+                "hwp_copy_style "
+                f"{result.status}: changed={result.changed} verified={result.verified}"
             ),
         )

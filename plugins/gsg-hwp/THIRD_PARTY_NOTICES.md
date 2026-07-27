@@ -1,55 +1,55 @@
-# 제3자 구성요소 및 권리 고지
+# Third-Party Notices
 
-GSG HWP의 자체 소스코드와 해당 소스에서 빌드한 실행 파일은 함께 제공되는
-MIT License에 따라 배포됩니다. 아래 구성요소와 권리는 GSG HWP의 MIT
-License로 다시 허가되지 않으며, 각각의 권리자와 라이선스 조건을 따릅니다.
+This document covers every direct runtime and test dependency declared in
+`pyproject.toml`. It does not enumerate transitive dependencies. License
+identifiers were checked on 2026-07-26 against the metadata and license files
+installed from each exact pinned PyPI release.
 
-## Python 직접 의존성
+## Runtime dependencies
 
-설치기는 `uv.lock`(`plugins/gsg-hwp/uv.lock`)에 기록된 공식 Python 배포 파일을 해시로
-검증해 사용자 전용 환경에 설치합니다. 이 저장소는 해당 Python 패키지 배포
-파일을 vendor 폴더로 포함하지 않고 설치 시 내려받습니다. 각 설치 패키지에는
-원 라이선스 파일이 함께 제공됩니다.
+| Package | License | Verification |
+|---|---|---|
+| [`mcp==1.26.0`](https://pypi.org/project/mcp/1.26.0/) | MIT | Wheel metadata and `LICENSE` |
+| [`pdfplumber==0.11.9`](https://pypi.org/project/pdfplumber/0.11.9/) | MIT | Wheel classifier and `LICENSE.txt` |
+| [`pydantic==2.12.5`](https://pypi.org/project/pydantic/2.12.5/) | MIT | `License-Expression` and `LICENSE` |
+| [`pyhwpx==1.6.6`](https://pypi.org/project/pyhwpx/1.6.6/) | MIT | Wheel `license.txt` (MIT permission text) |
+| [`pywin32==312`](https://pypi.org/project/pywin32/312/) | PSF-2.0 | Wheel metadata and PyPI classifier; see component note below |
+| [`Pillow==12.2.0`](https://pypi.org/project/pillow/12.2.0/) | MIT-CMU | `License-Expression` and `LICENSE`; see component note below |
+| [`opencv-contrib-python-headless==4.12.0.88`](https://pypi.org/project/opencv-contrib-python-headless/4.12.0.88/) | Apache-2.0 | Wheel metadata and `LICENSE.txt`; see component note below |
+| [`typer==0.23.1`](https://pypi.org/project/typer/0.23.1/) | MIT | `License-Expression` and `LICENSE` |
+| [`rich==14.3.2`](https://pypi.org/project/rich/14.3.2/) | MIT | Wheel metadata and `LICENSE` |
+| [`reportlab==4.4.9`](https://pypi.org/project/reportlab/4.4.9/) | BSD-3-Clause | Wheel `LICENSE` (three-clause BSD terms) |
+| [`pypdf==6.10.0`](https://pypi.org/project/pypdf/6.10.0/) | BSD-3-Clause | `License-Expression` and `LICENSE` |
+| [`pymupdf==1.28.0`](https://pypi.org/project/pymupdf/1.28.0/) | AGPL-3.0, or an Artifex commercial license | Wheel metadata and `COPYING`; see the dedicated notice below |
 
-| 패키지 | 고정 버전 | 라이선스 | 프로젝트 |
-|---|---:|---|---|
-| mcp | 1.26.0 | MIT | <https://github.com/modelcontextprotocol/python-sdk> |
-| pdfplumber | 0.11.9 | MIT | <https://github.com/jsvine/pdfplumber> |
-| pydantic | 2.12.5 | MIT | <https://github.com/pydantic/pydantic> |
-| pyhwpx | 1.6.6 | MIT | <https://github.com/martiniifun/pyhwpx> |
-| pywin32 | 312 | Python Software Foundation License | <https://github.com/mhammond/pywin32> |
-| Pillow | 12.2.0 | MIT-CMU | <https://github.com/python-pillow/Pillow> |
-| typer | 0.23.1 | MIT | <https://github.com/fastapi/typer> |
-| rich | 14.3.2 | MIT | <https://github.com/Textualize/rich> |
-| reportlab | 4.4.9 | BSD | <https://pypi.org/project/reportlab/> |
-| pypdf | 6.10.0 | BSD-3-Clause | <https://github.com/py-pdf/pypdf> |
+`pywin32` contains separately licensed components. Its wheel includes, among
+other notices, LGPL-2.1 terms for `adodbapi`, BSD-style terms for core Win32 and
+COM portions, MIT terms for the MAPI stub library, the Scintilla license, and
+the Python license. Pillow and the OpenCV wheel likewise include their own
+third-party component notices. If a Python package is redistributed, retain
+the complete license and third-party notice files shipped in that package.
 
-간접 의존성의 정확한 버전과 배포 파일 해시는 `uv.lock`에 기록되어 있으며,
-각 패키지에 포함된 라이선스와 고지를 그대로 따릅니다.
+## Optional test dependencies
 
-## pyhwpx와 파일 경로 보안 모듈
+| Package | License | Verification |
+|---|---|---|
+| [`basedpyright==1.39.8`](https://pypi.org/project/basedpyright/1.39.8/) | MIT | Wheel classifier and `LICENSE.txt` |
+| [`pytest==8.4.2`](https://pypi.org/project/pytest/8.4.2/) | MIT | Wheel metadata and `LICENSE` |
+| [`ruff==0.15.22`](https://pypi.org/project/ruff/0.15.22/) | MIT | `License-Expression` and `LICENSE` |
 
-GSG HWP는 `pyhwpx.Hwp`를 Python 한컴 조작 어댑터로 사용합니다. 또한 설치
-과정에서 고정된 `pyhwpx==1.6.6` 배포 파일에 포함된
-`FilePathCheckerModule.dll`을 가져와 SHA-256을 검증합니다. GSG HWP는 이
-제3자 패키지나 보안 DLL의 소유권을 주장하거나 별도로 재라이선스하지 않습니다.
+## PyMuPDF
 
-## 한글과컴퓨터 제품 및 Automation
+- Package: `pymupdf==1.28.0`
+- Copyright holder and licensor: Artifex Software, Inc.
+- License: GNU Affero General Public License v3.0 (AGPL-3.0), or an
+  Artifex commercial license
 
-한/글, HWP, HWPX, 한컴 및 관련 제품명·상표·Automation API와 공식 문서의
-권리는 해당 권리자에게 있습니다. 한글과컴퓨터의 공식 안내에 따르면 한글
-Automation은 개인의 비상업적 목적에는 자유롭게 이용할 수 있지만, 상업적으로
-판매되는 솔루션이나 응용프로그램에 이용하려면 한글과컴퓨터의 승인과 별도
-라이선스가 필요합니다.
+**배포 형태:** 이 저장소는 PyMuPDF를 포함하지 않으며 설치 시 `uv sync`가
+PyPI에서 직접 내려받는다.
 
-- 한컴 Automation 안내: <https://developer.hancom.com/hwpautomation>
-
-GSG HWP의 MIT License는 한컴 제품, Automation 또는 제3자 구성요소에 대한
-상업적 이용 권한을 부여하지 않습니다. 이 프로젝트는 한글과컴퓨터의 공식
-제품이 아니며 한글과컴퓨터의 보증이나 승인을 받았음을 의미하지 않습니다.
-
-## 데모 영상과 이미지
-
-`docs/media/`의 데모 영상과 썸네일은 `Copyright (c) 2026 inodesign. All
-rights reserved.`입니다. 저장소 소개 페이지에서 열람할 수 있지만, 별도 허가
-없이 복제·수정·재배포할 수 있는 권리는 MIT License에 포함되지 않습니다.
+The current release layout does not bundle Python packages. The repository
+tracks no wheel, package archive, `.venv`, `site-packages`, or PyMuPDF payload;
+`.venv` is ignored. `runtime/bootstrap_runtime.ps1` recreates the environment
+and installs the runtime declarations from `pyproject.toml`, using the package
+index by default. An operator may instead supply an external wheelhouse for an
+offline installation; that wheelhouse is not part of this repository.

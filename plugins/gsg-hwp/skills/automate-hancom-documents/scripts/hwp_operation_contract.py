@@ -387,7 +387,24 @@ class OperationResult(OperationRouteMetadata):
     after_control_hash: str | None = Field(default=None, max_length=500)
     after_text_hash: str | None = Field(default=None, pattern=r"^\d{1,20}$")
     after_document_hash: str | None = Field(default=None, pattern=r"^\d{1,20}$")
+    save_baseline_file_size: int | None = Field(default=None, ge=0)
+    save_baseline_file_mtime_ns: int | None = Field(default=None, ge=0)
+    save_baseline_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     saved_file_size: int | None = Field(default=None, ge=0)
+    saved_file_write_time_100ns: int | None = Field(default=None, ge=0)
+    saved_file_mtime_ns: int | None = Field(default=None, ge=0)
+    saved_file_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    save_fingerprint_stable: bool | None = None
+    save_fingerprint_changed: bool | None = None
+    save_fingerprint_verified: bool | None = None
+    live_state_preserved_after_save: bool | None = None
+    disk_persistence_verified: bool | None = None
     structure_digest_before: str | None = Field(default=None, max_length=500)
     structure_digest_after: str | None = Field(default=None, max_length=500)
     partial_change: bool = False

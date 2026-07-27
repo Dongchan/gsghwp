@@ -113,7 +113,11 @@ public:
         runNames.emplace_back(action);
         return true;
     }
-    bool InsertText(const hancom::reference_layout::Text&) override { return false; }
+    bool InsertText(
+        const hancom::reference_layout::Text&,
+        const hancom::reference_layout::Style*) override {
+        return false;
+    }
     bool MergeCells(const hancom::reference_layout::Merge& merge) override {
         mergedRows.push_back(merge.row);
         mergedColumns.push_back(merge.column);

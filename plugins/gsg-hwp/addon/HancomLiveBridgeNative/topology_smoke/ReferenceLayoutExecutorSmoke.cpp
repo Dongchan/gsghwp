@@ -231,7 +231,9 @@ public:
         return true;
     }
 
-    bool InsertText(const hancom::reference_layout::Text&) override {
+    bool InsertText(
+        const hancom::reference_layout::Text&,
+        const hancom::reference_layout::Style*) override {
         textInsertedAfterMerge = merges == 1;
         ++texts;
         return true;
@@ -393,7 +395,7 @@ bool ReferenceLayoutExecutorSmoke() {
         count(L"TableCreate") == 1 && count(L"CellZoneBorderFill") == 0 &&
         count(L"CellBorderFill") == 1 && count(L"CellBorder") == 0 &&
         count(L"CellZoneBorder") == 1 &&
-        count(L"CharShape") == 2 &&
+        count(L"CharShape") == 3 &&
         hancom::reference_layout::TextBreakAction(0) == std::wstring(L"BreakLine") &&
         hancom::reference_layout::TextBreakAction(1) == std::wstring(L"BreakPara") &&
         singleFill.size() == 1 && singleFill.front().name == L"CellFill" &&

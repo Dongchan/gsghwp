@@ -21,7 +21,7 @@ public:
         LONG right) = 0;
     virtual bool GoToCell(LONG row, LONG column) = 0;
     virtual bool Run(const wchar_t* action, const std::wstring& location) = 0;
-    virtual bool InsertText(const Text& text) = 0;
+    virtual bool InsertText(const Text& text, const Style* expectedStyle) = 0;
     virtual bool MergeCells(const Merge& merge) = 0;
     virtual bool ReconcileFinalGeometry(const Spec& spec) = 0;
     virtual bool VerifyFinalTopology(const Spec& spec) = 0;

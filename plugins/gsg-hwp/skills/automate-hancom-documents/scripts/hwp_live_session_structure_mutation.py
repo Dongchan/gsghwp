@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hwp_errors import HwpLiveError
@@ -14,7 +14,11 @@ from hwp_live_contract import (
 )
 from hwp_live_inspection import inspect_styles
 from hwp_live_layout import resolve_layout_styles, validate_layout_anchor
-from hwp_live_native_action_contract import encode_action_request
+from hwp_live_native_action_contract import (
+    NativeActionFailure,
+    NativeActionFailureEvidence,
+    encode_action_request,
+)
 from hwp_live_native_action_models import (
     NativeActionRequest,
     NativeActionResult,
@@ -29,7 +33,11 @@ from hwp_live_native_format_commands import (
     TextFormatCommandPlan,
     build_native_format_commands,
 )
-from hwp_live_native_layout import NativeLayoutContext, build_native_layout_request
+from hwp_live_native_layout import (
+    NativeLayoutContext,
+    build_native_layout_execution_plan,
+    build_native_layout_request,
+)
 from hwp_live_rot import HwpDocumentCandidate
 from hwp_live_safety import require_writable_document, run_layout_mutation
 from hwp_live_text_format_verification import verify_requested_text_format
@@ -46,6 +54,77 @@ class _NativeLayoutBox:
 class _NativeMutationBox:
     result: NativeActionResult | None = None
     snapshot: NativeSnapshot | None = None
+
+
+class _LegacyLayoutBatchFailure(NativeActionFailure):
+    completed_batches: int
+    completed_addresses: tuple[str, ...]
+
+    def __init__(
+        self,
+        evidence: NativeActionFailureEvidence,
+        *,
+        completed_batches: int,
+        completed_addresses: tuple[str, ...],
+    ) -> None:
+        super().__init__(evidence)
+        self.completed_batches = completed_batches
+        self.completed_addresses = completed_addresses
+
+
+def _merge_layout_results(
+    first: NativeActionResult,
+    second: NativeActionResult,
+) -> NativeActionResult:
+    return replace(
+        first,
+        commands_executed=first.commands_executed + second.commands_executed,
+        actions_executed=first.actions_executed + second.actions_executed,
+        text_insertions=first.text_insertions + second.text_insertions,
+        image_insertions=first.image_insertions + second.image_insertions,
+        elapsed_microseconds=(first.elapsed_microseconds + second.elapsed_microseconds),
+        created_control_ids=(first.created_control_ids + second.created_control_ids),
+        call_results=first.call_results + second.call_results,
+        image_timing_count=(first.image_timing_count + second.image_timing_count),
+        image_max_microseconds=max(
+            first.image_max_microseconds,
+            second.image_max_microseconds,
+        ),
+        image_total_microseconds=(
+            first.image_total_microseconds + second.image_total_microseconds
+        ),
+    )
+
+
+def _legacy_layout_failure(
+    failure: NativeActionFailure,
+    *,
+    batch_index: int,
+    commands_completed_before: int,
+    command_limit: int,
+    completed_addresses: tuple[str, ...],
+) -> _LegacyLayoutBatchFailure:
+    local_completed = min(max(failure.commands_completed, 0), command_limit)
+    commands_completed = commands_completed_before + local_completed
+    partial_mutation = batch_index > 0 or failure.partial_mutation
+    return _LegacyLayoutBatchFailure(
+        NativeActionFailureEvidence(
+            code=failure.code,
+            location=failure.location,
+            message=(
+                f"{failure.message}; 완료 batch {batch_index}개, "
+                f"완료 셀 {len(completed_addresses)}개"
+            ),
+            commands_completed=commands_completed,
+            failed_step=failure.failed_step,
+            partial_mutation=partial_mutation,
+            retry_safe=failure.retry_safe and not partial_mutation,
+            structure_digest_before=failure.structure_digest_before,
+            structure_digest_after=failure.structure_digest_after,
+        ),
+        completed_batches=batch_index,
+        completed_addresses=completed_addresses,
+    )
 
 
 def _native_selection(selection: SelectionRange) -> NativeSelection:
@@ -98,8 +177,8 @@ def replace_validated_selection(
         native.result = execute_native_actions(
             candidate.window_handle,
             NativeActionRequest(
-                document_id=candidate.document.DocumentID,
-                full_name=candidate.document.FullName,
+                document_id=candidate.document_id,
+                full_name=candidate.full_name,
                 commands=(ReplaceSelectionCommand(expected_text, replacement),),
                 expected_selection=_native_selection(selection),
             ),
@@ -135,14 +214,17 @@ def patch_validated_text(
 ) -> TextPatchResult:
     _ = hwp
     if (
-        (request.expected_text is not None and len(request.expected_text) > 1_000_000)
-        or len(request.replacement) > 1_000_000
-    ):
+        request.expected_text is not None and len(request.expected_text) > 1_000_000
+    ) or len(request.replacement) > 1_000_000:
         raise HwpLiveError("라이브 text.patch 크기 한도를 초과했습니다")
     if request.target.kind != "current" and request.expected_text is None:
-        raise HwpLiveError("범위·검색·표 셀 text.patch에는 확인할 기존 텍스트가 필요합니다")
+        raise HwpLiveError(
+            "범위·검색·표 셀 text.patch에는 확인할 기존 텍스트가 필요합니다"
+        )
     if not request.replacement and request.formatting is not None:
-        raise HwpLiveError("삭제 결과에는 적용할 텍스트가 없으므로 글자 서식을 함께 요청할 수 없습니다")
+        raise HwpLiveError(
+            "삭제 결과에는 적용할 텍스트가 없으므로 글자 서식을 함께 요청할 수 없습니다"
+        )
     require_writable_document(unsafe_selectors, candidate.selector)
     guard()
     before = read_native_snapshot(candidate.window_handle)
@@ -164,16 +246,14 @@ def patch_validated_text(
         *(
             ()
             if request.formatting is None
-            else build_native_format_commands(
-                TextFormatCommandPlan(request.formatting)
-            )
+            else build_native_format_commands(TextFormatCommandPlan(request.formatting))
         ),
     )
     native_result = execute_native_actions(
         candidate.window_handle,
         NativeActionRequest(
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             commands=commands,
             expected_cursor=before.cursor,
             expected_selection=before.selection,
@@ -187,7 +267,9 @@ def patch_validated_text(
         raise HwpLiveError("text.patch 후 한컴 문서 상태를 읽지 못했습니다")
     if request.replacement:
         if not after.selection.selected or after.selected_text != request.replacement:
-            raise HwpLiveError("text.patch 후 변경한 본문 범위를 다시 읽어 확인하지 못했습니다")
+            raise HwpLiveError(
+                "text.patch 후 변경한 본문 범위를 다시 읽어 확인하지 못했습니다"
+            )
     elif after.selection.selected:
         raise HwpLiveError("text.patch 삭제 후 선택 영역이 예상대로 접히지 않았습니다")
     if request.formatting is not None:
@@ -229,8 +311,8 @@ def apply_validated_layout(
     position = NativePosition(*cursor)
     native_request = build_native_layout_request(
         NativeLayoutContext(
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             style_ids=tuple((style.name, style.style_id) for style in styles.styles),
             expected_cursor=position,
             expected_selection=_native_selection(selected),
@@ -239,19 +321,127 @@ def apply_validated_layout(
         assets,
     )
     _ = encode_action_request(native_request)
+    execution = build_native_layout_execution_plan(native_request)
     native = _NativeLayoutBox()
 
     def mutate_native_layout() -> None:
-        native.result = execute_native_actions(
-            candidate.window_handle,
-            native_request,
-            minimum_version=4,
-        )
-        if native.result is None:
-            return
+        commands_completed = 0
+        completed_group_keys: set[int] = set()
+        for batch_index, batch in enumerate(execution.batches):
+            try:
+                batch_result = execute_native_actions(
+                    candidate.window_handle,
+                    batch.request,
+                    minimum_version=4,
+                )
+            except NativeActionFailure as failure:
+                if len(execution.batches) == 1:
+                    raise
+                local_completed = min(
+                    max(failure.commands_completed, 0),
+                    len(batch.request.commands),
+                )
+                completed_group_keys.update(batch.completed_group_keys(local_completed))
+                raise _legacy_layout_failure(
+                    failure,
+                    batch_index=batch_index,
+                    commands_completed_before=commands_completed,
+                    command_limit=len(batch.request.commands),
+                    completed_addresses=execution.completed_addresses(
+                        completed_group_keys
+                    ),
+                ) from failure
+            except HwpLiveError as error:
+                if len(execution.batches) == 1 or batch_index == 0:
+                    raise
+                completed_addresses = execution.completed_addresses(
+                    completed_group_keys
+                )
+                raise _LegacyLayoutBatchFailure(
+                    NativeActionFailureEvidence(
+                        code="LAYOUT_BATCH_TRANSPORT",
+                        location=f"{batch_index + 1}/{len(execution.batches)}",
+                        message=(
+                            f"{error}; 완료 batch {batch_index}개, "
+                            f"완료 셀 {len(completed_addresses)}개"
+                        ),
+                        commands_completed=commands_completed,
+                        failed_step=f"layout_batch:{batch_index + 1}",
+                        partial_mutation=True,
+                        retry_safe=False,
+                        structure_digest_before=None,
+                        structure_digest_after=None,
+                    ),
+                    completed_batches=batch_index,
+                    completed_addresses=completed_addresses,
+                ) from error
+            if batch_result is None:
+                if len(execution.batches) == 1:
+                    return
+                partial_mutation = batch_index > 0
+                completed_addresses = execution.completed_addresses(
+                    completed_group_keys
+                )
+                raise _LegacyLayoutBatchFailure(
+                    NativeActionFailureEvidence(
+                        code="LAYOUT_BATCH_UNAVAILABLE",
+                        location=f"{batch_index + 1}/{len(execution.batches)}",
+                        message=(
+                            "한컴 네이티브 레이아웃 배치를 사용할 수 없습니다; "
+                            f"완료 batch {batch_index}개, "
+                            f"완료 셀 {len(completed_addresses)}개"
+                        ),
+                        commands_completed=commands_completed,
+                        failed_step=f"layout_batch:{batch_index + 1}",
+                        partial_mutation=partial_mutation,
+                        retry_safe=not partial_mutation,
+                        structure_digest_before=None,
+                        structure_digest_after=None,
+                    ),
+                    completed_batches=batch_index,
+                    completed_addresses=completed_addresses,
+                )
+            if batch_result.commands_executed != len(batch.request.commands):
+                local_completed = min(
+                    max(batch_result.commands_executed, 0),
+                    len(batch.request.commands),
+                )
+                completed_group_keys.update(batch.completed_group_keys(local_completed))
+                completed_addresses = execution.completed_addresses(
+                    completed_group_keys
+                )
+                partial_mutation = batch_index > 0 or local_completed > 0
+                raise _LegacyLayoutBatchFailure(
+                    NativeActionFailureEvidence(
+                        code="LAYOUT_BATCH_INCOMPLETE",
+                        location=f"{batch_index + 1}/{len(execution.batches)}",
+                        message=(
+                            "레이아웃 batch 완료 명령 수가 요청과 다릅니다; "
+                            f"완료 batch {batch_index}개, "
+                            f"완료 셀 {len(completed_addresses)}개"
+                        ),
+                        commands_completed=commands_completed + local_completed,
+                        failed_step=f"layout_batch:{batch_index + 1}",
+                        partial_mutation=partial_mutation,
+                        retry_safe=not partial_mutation,
+                        structure_digest_before=None,
+                        structure_digest_after=None,
+                    ),
+                    completed_batches=batch_index,
+                    completed_addresses=completed_addresses,
+                )
+            native.result = (
+                batch_result
+                if native.result is None
+                else _merge_layout_results(native.result, batch_result)
+            )
+            commands_completed += batch_result.commands_executed
+            completed_group_keys.update(item.group.key for item in batch.groups)
         native.snapshot = read_native_snapshot(candidate.window_handle)
         if native.snapshot is None:
-            raise HwpLiveError("네이티브 레이아웃 배치 후 한컴 문서 상태를 읽지 못했습니다")
+            raise HwpLiveError(
+                "네이티브 레이아웃 배치 후 한컴 문서 상태를 읽지 못했습니다"
+            )
 
     run_layout_mutation(
         unsafe_selectors,

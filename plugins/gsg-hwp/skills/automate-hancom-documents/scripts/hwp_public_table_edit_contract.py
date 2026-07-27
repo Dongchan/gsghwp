@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Annotated, Literal
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_core import PydanticCustomError
 
+from hwp_color_normalization import ColorInput, canonical_rgb_hex
 from hwp_live_values import ContractModel
 from hwp_mcp_wrapper_inputs import HwpBorderStyle, HwpBorderWidth
 from hwp_operation_contract import OperationInputValue
@@ -14,7 +15,7 @@ from hwp_public_cell_selector import PublicCellAddress as PublicCellAddress
 
 type PublicTableAlignment = Literal["left", "center", "right", "justify", "inherit"]
 type PublicTableVerticalAlignment = Literal["top", "center", "bottom", "inherit"]
-type PublicTableColor = Annotated[str, Field(min_length=1, max_length=50)]
+type PublicTableColor = ColorInput
 type PublicTableBorderStyle = HwpBorderStyle
 type PublicTableBorderWidth = HwpBorderWidth
 type PublicTableSplitMode = Literal["equal", "existing_grid"]
@@ -54,17 +55,17 @@ class PublicTableFormattingInput(ContractModel):
         if self.font_size_pt is not None:
             parameters["font_size_pt"] = self.font_size_pt
         if self.text_color is not None:
-            parameters["text_color"] = self.text_color
+            parameters["text_color"] = canonical_rgb_hex(self.text_color)
         if self.line_spacing is not None:
             parameters["line_spacing"] = self.line_spacing
         if self.fill_color is not None:
-            parameters["fill_color"] = self.fill_color
+            parameters["fill_color"] = canonical_rgb_hex(self.fill_color)
         if self.border_style is not None:
             parameters["border_style"] = self.border_style
         if self.border_width is not None:
             parameters["border_width"] = self.border_width
         if self.border_color is not None:
-            parameters["border_color"] = self.border_color
+            parameters["border_color"] = canonical_rgb_hex(self.border_color)
         return parameters
 
 

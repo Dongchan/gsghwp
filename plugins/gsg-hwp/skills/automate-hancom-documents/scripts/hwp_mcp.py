@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from sys import argv, stderr
 
@@ -9,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 from hwp_live_bridge import HancomBridge
 from hwp_live_preview_maintenance import maintain_live_previews
 from hwp_live_session import LiveHwpController
-from hwp_codex_skill_install import ensure_codex_skill_registered
+from hwp_codex_skill_install import startup_codex_skill_registration_record
 from hwp_mcp_dispatch import McpThreadDispatcher
 from hwp_mcp_document_wrappers import McpDocumentRecipeWrappers
 from hwp_mcp_forward import ForwardingFastMCP
@@ -43,8 +43,12 @@ def build_server(
     *,
     profile: McpProfile = "production",
     operation_journal: OperationJournal | None = None,
+    controller_factory: Callable[[], LiveHwpController] | None = None,
 ) -> ForwardingFastMCP:
-    bridge = HancomBridge(controller)
+    bridge = HancomBridge(
+        controller,
+        controller_factory=controller_factory,
+    )
     dispatcher = McpThreadDispatcher()
     journal = OperationJournal() if operation_journal is None else operation_journal
     operation_executor = HwpOperationExecutor(bridge, dispatcher, journal)
@@ -87,6 +91,7 @@ def build_server(
     register_mcp_tools(
         server,
         McpToolBindings(
+            operation_executor=operation_executor,
             operation=operation,
             document_wrappers=document_wrappers,
             qa=qa,
@@ -108,13 +113,14 @@ def build_server(
 
 
 def main() -> None:
-    _ = ensure_codex_skill_registered()
+    _ = stderr.write(f"{startup_codex_skill_registration_record()}\n")
     _ = stderr.write(f"{startup_runtime_record()}\n")
     _ = stderr.flush()
     _ = ensure_native_bridge_registered()
     build_server(
         LiveHwpController(),
         profile=configured_mcp_profile(argv[1:]),
+        controller_factory=LiveHwpController,
     ).run(transport="stdio")
 
 

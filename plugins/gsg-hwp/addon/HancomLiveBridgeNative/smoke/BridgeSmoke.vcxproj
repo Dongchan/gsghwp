@@ -43,6 +43,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>ole32.lib;oleaut32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
@@ -50,6 +51,7 @@
   <ItemGroup>
     <ClCompile Include="BridgeSmoke.cpp" />
     <ClCompile Include="..\CellTopology.cpp" />
+    <ClCompile Include="..\ComState.cpp" />
     <ClCompile Include="..\DispatchInvoke.cpp" />
     <ClCompile Include="..\TableInspection.cpp" />
   </ItemGroup>

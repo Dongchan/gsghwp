@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 from dataclasses import dataclass
 from typing import Final, final
 from uuid import uuid4
@@ -19,6 +20,16 @@ from hwp_public_contract import PublicTableTarget
 
 
 _MAX_INSPECTED_TABLE_TARGETS: Final = 256
+
+
+def _document_path_key(document_path: str | None) -> str | None:
+    if not document_path:
+        return None
+    return ntpath.normcase(ntpath.normpath(document_path))
+
+
+def _same_document_path(first: str | None, second: str | None) -> bool:
+    return _document_path_key(first) == _document_path_key(second)
 
 
 class PublicTableDataInput(ContractModel):
@@ -80,11 +91,57 @@ class UnknownPublicTargetError(ValueError):
 
 @final
 class PublicTableTargetStore:
-    __slots__ = ("_inspected_targets", "_targets")
+    __slots__ = ("_inspected_document", "_inspected_targets", "_targets")
 
     def __init__(self) -> None:
         self._targets: dict[str, CanonicalPublicTableTarget] = {}
         self._inspected_targets: dict[str, CanonicalPublicTableTarget] = {}
+        self._inspected_document: tuple[int, str | None] | None = None
+
+    def _clear_targets(self) -> None:
+        self._targets.clear()
+        self._inspected_targets.clear()
+
+    def _prepare_candidate_document(self, document_path: str | None) -> None:
+        inspected_document = self._inspected_document
+        candidate_path = _document_path_key(document_path)
+        if (
+            inspected_document is not None
+            and candidate_path is not None
+            and inspected_document[1] != candidate_path
+        ):
+            self._clear_targets()
+            self._inspected_document = None
+
+    def _prepare_inspection(self, inspection: FastPageInspection) -> None:
+        document = (
+            inspection.document_id,
+            _document_path_key(inspection.full_name),
+        )
+        changed_document = (
+            self._inspected_document is not None
+            and self._inspected_document != document
+        )
+        if self._inspected_document is None and self._targets:
+            candidate_paths = {
+                _document_path_key(target.document_path)
+                for target in self._targets.values()
+            }
+            changed_document = candidate_paths != {document[1]}
+        if changed_document:
+            self._clear_targets()
+        self._inspected_document = document
+
+    def _remember_inspected(
+        self,
+        instance_id: str,
+        target: CanonicalPublicTableTarget,
+    ) -> None:
+        _ = self._inspected_targets.pop(instance_id, None)
+        self._inspected_targets[instance_id] = target
+        while len(self._inspected_targets) > _MAX_INSPECTED_TABLE_TARGETS:
+            oldest = next(iter(self._inspected_targets))
+            del self._inspected_targets[oldest]
 
     def resolve(
         self,
@@ -96,6 +153,18 @@ class PublicTableTargetStore:
             resolved = self._targets.get(
                 target.target_id
             ) or self._inspected_targets.get(target.target_id)
+            if (
+                resolved is not None
+                and target.document_path is not None
+                and resolved.document_path is not None
+                and not _same_document_path(
+                    target.document_path,
+                    resolved.document_path,
+                )
+            ):
+                if target.target_id.startswith("hwp-target-"):
+                    raise UnknownPublicTargetError(target.target_id)
+                resolved = None
             if resolved is None:
                 if target.target_id.startswith("hwp-target-"):
                     raise UnknownPublicTargetError(target.target_id)
@@ -104,6 +173,10 @@ class PublicTableTargetStore:
                     HwpOperateTarget(
                         kind="table",
                         binding="active",
+                        page_hint=target.page,
+                        table_index=target.table_index,
+                        caption_contains=target.caption,
+                        header_signature=target.headers,
                         match_policy="return_candidates",
                         control_instance_id=target.target_id,
                     ),
@@ -129,6 +202,7 @@ class PublicTableTargetStore:
     ) -> tuple[str, ...]:
         if not candidates:
             return ()
+        self._prepare_candidate_document(document_path)
         self._targets.clear()
         target_ids: list[str] = []
         for candidate in candidates[:3]:
@@ -148,7 +222,7 @@ class PublicTableTargetStore:
         return tuple(target_ids)
 
     def remember_inspection(self, inspection: FastPageInspection) -> None:
-        self._inspected_targets.clear()
+        self._prepare_inspection(inspection)
         table_index = 0
         for control in inspection.controls:
             if control.control_type != "tbl":
@@ -156,21 +230,24 @@ class PublicTableTargetStore:
             table_index += 1
             if table_index > _MAX_INSPECTED_TABLE_TARGETS:
                 break
-            self._inspected_targets[control.instance_id] = CanonicalPublicTableTarget(
-                inspection.full_name,
-                HwpOperateTarget(
-                    kind="table",
-                    binding="active",
-                    page_hint=inspection.page,
-                    table_index=table_index,
-                    match_policy="return_candidates",
-                    control_instance_id=control.instance_id,
+            self._remember_inspected(
+                control.instance_id,
+                CanonicalPublicTableTarget(
+                    inspection.full_name,
+                    HwpOperateTarget(
+                        kind="table",
+                        binding="active",
+                        page_hint=inspection.page,
+                        table_index=table_index,
+                        match_policy="return_candidates",
+                        control_instance_id=control.instance_id,
+                    ),
                 ),
             )
 
     def clear(self) -> None:
-        self._targets.clear()
-        self._inspected_targets.clear()
+        self._clear_targets()
+        self._inspected_document = None
 
 
 def _active_table_target() -> HwpOperateTarget:

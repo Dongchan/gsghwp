@@ -4,6 +4,7 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cwchar>
 #include <fcntl.h>
@@ -54,6 +55,28 @@ public:
 
 private:
     HRESULT result_;
+};
+
+class UniqueHandle final {
+public:
+    explicit UniqueHandle(const HANDLE handle = nullptr) noexcept
+        : handle_(handle) {}
+
+    ~UniqueHandle() noexcept {
+        if (handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE) {
+            static_cast<void>(CloseHandle(handle_));
+        }
+    }
+
+    UniqueHandle(const UniqueHandle&) = delete;
+    UniqueHandle& operator=(const UniqueHandle&) = delete;
+
+    [[nodiscard]] HANDLE Get() const noexcept {
+        return handle_;
+    }
+
+private:
+    HANDLE handle_;
 };
 
 std::string WideToUtf8(const std::wstring_view value) {
@@ -301,6 +324,9 @@ public:
             return DISP_E_UNKNOWNINTERFACE;
         }
         WriteEvent(member_id, parameters);
+        if (member_id == 1) {
+            PostQuitMessage(0);
+        }
         return S_OK;
     }
 
@@ -377,40 +403,79 @@ HRESULT FindEventConnectionPoint(
     return result;
 }
 
-int PumpUntilShutdown() {
+int PumpUntilShutdown(const HANDLE target_process) {
     const HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
     const bool has_input = input != nullptr && input != INVALID_HANDLE_VALUE;
+    const bool input_is_pipe =
+        has_input && GetFileType(input) == FILE_TYPE_PIPE;
+    constexpr DWORD kMissingHandleIndex = MAXDWORD;
+    HANDLE handles[2] = {};
+    DWORD handle_count = 0;
+    DWORD target_index = kMissingHandleIndex;
+    if (target_process != nullptr && target_process != INVALID_HANDLE_VALUE) {
+        target_index = handle_count;
+        handles[handle_count++] = target_process;
+    }
+    DWORD input_index = kMissingHandleIndex;
+    if (has_input && !input_is_pipe) {
+        input_index = handle_count;
+        handles[handle_count++] = input;
+    }
     std::string command_buffer;
-    while (true) {
-        const DWORD handle_count = has_input ? 1U : 0U;
-        const HANDLE* const handles = has_input ? &input : nullptr;
-        const DWORD wait_result = MsgWaitForMultipleObjectsEx(
-            handle_count,
-            handles,
-            INFINITE,
-            QS_ALLINPUT,
-            MWMO_ALERTABLE | MWMO_INPUTAVAILABLE);
-        if (has_input && wait_result == WAIT_OBJECT_0) {
-            char buffer[256] = {};
-            DWORD byte_count = 0;
-            if (ReadFile(input, buffer, sizeof(buffer), &byte_count, nullptr) == FALSE ||
-                byte_count == 0) {
+    const auto read_input = [&]() -> std::optional<int> {
+        char buffer[256] = {};
+        DWORD byte_count = 0;
+        if (ReadFile(input, buffer, sizeof(buffer), &byte_count, nullptr) == FALSE ||
+            byte_count == 0) {
+            return 0;
+        }
+        command_buffer.append(buffer, buffer + byte_count);
+        std::size_t newline = command_buffer.find('\n');
+        while (newline != std::string::npos) {
+            std::string command = command_buffer.substr(0, newline);
+            if (!command.empty() && command.back() == '\r') {
+                command.pop_back();
+            }
+            command_buffer.erase(0, newline + 1);
+            if (command == "shutdown") {
                 return 0;
             }
-            command_buffer.append(buffer, buffer + byte_count);
-            std::size_t newline = command_buffer.find('\n');
-            while (newline != std::string::npos) {
-                std::string command = command_buffer.substr(0, newline);
-                if (!command.empty() && command.back() == '\r') {
-                    command.pop_back();
-                }
-                command_buffer.erase(0, newline + 1);
-                if (command == "shutdown") {
-                    return 0;
-                }
-                newline = command_buffer.find('\n');
+            newline = command_buffer.find('\n');
+        }
+        return std::nullopt;
+    };
+    while (true) {
+        const DWORD wait_result = MsgWaitForMultipleObjectsEx(
+            handle_count,
+            handle_count == 0 ? nullptr : handles,
+            input_is_pipe ? 20U : INFINITE,
+            QS_ALLINPUT,
+            MWMO_ALERTABLE | MWMO_INPUTAVAILABLE);
+        if (input_is_pipe && wait_result == WAIT_TIMEOUT) {
+            DWORD available = 0;
+            if (PeekNamedPipe(input, nullptr, 0, nullptr, &available, nullptr) == FALSE) {
+                return 0;
+            }
+            if (available == 0) {
+                continue;
+            }
+            const std::optional<int> input_result = read_input();
+            if (input_result.has_value()) {
+                return input_result.value();
             }
             continue;
+        }
+        if (input_index != kMissingHandleIndex &&
+            wait_result == WAIT_OBJECT_0 + input_index) {
+            const std::optional<int> input_result = read_input();
+            if (input_result.has_value()) {
+                return input_result.value();
+            }
+            continue;
+        }
+        if (target_index != kMissingHandleIndex &&
+            wait_result == WAIT_OBJECT_0 + target_index) {
+            return 0;
         }
         if (wait_result == WAIT_OBJECT_0 + handle_count) {
             MSG message{};
@@ -444,7 +509,7 @@ int RunSelfTest() {
     argument.vt = VT_I4;
     argument.lVal = 3;
     DISPPARAMS parameters{&argument, nullptr, 1, 0};
-    return SUCCEEDED(sink->Invoke(
+    const HRESULT event_result = sink->Invoke(
         11,
         IID_NULL,
         LOCALE_USER_DEFAULT,
@@ -452,15 +517,46 @@ int RunSelfTest() {
         &parameters,
         nullptr,
         nullptr,
-        nullptr))
-        ? 0
-        : 5;
+        nullptr);
+    if (FAILED(event_result)) {
+        return 5;
+    }
+    const UniqueHandle signaled_event(
+        CreateEventW(nullptr, TRUE, TRUE, nullptr));
+    if (signaled_event.Get() == nullptr ||
+        PumpUntilShutdown(signaled_event.Get()) != 0) {
+        return 5;
+    }
+    const HRESULT quit_result = sink->Invoke(
+        1,
+        IID_NULL,
+        LOCALE_USER_DEFAULT,
+        DISPATCH_METHOD,
+        &parameters,
+        nullptr,
+        nullptr,
+        nullptr);
+    return SUCCEEDED(quit_result) && PumpUntilShutdown(nullptr) == 0 ? 0 : 5;
+}
+
+std::optional<DWORD> ParseProcessId(const wchar_t* const text) {
+    if (text == nullptr || text[0] == L'\0') {
+        return std::nullopt;
+    }
+    wchar_t* end = nullptr;
+    errno = 0;
+    const unsigned long value = std::wcstoul(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != L'\0' || value == 0) {
+        return std::nullopt;
+    }
+    return static_cast<DWORD>(value);
 }
 
 void PrintUsage(FILE* const stream) {
     std::fwprintf(
         stream,
-        L"Usage: HancomEventBridge.exe --moniker <exact ROT display name>\n"
+        L"Usage: HancomEventBridge.exe --moniker <exact ROT display name> "
+        L"[--process-id <PID>]\n"
         L"       HancomEventBridge.exe --self-test\n");
 }
 
@@ -477,10 +573,35 @@ int wmain(const int argument_count, wchar_t* arguments[]) {
         PrintUsage(stdout);
         return 0;
     }
-    if (argument_count != 3 || std::wcscmp(arguments[1], L"--moniker") != 0 ||
-        arguments[2][0] == L'\0') {
+    const bool has_moniker =
+        (argument_count == 3 || argument_count == 5) &&
+        std::wcscmp(arguments[1], L"--moniker") == 0 &&
+        arguments[2][0] != L'\0';
+    const bool has_process_id =
+        argument_count == 5 &&
+        std::wcscmp(arguments[3], L"--process-id") == 0;
+    if (!has_moniker || (argument_count == 5 && !has_process_id)) {
         PrintUsage(stderr);
         return 2;
+    }
+    std::optional<DWORD> target_process_id;
+    if (has_process_id) {
+        target_process_id = ParseProcessId(arguments[4]);
+        if (!target_process_id.has_value()) {
+            PrintUsage(stderr);
+            return 2;
+        }
+    }
+    const UniqueHandle target_process(
+        target_process_id.has_value()
+            ? OpenProcess(SYNCHRONIZE, FALSE, target_process_id.value())
+            : nullptr);
+    if (target_process_id.has_value() && target_process.Get() == nullptr) {
+        std::fwprintf(
+            stderr,
+            L"Target process watch unavailable for PID %lu (error=%lu)\n",
+            target_process_id.value(),
+            GetLastError());
     }
 
     const ComApartment apartment;
@@ -536,7 +657,7 @@ int wmain(const int argument_count, wchar_t* arguments[]) {
     }
 
     WriteReady(requested_moniker, source_iid);
-    const int pump_result = PumpUntilShutdown();
+    const int pump_result = PumpUntilShutdown(target_process.Get());
     result = connection_point->Unadvise(cookie);
     if (FAILED(result)) {
         std::fwprintf(

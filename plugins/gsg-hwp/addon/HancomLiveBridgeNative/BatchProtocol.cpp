@@ -1,5 +1,7 @@
 #include "BatchProtocol.h"
 
+#include "ProtocolEncoding.h"
+
 #include <WinCrypt.h>
 
 #include <climits>
@@ -11,6 +13,8 @@
 
 namespace hancom::batch {
 namespace {
+
+using hancom::encoding::EncodeUtf8Base64;
 
 constexpr size_t kMaximumPayloadCharacters = 8'000'000;
 constexpr size_t kMaximumOperations = 5'000;
@@ -78,54 +82,6 @@ bool DecodeUtf8Base64(const std::wstring& encoded, std::wstring* const decoded) 
                characterCount) == characterCount;
 }
 
-std::wstring EncodeUtf8Base64(const std::wstring& value) {
-    const int byteCount = WideCharToMultiByte(
-        CP_UTF8,
-        WC_ERR_INVALID_CHARS,
-        value.c_str(),
-        static_cast<int>(value.size()),
-        nullptr,
-        0,
-        nullptr,
-        nullptr);
-    if (byteCount < 0) {
-        return L"";
-    }
-    std::vector<BYTE> bytes(static_cast<size_t>(byteCount));
-    if (byteCount != 0) {
-        const int written = WideCharToMultiByte(
-            CP_UTF8,
-            WC_ERR_INVALID_CHARS,
-            value.c_str(),
-            static_cast<int>(value.size()),
-            reinterpret_cast<LPSTR>(bytes.data()),
-            byteCount,
-            nullptr,
-            nullptr);
-        if (written != byteCount) {
-            return L"";
-        }
-    }
-    DWORD encodedCount = 0;
-    if (!CryptBinaryToStringW(
-            bytes.data(),
-            static_cast<DWORD>(bytes.size()),
-            CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-            nullptr,
-            &encodedCount)) {
-        return L"";
-    }
-    std::vector<wchar_t> encoded(encodedCount);
-    if (!CryptBinaryToStringW(
-            bytes.data(),
-            static_cast<DWORD>(bytes.size()),
-            CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-            encoded.data(),
-            &encodedCount)) {
-        return L"";
-    }
-    return std::wstring(encoded.data());
-}
 
 bool Fail(Error* const error, const wchar_t* const message) {
     if (error != nullptr) {

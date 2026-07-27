@@ -93,17 +93,6 @@ bool ApplyTextStyle(Host* const host, const Style& style) {
     return true;
 }
 
-bool TextStyleCoveredByRegion(const Spec& spec, const Text& text) {
-    return std::any_of(
-        spec.regions.begin(),
-        spec.regions.end(),
-        [&](const Region& region) {
-            return region.styleIndex == text.styleIndex &&
-                region.top <= text.row && text.row < region.bottom &&
-                region.left <= text.column && text.column < region.right;
-        });
-}
-
 bool IntersectsPatchedAxis(
     const LONG start,
     const LONG span,
@@ -239,6 +228,17 @@ bool ExecutePatch(Host* const host, const Spec& spec) {
             return false;
         }
     }
+    for (const Text& text : spec.texts) {
+        const Style* const style = text.styleIndex >= 0
+            ? &spec.styles[static_cast<size_t>(text.styleIndex)]
+            : nullptr;
+        if (!host->GoToCell(text.row, text.column) ||
+            !host->Run(L"SelectAll", L"reference text patch") ||
+            (style != nullptr && !ApplyTextStyle(host, *style)) ||
+            !host->InsertText(text, style)) {
+            return false;
+        }
+    }
     Spec verifiedSpec = spec;
     verifiedSpec.patchColumns = patchColumns;
     verifiedSpec.patchRows = patchRows;
@@ -287,15 +287,16 @@ bool Execute(const actions::Command& command, Host* const host) noexcept {
             }
         }
         for (const Text& text : spec.texts) {
+            const Style* const style = text.styleIndex >= 0
+                ? &spec.styles[static_cast<size_t>(text.styleIndex)]
+                : nullptr;
             if (!host->GoToCell(text.row, text.column)) {
                 return false;
             }
-            if (text.styleIndex >= 0 &&
-                !TextStyleCoveredByRegion(spec, text) &&
-                !ApplyTextStyle(host, spec.styles[static_cast<size_t>(text.styleIndex)])) {
+            if (style != nullptr && !ApplyTextStyle(host, *style)) {
                 return false;
             }
-            if (!host->InsertText(text)) {
+            if (!host->InsertText(text, style)) {
                 return false;
             }
         }

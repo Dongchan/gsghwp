@@ -43,12 +43,12 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <DebugInformationFormat>None</DebugInformationFormat>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <ModuleDefinitionFile>$(ProjectDir)HancomLiveBridge.def</ModuleDefinitionFile>
@@ -57,6 +57,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ActionExecutor.cpp" />
+    <ClCompile Include="ActionTable.cpp" />
+    <ClCompile Include="ActionTextPatch.cpp" />
+    <ClCompile Include="ActionImageCaption.cpp" />
+    <ClCompile Include="ActionLifecycle.cpp" />
+    <ClCompile Include="ActionReferenceLayout.cpp" />
+    <ClCompile Include="ActionDispatch.cpp" />
     <ClCompile Include="ActionProtocol.cpp" />
     <ClCompile Include="BatchAutomation.cpp" />
     <ClCompile Include="BatchExecutor.cpp" />
@@ -64,6 +70,8 @@
     <ClCompile Include="Bridge.cpp" />
     <ClCompile Include="BridgeStatus.cpp" />
     <ClCompile Include="CellTopology.cpp" />
+    <ClCompile Include="ComError.cpp" />
+    <ClCompile Include="ComState.cpp" />
     <ClCompile Include="DispatchInvoke.cpp" />
     <ClCompile Include="DocumentLifecycle.cpp" />
     <ClCompile Include="LiveInspection.cpp" />
@@ -80,6 +88,7 @@
     <ClCompile Include="OfficialApiState.cpp" />
     <ClCompile Include="OfficialApiVariant.cpp" />
     <ClCompile Include="ParagraphFormatting.cpp" />
+    <ClCompile Include="ProtocolEncoding.cpp" />
     <ClCompile Include="ReferenceLayoutPayloadArrays.cpp" />
     <ClCompile Include="ReferenceLayoutGapSpec.cpp" />
     <ClCompile Include="ReferenceLayoutSpec.cpp" />
@@ -92,12 +101,15 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ActionExecutor.h" />
+    <ClInclude Include="ActionExecutorInternal.h" />
     <ClInclude Include="ActionProtocol.h" />
     <ClInclude Include="BatchAutomation.h" />
     <ClInclude Include="BatchExecutor.h" />
     <ClInclude Include="BatchProtocol.h" />
     <ClInclude Include="BridgeStatus.h" />
     <ClInclude Include="CellTopology.h" />
+    <ClInclude Include="ComError.h" />
+    <ClInclude Include="ComState.h" />
     <ClInclude Include="DispatchInvoke.h" />
     <ClInclude Include="DocumentLifecycle.h" />
     <ClInclude Include="LiveInspection.h" />
@@ -113,6 +125,7 @@
     <ClInclude Include="OfficialApiState.h" />
     <ClInclude Include="OfficialApiVariant.h" />
     <ClInclude Include="ParagraphFormatting.h" />
+    <ClInclude Include="ProtocolEncoding.h" />
     <ClInclude Include="ReferenceLayoutPayloadArrays.h" />
     <ClInclude Include="ReferenceLayoutGapSpec.h" />
     <ClInclude Include="ReferenceLayoutSpec.h" />

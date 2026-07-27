@@ -1,5 +1,6 @@
 #include "TableInspection.h"
 
+#include "ComState.h"
 #include "DispatchInvoke.h"
 
 #include <atlbase.h>
@@ -27,6 +28,17 @@ bool Fail(std::wstring* const error, const std::wstring& message) {
         *error = message;
     }
     return false;
+}
+
+bool FailWithCode(
+    std::wstring* const error,
+    std::wstring* const errorCode,
+    const wchar_t* const code,
+    const wchar_t* const message) {
+    if (errorCode != nullptr) {
+        *errorCode = code;
+    }
+    return Fail(error, message);
 }
 
 bool DispatchProperty(
@@ -164,30 +176,44 @@ bool CallBoolean(
     return SUCCEEDED(AsBool(raw, &value)) && value;
 }
 
+bool InvokeAction(
+    IDispatch* const action,
+    const wchar_t* const name,
+    bool* const returned) {
+    CComVariant raw;
+    if (returned == nullptr ||
+        FAILED(Method(action, L"Run", {CComVariant(name)}, &raw))) {
+        return false;
+    }
+    if (raw.vt == VT_EMPTY) {
+        *returned = true;
+        return true;
+    }
+    return SUCCEEDED(AsBool(raw, returned));
+}
+
 bool RunAction(IDispatch* const action, const wchar_t* const name) {
-    return CallBoolean(action, L"Run", {CComVariant(name)});
+    bool returned = false;
+    return InvokeAction(action, name, &returned) && returned;
 }
 
 bool SetPosition(IDispatch* const hwp, const LONG listId) {
-    return CallBoolean(
+    const hancom::com_state::PositionResult result = hancom::com_state::ApplyPosition(
         hwp,
-        L"SetPos",
-        {CComVariant(listId), CComVariant(0L), CComVariant(0L)});
+        hancom::com_state::Position{listId, 0, 0},
+        hancom::com_state::EmptyPositionResult::TreatAsSuccess);
+    return SUCCEEDED(result.invokeStatus) && SUCCEEDED(result.conversionStatus) &&
+        result.positioned;
 }
 
 bool GetPositionList(IDispatch* const hwp, LONG* const listId) {
-    LONG paragraph = 0;
-    LONG character = 0;
-    CComVariant list;
-    list.vt = VT_I4 | VT_BYREF;
-    list.plVal = listId;
-    CComVariant para;
-    para.vt = VT_I4 | VT_BYREF;
-    para.plVal = &paragraph;
-    CComVariant position;
-    position.vt = VT_I4 | VT_BYREF;
-    position.plVal = &character;
-    return SUCCEEDED(Method(hwp, L"GetPos", {list, para, position}, nullptr));
+    hancom::com_state::Position position;
+    const HRESULT status = hancom::com_state::CapturePosition(hwp, &position);
+    if (FAILED(status)) {
+        return false;
+    }
+    *listId = position.list;
+    return true;
 }
 
 bool ControlInstanceId(IDispatch* const control, std::wstring* const id) {
@@ -211,6 +237,18 @@ bool SelectedTableMatches(IDispatch* const hwp, const std::wstring& tableInstanc
     return DispatchProperty(hwp, L"CurSelectedCtrl", selected) &&
         ControlType(selected, &type) && type == L"tbl" &&
         ControlInstanceId(selected, &instance) && instance == tableInstanceId;
+}
+
+bool SelectTableFront(
+    IDispatch* const hwp,
+    IDispatch* const action,
+    const std::wstring& tableInstanceId) {
+    bool returned = false;
+    if (!InvokeAction(action, L"SelectCtrlFront", &returned)) {
+        return false;
+    }
+    static_cast<void>(returned);
+    return SelectedTableMatches(hwp, tableInstanceId);
 }
 
 bool FindControl(
@@ -264,8 +302,7 @@ bool SelectExactTable(
     CComPtr<IDispatch> control;
     return FindControl(hwp, tableInstanceId, control) &&
         MoveToControl(hwp, control) &&
-        RunAction(action, L"SelectCtrlFront") &&
-        SelectedTableMatches(hwp, tableInstanceId);
+        SelectTableFront(hwp, action, tableInstanceId);
 }
 
 bool ParentMatches(IDispatch* const hwp, const std::wstring& tableInstanceId) {
@@ -273,6 +310,39 @@ bool ParentMatches(IDispatch* const hwp, const std::wstring& tableInstanceId) {
     std::wstring parentId;
     return DispatchProperty(hwp, L"ParentCtrl", parent) &&
         ControlInstanceId(parent, &parentId) && parentId == tableInstanceId;
+}
+
+bool TableContextMatches(
+    IDispatch* const hwp,
+    const std::wstring& tableInstanceId) {
+    LONG currentList = 0;
+    return GetPositionList(hwp, &currentList) &&
+        currentList >= 0 && ParentMatches(hwp, tableInstanceId);
+}
+
+bool RunTableNavigationAction(
+    IDispatch* const hwp,
+    IDispatch* const action,
+    const wchar_t* const name,
+    const std::wstring& tableInstanceId) {
+    bool returned = false;
+    if (!InvokeAction(action, name, &returned)) {
+        return false;
+    }
+    static_cast<void>(returned);
+    return TableContextMatches(hwp, tableInstanceId);
+}
+
+bool EnterSelectedTable(
+    IDispatch* const hwp,
+    IDispatch* const action,
+    const std::wstring& tableInstanceId) {
+    bool returned = false;
+    if (!InvokeAction(action, L"ShapeObjTextBoxEdit", &returned)) {
+        return false;
+    }
+    static_cast<void>(returned);
+    return TableContextMatches(hwp, tableInstanceId);
 }
 
 LONG ExtendTableListEnd(
@@ -385,7 +455,11 @@ bool InferCellSpans(
         if (!SetPosition(hwp, cell.listId)) {
             return Fail(error, L"table cell could not be positioned for row span inspection");
         }
-        if (RunAction(action, L"TableLowerCell") && ParentMatches(hwp, tableInstanceId)) {
+        if (RunTableNavigationAction(
+                hwp,
+                action,
+                L"TableLowerCell",
+                tableInstanceId)) {
             const std::wstring nextAddress = CellAddress(hwp);
             LONG nextRow = 0;
             LONG nextColumn = 0;
@@ -398,7 +472,11 @@ bool InferCellSpans(
         if (!SetPosition(hwp, cell.listId)) {
             return Fail(error, L"table cell could not be positioned for column span inspection");
         }
-        if (RunAction(action, L"TableRightCell") && ParentMatches(hwp, tableInstanceId)) {
+        if (RunTableNavigationAction(
+                hwp,
+                action,
+                L"TableRightCell",
+                tableInstanceId)) {
             const std::wstring nextAddress = CellAddress(hwp);
             LONG nextRow = 0;
             LONG nextColumn = 0;
@@ -608,20 +686,18 @@ bool EnterTable(
     IDispatch* const hwp,
     IDispatch* const action,
     const std::wstring& tableInstanceId) {
-    if (ParentMatches(hwp, tableInstanceId)) {
+    if (TableContextMatches(hwp, tableInstanceId)) {
         return true;
     }
     if (SelectExactTable(hwp, action, tableInstanceId) &&
-        RunAction(action, L"ShapeObjTextBoxEdit") &&
-        ParentMatches(hwp, tableInstanceId)) {
+        EnterSelectedTable(hwp, action, tableInstanceId)) {
         return true;
     }
     CComPtr<IDispatch> control;
     return FindControl(hwp, tableInstanceId, control) &&
         MoveToControl(hwp, control) &&
-        RunAction(action, L"SelectCtrlFront") &&
-        RunAction(action, L"ShapeObjTextBoxEdit") &&
-        ParentMatches(hwp, tableInstanceId);
+        SelectTableFront(hwp, action, tableInstanceId) &&
+        EnterSelectedTable(hwp, action, tableInstanceId);
 }
 
 }
@@ -630,24 +706,72 @@ bool InspectTableCells(
     IDispatch* const hwp,
     const std::wstring& tableInstanceId,
     std::vector<TableCellRecord>* const cells,
-    std::wstring* const error) noexcept {
+    std::wstring* const error,
+    std::wstring* const errorCode) noexcept {
     try {
         if (hwp == nullptr || cells == nullptr || tableInstanceId.empty()) {
             return Fail(error, L"table inspection arguments are invalid");
         }
+        if (errorCode != nullptr) {
+            *errorCode = L"TABLE_INSPECTION";
+        }
         CComPtr<IDispatch> action;
         CComPtr<IDispatch> info;
-        if (!DispatchProperty(hwp, L"HAction", action) ||
-            !DocumentInfo(hwp, info) ||
-            !EnterTable(hwp, action, tableInstanceId) ||
-            !RunAction(action, L"TableColEnd") ||
-            !RunAction(action, L"TableColPageDown")) {
-            return Fail(error, L"table edit context is unavailable");
+        if (!DispatchProperty(hwp, L"HAction", action)) {
+            return FailWithCode(
+                error,
+                errorCode,
+                L"TABLE_HACTION",
+                L"table HAction property is unavailable");
+        }
+        if (!DocumentInfo(hwp, info)) {
+            return FailWithCode(
+                error,
+                errorCode,
+                L"TABLE_DOCUMENT_INFO",
+                L"table document information is unavailable");
+        }
+        if (!EnterTable(hwp, action, tableInstanceId)) {
+            return FailWithCode(
+                error,
+                errorCode,
+                L"TABLE_EDIT_CONTEXT",
+                L"table edit context is unavailable for the target instance");
+        }
+        if (!RunTableNavigationAction(
+                hwp,
+                action,
+                L"TableColEnd",
+                tableInstanceId)) {
+            return FailWithCode(
+                error,
+                errorCode,
+                L"TABLE_COLUMN_END",
+                L"table column-end navigation did not preserve the target context");
+        }
+        if (!RunTableNavigationAction(
+                hwp,
+                action,
+                L"TableColPageDown",
+                tableInstanceId)) {
+            return FailWithCode(
+                error,
+                errorCode,
+                L"TABLE_PAGE_DOWN",
+                L"table page-down navigation did not preserve the target context");
         }
         LONG lastList = 0;
         if (!GetPositionList(hwp, &lastList) ||
-            !RunAction(action, L"TableColBegin") ||
-            !RunAction(action, L"TableColPageUp")) {
+            !RunTableNavigationAction(
+                hwp,
+                action,
+                L"TableColBegin",
+                tableInstanceId) ||
+            !RunTableNavigationAction(
+                hwp,
+                action,
+                L"TableColPageUp",
+                tableInstanceId)) {
             return Fail(error, L"table list range could not be read");
         }
         LONG firstList = 0;
@@ -676,7 +800,11 @@ bool InspectTableCells(
             if (!CurrentPage(info, &startPage) ||
                 !ReadCurrentCellSize(hwp, &width, &height) ||
                 !ReadCurrentListText(hwp, &text) ||
-                !RunAction(action, L"MoveListEnd") ||
+                !RunTableNavigationAction(
+                    hwp,
+                    action,
+                    L"MoveListEnd",
+                    tableInstanceId) ||
                 !CurrentPage(info, &endPage)) {
                 return Fail(error, L"table cell text or page range could not be read");
             }

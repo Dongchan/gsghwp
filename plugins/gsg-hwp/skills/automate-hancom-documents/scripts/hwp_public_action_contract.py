@@ -2,16 +2,17 @@ from __future__ import annotations
 
 # noqa: E501  # noqa: SIZE_OK — public action schemas and their opaque target store form one boundary.
 
+import ntpath
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Annotated, Final, Literal, Protocol, final
 from uuid import uuid4
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, model_validator
 from pydantic_core import PydanticCustomError
 
-from hwp_color_normalization import canonical_rgb_hex, parse_rgb_color
+from hwp_color_normalization import ColorInput, canonical_rgb_hex
 from hwp_live_structure_contract import FastPageInspection
 from hwp_live_native_action_models import NativePosition
 from hwp_live_native_format_inputs import TextFormatSpec
@@ -30,6 +31,16 @@ from hwp_operation_contract import (
 _MAX_INSPECTED_TARGETS: Final = 256
 
 
+def _document_path_key(document_path: str | None) -> str | None:
+    if not document_path:
+        return None
+    return ntpath.normcase(ntpath.normpath(document_path))
+
+
+def _same_document_path(first: str | None, second: str | None) -> bool:
+    return _document_path_key(first) == _document_path_key(second)
+
+
 type PublicImageInsertTarget = Literal["selection", "document_end"]
 type PublicObjectKind = Literal["table", "picture"]
 type PublicTextAlignment = Literal["left", "center", "right", "justify", "inherit"]
@@ -38,7 +49,7 @@ type PublicImageWidth = Annotated[float, Field(ge=1, le=250)]
 type PublicImageHeight = Annotated[float, Field(ge=1, le=350)]
 type PublicFontName = Annotated[str, Field(min_length=1, max_length=100)]
 type PublicFontSize = Annotated[float, Field(ge=1, le=96)]
-type PublicTextColor = Annotated[str, Field(min_length=1, max_length=50)]
+type PublicTextColor = ColorInput
 type PublicLineSpacing = Annotated[int, Field(ge=50, le=500)]
 type PublicReplacementText = Annotated[str, Field(max_length=1_000_000)]
 type PublicExpectedText = Annotated[str, Field(max_length=1_000_000)]
@@ -47,10 +58,7 @@ type PublicOperationId = Annotated[
     Field(
         min_length=1,
         max_length=128,
-        description=(
-            "호출자가 논리 작업마다 한 번 생성하고 응답 유실 후 재시도할 때 "
-            "그대로 재사용하는 안정 ID. 저널 보존 만료 후에도 다른 작업에 재사용하지 않습니다"
-        ),
+        description="논리 작업별 고유 ID. 같은 payload 재시도에만 재사용합니다.",
     ),
 ]
 
@@ -89,6 +97,13 @@ class PublicActionExecutor(Protocol):
         inputs: HwpOperateInputs,
         guards: HwpOperateGuards | None,
     ) -> OperationResult: ...
+
+    async def inspect_page_fast(
+        self,
+        document_selector: str | None,
+        page: int,
+        include_cells: bool,
+    ) -> FastPageInspection: ...
 
 
 class PublicSelectionExecutor(PublicActionExecutor, Protocol):
@@ -192,19 +207,6 @@ class PublicTextFormattingInput(ContractModel):
     alignment: PublicTextAlignment = "inherit"
     line_spacing: PublicLineSpacing | None = None
 
-    @field_validator("text_color")
-    @classmethod
-    def normalize_text_color(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        parsed = parse_rgb_color(value)
-        if parsed is None:
-            raise PydanticCustomError(
-                "public_text_color",
-                "글자색은 이름, #RRGGBB, rgb(r,g,b), 또는 r,g,b 형식이어야 합니다",
-            )
-        return canonical_rgb_hex(parsed)
-
     @model_validator(mode="after")
     def require_format(self) -> PublicTextFormattingInput:
         if (
@@ -235,7 +237,7 @@ class PublicTextFormattingInput(ContractModel):
         if self.font_size_pt is not None:
             parameters["font_size_pt"] = self.font_size_pt
         if self.text_color is not None:
-            parameters["text_color"] = self.text_color
+            parameters["text_color"] = canonical_rgb_hex(self.text_color)
         if self.alignment != "inherit":
             parameters["alignment"] = self.alignment
         if self.line_spacing is not None:
@@ -243,14 +245,11 @@ class PublicTextFormattingInput(ContractModel):
         return parameters
 
     def to_live(self) -> TextFormatSpec:
-        color = None if self.text_color is None else parse_rgb_color(self.text_color)
-        if self.text_color is not None and color is None:
-            raise RuntimeError("검증된 공개 글자색을 내부 RGB로 변환하지 못했습니다")
         return TextFormatSpec(
             self.bold,
             self.font_name,
             self.font_size_pt,
-            color,
+            self.text_color,
             self.alignment,
             self.line_spacing,
         )
@@ -273,11 +272,57 @@ class PublicObjectTargetReference:
 
 @final
 class PublicObjectTargetStore:
-    __slots__ = ("_inspected_targets", "_targets")
+    __slots__ = ("_inspected_document", "_inspected_targets", "_targets")
 
     def __init__(self) -> None:
         self._targets: dict[str, PublicObjectTargetReference] = {}
         self._inspected_targets: dict[str, PublicObjectTargetReference] = {}
+        self._inspected_document: tuple[int, str | None] | None = None
+
+    def _clear_targets(self) -> None:
+        self._targets.clear()
+        self._inspected_targets.clear()
+
+    def _prepare_candidate_document(self, document_path: str | None) -> None:
+        inspected_document = self._inspected_document
+        candidate_path = _document_path_key(document_path)
+        if (
+            inspected_document is not None
+            and candidate_path is not None
+            and inspected_document[1] != candidate_path
+        ):
+            self._clear_targets()
+            self._inspected_document = None
+
+    def _prepare_inspection(self, inspection: FastPageInspection) -> None:
+        document = (
+            inspection.document_id,
+            _document_path_key(inspection.full_name),
+        )
+        changed_document = (
+            self._inspected_document is not None
+            and self._inspected_document != document
+        )
+        if self._inspected_document is None and self._targets:
+            candidate_paths = {
+                _document_path_key(target.document_path)
+                for target in self._targets.values()
+            }
+            changed_document = candidate_paths != {document[1]}
+        if changed_document:
+            self._clear_targets()
+        self._inspected_document = document
+
+    def _remember_inspected(
+        self,
+        instance_id: str,
+        target: PublicObjectTargetReference,
+    ) -> None:
+        _ = self._inspected_targets.pop(instance_id, None)
+        self._inspected_targets[instance_id] = target
+        while len(self._inspected_targets) > _MAX_INSPECTED_TARGETS:
+            oldest = next(iter(self._inspected_targets))
+            del self._inspected_targets[oldest]
 
     def _reference(self, target_id: str) -> PublicObjectTargetReference | None:
         return self._targets.get(target_id) or self._inspected_targets.get(target_id)
@@ -297,9 +342,25 @@ class PublicObjectTargetStore:
                 ),
             )
         reference = self._reference(target_id)
-        if reference is None or reference.kind != "picture":
+        if reference is None:
+            if target_id.startswith("hwp-target-"):
+                return None
+            return CanonicalPublicObjectTarget(
+                document_path,
+                HwpOperateTarget(
+                    kind="picture",
+                    binding="active",
+                    match_policy="return_candidates",
+                    control_instance_id=target_id,
+                ),
+            )
+        if reference.kind != "picture":
             return None
-        if document_path is not None and reference.document_path != document_path:
+        if (
+            document_path is not None
+            and reference.document_path is not None
+            and not _same_document_path(reference.document_path, document_path)
+        ):
             return None
         return CanonicalPublicObjectTarget(
             reference.document_path,
@@ -329,8 +390,22 @@ class PublicObjectTargetStore:
             )
         reference = self._reference(target_id)
         if reference is None:
-            return None
-        if document_path is not None and reference.document_path != document_path:
+            if target_id.startswith("hwp-target-"):
+                return None
+            return CanonicalPublicObjectTarget(
+                document_path,
+                HwpOperateTarget(
+                    kind="control",
+                    binding="active",
+                    match_policy="return_candidates",
+                    control_instance_id=target_id,
+                ),
+            )
+        if (
+            document_path is not None
+            and reference.document_path is not None
+            and not _same_document_path(reference.document_path, document_path)
+        ):
             return None
         return CanonicalPublicObjectTarget(
             reference.document_path,
@@ -351,6 +426,7 @@ class PublicObjectTargetStore:
     ) -> tuple[str, ...]:
         if not candidates:
             return ()
+        self._prepare_candidate_document(document_path)
         self._targets.clear()
         target_ids: list[str] = []
         for candidate in candidates[:3]:
@@ -370,21 +446,28 @@ class PublicObjectTargetStore:
         return tuple(target_ids)
 
     def remember_inspection(self, inspection: FastPageInspection) -> None:
-        self._inspected_targets.clear()
+        self._prepare_inspection(inspection)
         counts: dict[PublicObjectKind, int] = {"table": 0, "picture": 0}
-        for control in inspection.controls[:_MAX_INSPECTED_TARGETS]:
+        remembered = 0
+        for control in inspection.controls:
             kind = _NATIVE_CONTROL_KINDS.get(control.control_type)
             if kind is None:
                 continue
+            remembered += 1
+            if remembered > _MAX_INSPECTED_TARGETS:
+                break
             counts[kind] += 1
-            self._inspected_targets[control.instance_id] = PublicObjectTargetReference(
-                inspection.full_name,
-                kind,
-                inspection.page,
-                counts[kind],
+            self._remember_inspected(
                 control.instance_id,
+                PublicObjectTargetReference(
+                    inspection.full_name,
+                    kind,
+                    inspection.page,
+                    counts[kind],
+                    control.instance_id,
+                ),
             )
 
     def clear(self) -> None:
-        self._targets.clear()
-        self._inspected_targets.clear()
+        self._clear_targets()
+        self._inspected_document = None

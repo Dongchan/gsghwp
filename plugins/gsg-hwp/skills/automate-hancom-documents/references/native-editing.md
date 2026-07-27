@@ -13,11 +13,11 @@ For insertion without a text selection, `hwp_insert_layout(layout={"target": "cu
 Use `hwp_insert_layout` for editable paragraphs, tables, and individual images at a collapsed live cursor (`target=current`) or on a new page immediately after a numbered page (`target=after_page`, `page=N`). The `after_page` target brackets the inserted content with page breaks, so pass content blocks without adding another page break. Use `hwp_append_layout` only for the document end. QA-only `hwp_apply_layout` is reserved for inspected insertion-position diagnostics.
 
 - Reuse styles returned by `hwp_list_styles`.
-- For a table caption, provide only the title text. The engine creates the native automatic number field and copies the document's caption paragraph formatting.
+- For a table caption, provide only the title text. The engine creates the native automatic number field and copies the document's caption paragraph formatting. When the requested caption style matches the nearest existing hierarchical table caption, a layout insertion also inherits that numbering format so the hierarchy continues; never include the number prefix in the title.
 - Initialize the table anchor and cells from the document's base style. Set left margin, right margin, and indentation explicitly to zero when inherited offsets are not intended.
 - Define merges, borders, cell padding, alignment, and vertical alignment as native properties.
 - A requested 1 mm row or column remains explicit through the MCP and native command path. For an actual 1 mm cell, also use 1 pt cell text, 50% line spacing, and 0 mm padding; otherwise HWP expands the cell to fit its content. Read back the table dimensions and report HWP's 283-HWPUNIT rounding (about 0.998 mm per equal row or column).
-- Image width and height are bounding boxes. The inserted image preserves its original aspect ratio.
+- `hwp_insert_image` and `hwp_replace_image` accept optional `width_mm` and `height_mm`. Omit both to leave size unspecified, or provide both as a bounding box; a one-sided size is rejected. Fitting preserves the image's original aspect ratio.
 
 ## Existing tables
 

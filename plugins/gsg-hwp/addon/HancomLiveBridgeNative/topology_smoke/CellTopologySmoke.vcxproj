@@ -43,6 +43,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -50,6 +51,7 @@
     <ClCompile Include="CellTopologySmoke.cpp" />
     <ClCompile Include="ReferenceLayoutExecutorSmoke.cpp" />
     <ClCompile Include="ReferenceLayoutPatchSmoke.cpp" />
+    <ClCompile Include="ReferenceLayoutPatchTextSmoke.cpp" />
     <ClCompile Include="ReferenceLayoutSpecSmoke.cpp" />
     <ClCompile Include="..\CellTopology.cpp" />
     <ClCompile Include="..\ReferenceLayoutCommands.cpp" />

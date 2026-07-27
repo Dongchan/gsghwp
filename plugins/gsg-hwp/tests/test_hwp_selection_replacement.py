@@ -125,7 +125,12 @@ def test_production_replacement_tool_accepts_only_current_selection_and_text() -
 
     assert schema.required == ("operation_id", "replacement")
     assert frozenset(schema.properties) == frozenset(
-        ("operation_id", "replacement", "document_path")
+        (
+            "operation_id",
+            "replacement",
+            "document_path",
+            "document_selector",
+        )
     )
 
 

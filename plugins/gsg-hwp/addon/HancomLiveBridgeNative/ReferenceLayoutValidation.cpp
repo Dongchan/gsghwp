@@ -46,7 +46,7 @@ bool Validate(const Spec& spec, actions::Error* const error) noexcept {
         if (spec.patch) {
             if (spec.targetControlId.empty() ||
                 (spec.patchColumns.empty() && spec.patchRows.empty() &&
-                 spec.regions.empty() && spec.edges.empty()) ||
+                 spec.regions.empty() && spec.edges.empty() && spec.texts.empty()) ||
                 spec.patchColumns.size() > static_cast<size_t>(spec.columns) ||
                 spec.patchRows.size() > static_cast<size_t>(spec.rows)) {
                 return Fail(error, L"reference-layout patch target or change set is invalid");
@@ -60,9 +60,8 @@ bool Validate(const Spec& spec, actions::Error* const error) noexcept {
                 }) ||
                 std::any_of(rows.begin(), rows.end(), [&](const LONG value) {
                     return value < 0 || value >= spec.rows;
-                }) ||
-                !spec.texts.empty()) {
-                return Fail(error, L"reference-layout patch indexes or text payload are invalid");
+                })) {
+                return Fail(error, L"reference-layout patch indexes are invalid");
             }
         } else if (!spec.targetControlId.empty() ||
                    !spec.patchColumns.empty() ||

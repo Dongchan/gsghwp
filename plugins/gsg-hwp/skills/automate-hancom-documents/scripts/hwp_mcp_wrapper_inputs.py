@@ -4,10 +4,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, ValidateAs, model_validator
+from pydantic import Field, model_validator
 
+from hwp_color_normalization import ColorInput
 from hwp_live_contract import LayoutBlock, LayoutPlan
-from hwp_live_values import Alignment, ContractModel, Rgb, RgbChannel
+from hwp_live_values import Alignment, ContractModel, Rgb, RgbObject
 from hwp_operation_contract import HwpOperateAssets, OperationInputValue
 from hwp_priority_recipe_contract import RecipePosition
 
@@ -52,21 +53,9 @@ class HwpWrapperInputError(ValueError):
     pass
 
 
-class HwpRgbObject(ContractModel):
-    r: RgbChannel
-    g: RgbChannel
-    b: RgbChannel
-
-
-def _rgb_tuple(value: HwpRgbObject) -> Rgb:
-    return value.r, value.g, value.b
-
-
-type HwpRgbObjectValue = Annotated[
-    Rgb,
-    ValidateAs(HwpRgbObject, _rgb_tuple),
-]
-type HwpRgb = Rgb | HwpRgbObjectValue
+HwpRgbObject = RgbObject
+type HwpRgbObjectValue = ColorInput
+type HwpRgb = ColorInput
 
 
 def _rgb_parameter(value: Rgb) -> str:

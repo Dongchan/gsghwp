@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from collections import deque
 from ctypes import WINFUNCTYPE, WinDLL, wintypes
+from dataclasses import dataclass
 from importlib import import_module
 from threading import Event, Lock, Thread
-from typing import Protocol, final, runtime_checkable
+from time import monotonic_ns
+from typing import Final, Protocol, final, runtime_checkable
 
 from hwp_errors import HwpLiveError
 
@@ -82,27 +85,67 @@ class ChangeSignal(Protocol):
     def stop(self) -> None: ...
 
 
+@runtime_checkable
+class HwpEventSignal(Protocol):
+    def events_after(self, after_sequence: int) -> tuple[HwpEventObservation, ...]: ...
+
+
+_EVENT_HISTORY_LIMIT: Final = 256
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class HwpEventObservation:
+    sequence: int
+    name: str
+    document_id: int | None
+    observed_at_monotonic_ns: int
+
+
 @final
 class ChangeNotifier:
-    __slots__ = ("_changed", "_lock", "_sequence")
+    __slots__ = ("_changed", "_events", "_lock", "_sequence")
 
     _changed: Event
+    _events: deque[HwpEventObservation]
     _lock: Lock
     _sequence: int
 
     def __init__(self) -> None:
         self._changed = Event()
+        self._events = deque(maxlen=_EVENT_HISTORY_LIMIT)
         self._lock = Lock()
         self._sequence = 0
 
-    def notify(self) -> None:
+    def notify(
+        self,
+        name: str | None = None,
+        document_id: int | None = None,
+    ) -> None:
         with self._lock:
             self._sequence += 1
+            if name is not None:
+                self._events.append(
+                    HwpEventObservation(
+                        sequence=self._sequence,
+                        name=name,
+                        document_id=document_id,
+                        observed_at_monotonic_ns=monotonic_ns(),
+                    )
+                )
         self._changed.set()
 
     def sequence(self) -> int:
         with self._lock:
             return self._sequence
+
+    def events_after(self, after_sequence: int) -> tuple[HwpEventObservation, ...]:
+        with self._lock:
+            return tuple(
+                observation
+                for observation in self._events
+                if observation.sequence > after_sequence
+            )
 
     def wait(self, after_sequence: int, timeout_seconds: float) -> int:
         with self._lock:
@@ -242,6 +285,9 @@ class WinEventChangeSignal:
     def sequence(self) -> int:
         return self._notifier.sequence()
 
+    def events_after(self, after_sequence: int) -> tuple[HwpEventObservation, ...]:
+        return self._notifier.events_after(after_sequence)
+
     def wait(self, after_sequence: int, timeout_seconds: float) -> int:
         return self._notifier.wait(after_sequence, timeout_seconds)
 
@@ -251,7 +297,9 @@ class WinEventChangeSignal:
         if thread is not None:
             thread.join(timeout=1.0)
             if thread.is_alive():
-                raise HwpLiveError("Windows 이벤트 감시 스레드를 안전하게 종료하지 못했습니다")
+                raise HwpLiveError(
+                    "Windows 이벤트 감시 스레드를 안전하게 종료하지 못했습니다"
+                )
         self._thread = None
         self._callback = None
         if self._unhook_failed:

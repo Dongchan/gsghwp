@@ -278,7 +278,8 @@ def test_render_diff_does_not_treat_offset_shadow_as_the_expected_border(
 
     assert missing == ()
     assert [
-        (edge.orientation, edge.line, edge.start, edge.end) for edge in unexpected
+        (edge.orientation, edge.line, edge.start, edge.end)
+        for edge in unexpected
     ] == [("horizontal", 1, 0, 1)]
     assert gate.passed is False
 
@@ -354,9 +355,7 @@ def test_patch_compiles_without_recreating_the_table() -> None:
                 line_spacing_percent=100,
             ),
         ),
-        style_regions=(
-            StyleRegion(top=0, left=0, bottom=1, right=2, style_key="body"),
-        ),
+        style_regions=(StyleRegion(top=0, left=0, bottom=1, right=2, style_key="body"),),
         edges=(
             VisibleEdge(
                 orientation="horizontal",
@@ -396,7 +395,7 @@ def test_patch_compiles_without_recreating_the_table() -> None:
     payload = encode_action_request(
         NativeActionRequest(
             document_id=1,
-            full_name=r"C:\GSG_HWP_QA\sample.hwp",
+            full_name=r"D:\samples\reference.hwp",
             commands=(command,),
         )
     )

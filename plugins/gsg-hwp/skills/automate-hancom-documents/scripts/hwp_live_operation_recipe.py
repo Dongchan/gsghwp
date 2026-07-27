@@ -8,11 +8,19 @@ from hwp_document_style_profile import resolve_layout_style_profile
 from hwp_errors import HwpLiveError
 from hwp_layout_preflight import preflight_layout
 from hwp_live_api import ShapeValue
-from hwp_live_contract import LayoutPlan, PageBreakBlock
+from hwp_live_caption import (
+    caption_format_sources,
+    find_hierarchical_table_caption_source,
+)
+from hwp_live_contract import DocumentStyleList, LayoutPlan, PageBreakBlock
 from hwp_live_document_edit_commands import build_delete_page_commands
 from hwp_live_inspection import inspect_styles
 from hwp_live_layout import prepare_layout_assets
-from hwp_live_native_action_contract import encode_action_request
+from hwp_live_native_action_contract import (
+    NativeActionFailure,
+    NativeActionFailureEvidence,
+    encode_action_request,
+)
 from hwp_live_native_action_models import NativePosition
 from hwp_live_native_action_results import NativeActionResult, NativeSnapshot
 from hwp_live_native_batch import (
@@ -20,7 +28,12 @@ from hwp_live_native_batch import (
     inspect_native_page,
     read_native_snapshot,
 )
-from hwp_live_native_layout import NativeLayoutContext, build_native_layout_request
+from hwp_live_native_layout import (
+    NativeLayoutContext,
+    NativeLayoutExecutionPlan,
+    build_native_layout_execution_plan,
+    build_native_layout_request,
+)
 from hwp_live_operation_recipe_contract import (
     is_document_end_layout_intent as is_document_end_layout_intent,
     layout_operation_result,
@@ -39,6 +52,139 @@ from hwp_reference_layout_geometry import (
 )
 from hwp_reference_layout_contract import ReferenceLayoutBlock
 from hwp_reference_layout_patch import ReferenceLayoutPatchBlock
+from hwp_live_table_contract import TableBlock
+
+
+class _LayoutBatchFailure(HwpLiveError):
+    error: HwpLiveError
+    batch_index: int
+    completed_batches: int
+    commands_completed: int
+    elapsed_microseconds: int
+    completed_group_keys: frozenset[int]
+
+    def __init__(
+        self,
+        error: HwpLiveError,
+        *,
+        batch_index: int,
+        completed_batches: int,
+        commands_completed: int,
+        elapsed_microseconds: int,
+        completed_group_keys: set[int],
+    ) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.batch_index = batch_index
+        self.completed_batches = completed_batches
+        self.commands_completed = commands_completed
+        self.elapsed_microseconds = elapsed_microseconds
+        self.completed_group_keys = frozenset(completed_group_keys)
+
+
+def _merge_native_results(
+    first: NativeActionResult,
+    second: NativeActionResult,
+) -> NativeActionResult:
+    return replace(
+        first,
+        commands_executed=first.commands_executed + second.commands_executed,
+        actions_executed=first.actions_executed + second.actions_executed,
+        text_insertions=first.text_insertions + second.text_insertions,
+        image_insertions=first.image_insertions + second.image_insertions,
+        elapsed_microseconds=(first.elapsed_microseconds + second.elapsed_microseconds),
+        created_control_ids=(first.created_control_ids + second.created_control_ids),
+        call_results=first.call_results + second.call_results,
+        image_timing_count=(first.image_timing_count + second.image_timing_count),
+        image_max_microseconds=max(
+            first.image_max_microseconds,
+            second.image_max_microseconds,
+        ),
+        image_total_microseconds=(
+            first.image_total_microseconds + second.image_total_microseconds
+        ),
+    )
+
+
+def _layout_batch_failure_result(
+    query: str,
+    plan: LayoutPlan,
+    execution: NativeLayoutExecutionPlan,
+    before: NativeSnapshot,
+    native_protocol: int,
+    lookup_microseconds: int,
+    failure: _LayoutBatchFailure,
+) -> OperationResult:
+    error = failure.error
+    partial_mutation: bool | None = (
+        True
+        if failure.completed_batches > 0
+        else error.partial_mutation
+        if isinstance(error, NativeActionFailure)
+        else None
+    )
+    retry_safe = (
+        isinstance(error, NativeActionFailure)
+        and error.retry_safe
+        and partial_mutation is False
+    )
+    completed_addresses = execution.completed_addresses(
+        set(failure.completed_group_keys)
+    )
+    failed_step = (
+        error.failed_step
+        if isinstance(error, NativeActionFailure)
+        else f"layout_batch:{failure.batch_index + 1}"
+    )
+    base = layout_operation_result(
+        query,
+        "partial_change" if partial_mutation is True else "operation_failed",
+        (
+            f"레이아웃 호출 {failure.batch_index + 1}/"
+            f"{len(execution.batches)}에서 실패했습니다. "
+            f"완료 batch {failure.completed_batches}개, "
+            f"완료 셀 {len(completed_addresses)}개: {error}"
+        ),
+        lookup_microseconds,
+        plan,
+    )
+    return base.model_copy(
+        update={
+            "changed": partial_mutation is True,
+            "execution_mode": "native_in_process",
+            "native_protocol": native_protocol,
+            "verification": "native_action_result",
+            "verified": False,
+            "commands_executed": failure.commands_completed,
+            "commands_completed": failure.commands_completed,
+            "native_elapsed_microseconds": failure.elapsed_microseconds,
+            "current_page": before.current_page,
+            "page_count": before.page_count,
+            "modified": (
+                True
+                if partial_mutation is True
+                else before.modified
+                if partial_mutation is False
+                else None
+            ),
+            "partial_change": partial_mutation is True,
+            "partial_mutation": partial_mutation,
+            "retry_safe": retry_safe,
+            "reconcile_required": partial_mutation is not False or not retry_safe,
+            "failed_step": failed_step,
+            "structure_digest_before": (
+                error.structure_digest_before
+                if isinstance(error, NativeActionFailure)
+                else None
+            ),
+            "structure_digest_after": (
+                error.structure_digest_after
+                if isinstance(error, NativeActionFailure)
+                else None
+            ),
+            "updated_addresses": completed_addresses,
+        }
+    )
 
 
 def _page_value(values: Mapping[str, ShapeValue], key: str) -> float:
@@ -80,10 +226,17 @@ def native_style_plan(
     guard: Callable[[], None],
     *,
     setup_page: int,
-) -> tuple[LayoutPlan, SectionPageGeometry]:
+    style_list: DocumentStyleList | None = None,
+) -> tuple[
+    LayoutPlan,
+    SectionPageGeometry,
+    tuple[tuple[str, NativePosition], ...],
+]:
     wrapper = attach_wrapper(candidate)
     try:
-        styles = inspect_styles(wrapper, guard).styles
+        styles = (
+            inspect_styles(wrapper, guard) if style_list is None else style_list
+        ).styles
         guard()
         cursor = wrapper.get_pos()
         guard()
@@ -100,6 +253,19 @@ def native_style_plan(
                 raise HwpLiveError(
                     "구역 용지 정보를 읽은 뒤 한컴 커서를 복원하지 못했습니다"
                 )
+        caption_source = (
+            find_hierarchical_table_caption_source(
+                candidate,
+                wrapper,
+                guard,
+                setup_page=setup_page,
+            )
+            if any(
+                isinstance(block, TableBlock) and block.caption is not None
+                for block in plan.blocks
+            )
+            else None
+        )
     finally:
         release_wrapper(wrapper)
     geometry = SectionPageGeometry.from_mm(
@@ -126,7 +292,7 @@ def native_style_plan(
         fallback_style_id=style_id,
         content_width_mm=content_width_mm,
     )
-    return resolved, geometry
+    return resolved, geometry, caption_format_sources(resolved, caption_source)
 
 
 def operate_layout(
@@ -140,6 +306,7 @@ def operate_layout(
     unsafe_selectors: set[str],
     guard: Callable[[], None],
     atomic: bool = False,
+    style_list: DocumentStyleList | None = None,
 ) -> OperationResult:
     started = time.perf_counter_ns()
     lookup_microseconds = (time.perf_counter_ns() - started) // 1_000
@@ -198,12 +365,13 @@ def operate_layout(
         if plan.target == "after_page" and plan.page is not None
         else setup_page
     )
-    resolved_plan, page_geometry = native_style_plan(
+    resolved_plan, page_geometry, table_caption_sources = native_style_plan(
         candidate,
         plan,
         before.style_id,
         guard,
         setup_page=setup_page,
+        style_list=style_list,
     )
     preflight = preflight_layout(
         resolved_plan,
@@ -235,13 +403,14 @@ def operate_layout(
     request = replace(
         build_native_layout_request(
             NativeLayoutContext(
-                document_id=candidate.document.DocumentID,
-                full_name=candidate.document.FullName,
+                document_id=candidate.document_id,
+                full_name=candidate.full_name,
                 style_ids=(),
                 page_count=before.page_count,
                 page_geometry=page_geometry,
                 page_number=layout_page,
                 base_style_id=before.style_id,
+                caption_format_sources=table_caption_sources,
                 expected_cursor=(
                     before.cursor
                     if expected_cursor is None
@@ -257,6 +426,7 @@ def operate_layout(
         atomic=atomic,
     )
     _ = encode_action_request(request)
+    execution = build_native_layout_execution_plan(request)
     native_protocol = (
         10
         if any(
@@ -276,14 +446,71 @@ def operate_layout(
     )
 
     def mutate_and_snapshot() -> tuple[NativeActionResult, NativeSnapshot, int]:
-        expected_commands = len(request.commands)
-        native_result = execute_native_actions(
-            candidate.window_handle,
-            request,
-            minimum_version=native_protocol,
+        expected_commands = sum(
+            len(batch.request.commands) for batch in execution.batches
         )
+        native_result: NativeActionResult | None = None
+        commands_completed = 0
+        elapsed_microseconds = 0
+        completed_group_keys: set[int] = set()
+        for batch_index, batch in enumerate(execution.batches):
+            try:
+                batch_result = execute_native_actions(
+                    candidate.window_handle,
+                    batch.request,
+                    minimum_version=native_protocol,
+                )
+                if batch_result is None:
+                    raise HwpLiveError(
+                        "한컴 네이티브 레시피 실행기를 사용할 수 없습니다"
+                    )
+                if batch_result.commands_executed != len(batch.request.commands):
+                    partial_mutation = batch_result.commands_executed > 0
+                    raise NativeActionFailure(
+                        NativeActionFailureEvidence(
+                            code="LAYOUT_BATCH_INCOMPLETE",
+                            location=(f"{batch_index + 1}/{len(execution.batches)}"),
+                            message=(
+                                "네이티브 레이아웃 batch 완료 명령 수가 요청과 다릅니다"
+                            ),
+                            commands_completed=batch_result.commands_executed,
+                            failed_step=f"layout_batch:{batch_index + 1}",
+                            partial_mutation=partial_mutation,
+                            retry_safe=not partial_mutation,
+                            structure_digest_before=None,
+                            structure_digest_after=None,
+                        )
+                    )
+            except HwpLiveError as error:
+                if len(execution.batches) == 1:
+                    raise
+                local_completed = (
+                    min(
+                        max(error.commands_completed, 0),
+                        len(batch.request.commands),
+                    )
+                    if isinstance(error, NativeActionFailure)
+                    else 0
+                )
+                completed_group_keys.update(batch.completed_group_keys(local_completed))
+                raise _LayoutBatchFailure(
+                    error,
+                    batch_index=batch_index,
+                    completed_batches=batch_index,
+                    commands_completed=commands_completed + local_completed,
+                    elapsed_microseconds=elapsed_microseconds,
+                    completed_group_keys=completed_group_keys,
+                ) from error
+            native_result = (
+                batch_result
+                if native_result is None
+                else _merge_native_results(native_result, batch_result)
+            )
+            commands_completed += batch_result.commands_executed
+            elapsed_microseconds += batch_result.elapsed_microseconds
+            completed_group_keys.update(item.group.key for item in batch.groups)
         if native_result is None:
-            raise HwpLiveError("한컴 네이티브 레시피 실행기를 사용할 수 없습니다")
+            raise HwpLiveError("네이티브 레이아웃 batch 결과가 없습니다")
         after_snapshot = read_native_snapshot(candidate.window_handle)
         if after_snapshot is None:
             raise HwpLiveError(
@@ -314,44 +541,9 @@ def operate_layout(
                 )
                 if cleanup_result is None:
                     raise HwpLiveError("확인된 빈 꼬리 쪽을 정리하지 못했습니다")
-                native_result = replace(
+                native_result = _merge_native_results(
                     native_result,
-                    commands_executed=(
-                        native_result.commands_executed
-                        + cleanup_result.commands_executed
-                    ),
-                    actions_executed=(
-                        native_result.actions_executed + cleanup_result.actions_executed
-                    ),
-                    text_insertions=(
-                        native_result.text_insertions + cleanup_result.text_insertions
-                    ),
-                    image_insertions=(
-                        native_result.image_insertions + cleanup_result.image_insertions
-                    ),
-                    elapsed_microseconds=(
-                        native_result.elapsed_microseconds
-                        + cleanup_result.elapsed_microseconds
-                    ),
-                    created_control_ids=(
-                        native_result.created_control_ids
-                        + cleanup_result.created_control_ids
-                    ),
-                    call_results=(
-                        native_result.call_results + cleanup_result.call_results
-                    ),
-                    image_timing_count=(
-                        native_result.image_timing_count
-                        + cleanup_result.image_timing_count
-                    ),
-                    image_max_microseconds=max(
-                        native_result.image_max_microseconds,
-                        cleanup_result.image_max_microseconds,
-                    ),
-                    image_total_microseconds=(
-                        native_result.image_total_microseconds
-                        + cleanup_result.image_total_microseconds
-                    ),
+                    cleanup_result,
                 )
                 expected_commands += len(cleanup_request.commands)
                 after_snapshot = read_native_snapshot(candidate.window_handle)
@@ -359,11 +551,22 @@ def operate_layout(
                     raise HwpLiveError("빈 꼬리 쪽 정리 후 문서 상태를 읽지 못했습니다")
         return native_result, after_snapshot, expected_commands
 
-    native, after, expected_commands = run_layout_mutation(
-        unsafe_selectors,
-        candidate.selector,
-        mutate_and_snapshot,
-    )
+    try:
+        native, after, expected_commands = run_layout_mutation(
+            unsafe_selectors,
+            candidate.selector,
+            mutate_and_snapshot,
+        )
+    except _LayoutBatchFailure as failure:
+        return _layout_batch_failure_result(
+            query,
+            plan,
+            execution,
+            before,
+            native_protocol,
+            lookup_microseconds,
+            failure,
+        )
 
     verified = (
         native.commands_executed == expected_commands
@@ -384,11 +587,19 @@ def operate_layout(
     if not verified:
         mark_document_unsafe(unsafe_selectors, candidate.selector)
     status: OperationStatus = "executed" if verified else "partial_change"
+    layout_call_count = len(execution.batches)
     message = (
-        f"요청한 위치 이동과 ApplyLayout Bulk를 프로토콜 {native_protocol} C++/ATL 네이티브 경로로 한 번 실행하고 전후 상태를 검증했습니다"
+        (
+            "요청한 위치 이동과 ApplyLayout Bulk를 프로토콜 "
+            f"{native_protocol} C++/ATL 네이티브 경로로 "
+            f"{layout_call_count}회 실행하고 전후 상태를 검증했습니다"
+        )
         if verified
         else "네이티브 레이아웃 배치는 실행됐지만 삽입 위치 또는 문서 상태의 사후 검증이 일치하지 않았습니다"
     )
+    completed_group_keys = {
+        item.group.key for batch in execution.batches for item in batch.groups
+    }
     base = layout_operation_result(query, status, message, lookup_microseconds, plan)
     return base.model_copy(
         update={
@@ -406,5 +617,8 @@ def operate_layout(
             "page_count": after.page_count,
             "modified": after.modified,
             "retry_safe": verified,
+            "partial_mutation": False if verified else True,
+            "commands_completed": native.commands_executed,
+            "updated_addresses": execution.completed_addresses(completed_group_keys),
         }
     )

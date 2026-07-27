@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, TypeVar, cast
 from uuid import uuid4
+
+from mcp.types import CallToolResult, TextContent
+from pydantic import BaseModel
 
 from hwp_errors import HwpLiveError
 from hwp_mcp_result_envelope import normalize_production_result, transport_error_result
@@ -22,8 +25,25 @@ class HwpOperateDispatcher(Protocol):
     ) -> OperationResult: ...
 
 
+StructuredPayload = TypeVar("StructuredPayload", bound=BaseModel)
+
+
 def new_wrapper_request_id() -> str:
     return f"hwp-wrapper-{uuid4().hex}"
+
+
+def compact_structured_result(
+    payload: StructuredPayload,
+    *,
+    summary: str,
+) -> StructuredPayload:
+    return cast(
+        StructuredPayload,
+        CallToolResult(
+            content=[TextContent(type="text", text=summary)],
+            structuredContent=payload.model_dump(mode="json", by_alias=True),
+        ),
+    )
 
 
 async def dispatch_wrapper(

@@ -9,7 +9,11 @@ from typing import Final, IO, Protocol, assert_never, final
 from pydantic import ValidationError
 
 from hwp_errors import HwpLiveError
-from hwp_live_events import ChangeNotifier, WinEventChangeSignal
+from hwp_live_events import (
+    ChangeNotifier,
+    HwpEventObservation,
+    WinEventChangeSignal,
+)
 from hwp_live_native_contract import (
     NativeEvent,
     NativeMessage,
@@ -132,8 +136,11 @@ class NativeHwpEventSignal:
                         assert_never(unreachable)
                     case NativeReady():
                         self._ready.set()
-                    case NativeEvent():
-                        self._notifier.notify()
+                    case NativeEvent(
+                        event=event_name,
+                        document_id=document_id,
+                    ):
+                        self._notifier.notify(event_name, document_id)
         except (OSError, UnicodeError, ValueError) as error:
             self._set_failure(f"native bridge output failed: {error}")
         finally:
@@ -154,12 +161,22 @@ class NativeHwpEventSignal:
         if process_id <= 0 or not moniker_name:
             return
         if not self._executable.is_file():
-            raise HwpLiveError(f"한컴 네이티브 이벤트 브리지를 찾을 수 없습니다: {self._executable}")
-        command = (str(self._executable), "--moniker", moniker_name)
+            raise HwpLiveError(
+                f"한컴 네이티브 이벤트 브리지를 찾을 수 없습니다: {self._executable}"
+            )
+        command = (
+            str(self._executable),
+            "--moniker",
+            moniker_name,
+            "--process-id",
+            str(process_id),
+        )
         try:
             process = self._spawner(command)
         except OSError as error:
-            raise HwpLiveError(f"한컴 네이티브 이벤트 브리지를 시작하지 못했습니다: {error}") from error
+            raise HwpLiveError(
+                f"한컴 네이티브 이벤트 브리지를 시작하지 못했습니다: {error}"
+            ) from error
         self._process = process
         self._failure = None
         self._finished.clear()
@@ -186,6 +203,9 @@ class NativeHwpEventSignal:
 
     def sequence(self) -> int:
         return self._notifier.sequence()
+
+    def events_after(self, after_sequence: int) -> tuple[HwpEventObservation, ...]:
+        return self._notifier.events_after(after_sequence)
 
     def wait(self, after_sequence: int, timeout_seconds: float) -> int:
         return self._notifier.wait(after_sequence, timeout_seconds)
@@ -265,6 +285,9 @@ class HybridChangeSignal:
 
     def sequence(self) -> int:
         return self._notifier.sequence()
+
+    def events_after(self, after_sequence: int) -> tuple[HwpEventObservation, ...]:
+        return self._notifier.events_after(after_sequence)
 
     def wait(self, after_sequence: int, timeout_seconds: float) -> int:
         return self._notifier.wait(after_sequence, timeout_seconds)

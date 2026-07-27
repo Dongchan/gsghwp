@@ -85,12 +85,13 @@ class LiveHwpOperationSession(LiveHwpDataSession):
             else snapshot.current_page
         )
         layout_page = setup_page + 1 if plan.target == "after_page" else setup_page
-        resolved, geometry = native_style_plan(
+        resolved, geometry, _ = native_style_plan(
             candidate,
             plan,
             snapshot.style_id,
             guard,
             setup_page=setup_page,
+            style_list=self.styles(session_id),
         )
         return preflight_layout(
             resolved,
@@ -243,6 +244,7 @@ class LiveHwpOperationSession(LiveHwpDataSession):
                 unsafe_selectors=self._unsafe_selectors,
                 guard=guard,
                 atomic=effective_policy.atomic,
+                style_list=self.styles(session_id),
             )
             recipe_id = (
                 "recipe:page.append_from_template.v1"

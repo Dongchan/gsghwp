@@ -5,7 +5,8 @@ from threading import Lock
 from xml.etree import ElementTree
 
 from hwp_errors import HwpLiveError
-from hwp_live_api import LiveHwpApplication, SelectionRange, ShapeValue
+from hwp_live_api import LiveHwpApplication, ShapeValue
+from hwp_live_native_action_contract import decoded_logical_cell_selection
 from hwp_live_contract import (
     ActiveHwpTarget,
     ActiveTargetKind,
@@ -20,6 +21,7 @@ from hwp_live_contract import (
     SelectionPosition,
     SelectionModeName,
 )
+from hwp_live_native_action_models import NativeSelection, NativeSnapshot
 from hwp_live_safety import LIVE_OPERATION_ERRORS
 
 
@@ -39,34 +41,25 @@ def _integer(values: dict[str, ShapeValue], key: str) -> int:
     return int(_number(values, key))
 
 
-def _text(values: dict[str, ShapeValue], key: str) -> str:
-    value = values.get(key)
-    return value if isinstance(value, str) else ""
-
-
 def _selection(
-    raw: SelectionRange,
+    raw: NativeSelection,
 ) -> SelectionPosition:
-    selected, start_list, start_para, start_char, end_list, end_para, end_char = raw
     return SelectionPosition(
-        selected=selected,
-        start_list=start_list or 0,
-        start_paragraph=start_para or 0,
-        start_character=start_char or 0,
-        end_list=end_list or 0,
-        end_paragraph=end_para or 0,
-        end_character=end_char or 0,
+        selected=raw.selected,
+        start_list=raw.start.list_id,
+        start_paragraph=raw.start.paragraph,
+        start_character=raw.start.character,
+        end_list=raw.end.list_id,
+        end_paragraph=raw.end.paragraph,
+        end_character=raw.end.character,
     )
 
 
 def _active_target(
-    hwp: LiveHwpApplication,
-    selection: SelectionRange,
-    guard: Callable[[], None],
+    snapshot: NativeSnapshot,
 ) -> ActiveHwpTarget:
-    guard()
-    raw_mode = int(hwp.SelectionMode)
-    guard()
+    selection = snapshot.selection
+    raw_mode = selection.mode
     base_mode = raw_mode & 0x0F
     mode_names: dict[int, SelectionModeName] = {
         0: "none",
@@ -76,25 +69,24 @@ def _active_target(
         4: "control",
     }
     mode = mode_names.get(base_mode, "unknown")
-    in_cell = False
-    if base_mode != 4:
-        in_cell = bool(hwp.is_cell())
-        guard()
-    cell_address = hwp.get_cell_addr().strip().upper() if in_cell else None
-    guard()
+    native_cell_address = snapshot.cell_address.strip().upper()
+    in_cell = base_mode != 4 and bool(native_cell_address)
+    cell_address = native_cell_address if in_cell else None
     control_type: str | None = None
     control_instance_id: str | None = None
     if base_mode == 4 or in_cell:
-        control = hwp.CurSelectedCtrl if base_mode == 4 else hwp.ParentCtrl
-        guard()
-        control_type = str(control.CtrlID).strip() or None
-        guard()
-        control_instance_id = str(control.GetCtrlInstID()).strip() or None
-        guard()
+        control_type = snapshot.control_type.strip() or None
+        control_instance_id = snapshot.control_instance_id.strip() or None
     strict_selection = bool(raw_mode & 0x10)
     multiple_cells = base_mode == 3 and (
-        strict_selection or selection[1:4] != selection[4:7]
+        strict_selection or selection.start != selection.end
     )
+    logical_selection = decoded_logical_cell_selection(selection)
+    if logical_selection is None:
+        selected_cell_addresses = selection.cell_addresses
+        selected_cell_address_error = selection.cell_address_error
+    else:
+        selected_cell_addresses, selected_cell_address_error = logical_selection
     kind: ActiveTargetKind
     if base_mode == 4:
         kind = "selected_table" if control_type == "tbl" else "selected_control"
@@ -119,81 +111,97 @@ def _active_target(
         control_type=control_type,
         control_instance_id=control_instance_id,
         cell_address=cell_address,
+        cell_addresses=(
+            tuple(
+                dict.fromkeys(
+                    address.strip().upper()
+                    for address in selected_cell_addresses
+                    if address.strip()
+                )
+            )
+            if base_mode == 3
+            else ()
+        ),
+        cell_address_error=(
+            selected_cell_address_error.strip() or None
+            if base_mode == 3
+            else None
+        ),
     )
 
 
-def inspect_context(
-    hwp: LiveHwpApplication,
+def inspect_native_context(
+    snapshot: NativeSnapshot,
     document: OpenDocument,
-    guard: Callable[[], None],
+    page_text: str,
+    page_setup: dict[str, ShapeValue],
 ) -> LiveContext:
-    guard()
-    cursor = hwp.get_pos()
-    guard()
-    selected_range = hwp.get_selected_pos()
-    guard()
-    active_target = _active_target(hwp, selected_range, guard)
-    selected_text = ""
-    if selected_range[0]:
-        selected_text = hwp.get_text_file(
-            format="UNICODE",
-            option="saveblock:true",
-        )
-        guard()
-        confirmed_range = hwp.get_selected_pos()
-        guard()
-        if confirmed_range != selected_range:
-            raise HwpLiveError("선택 영역을 읽는 동안 한컴 선택 상태가 바뀌었습니다")
-    character = hwp.get_charshape_as_dict()
-    guard()
-    paragraph = hwp.get_parashape_as_dict()
-    guard()
-    page = hwp.get_pagedef_as_dict("eng")
-    guard()
-    current_page = hwp.current_page
-    guard()
-    page_text = hwp.get_page_text(current_page - 1)[:200_000]
-    guard()
+    character = snapshot.character_format
+    paragraph = snapshot.paragraph_format
     return LiveContext(
         document=document,
-        current_page=current_page,
+        current_page=snapshot.current_page,
         cursor=CursorPosition(
-            list_id=cursor[0],
-            paragraph=cursor[1],
-            character=cursor[2],
+            list_id=snapshot.cursor.list_id,
+            paragraph=snapshot.cursor.paragraph,
+            character=snapshot.cursor.character,
         ),
-        selection=_selection(selected_range),
-        active_target=active_target,
-        selected_text=selected_text[:100_000],
-        page_text=page_text,
+        selection=_selection(snapshot.selection),
+        active_target=_active_target(snapshot),
+        selected_text=snapshot.selected_text[:100_000],
+        page_text=page_text[:200_000],
         character_style=CharacterStyle(
-            face_name=_text(character, "FaceNameHangul"),
-            height_hwpunit=_integer(character, "Height"),
-            bold=bool(_integer(character, "Bold")),
-            text_color=_integer(character, "TextColor"),
+            face_name=character.face_name,
+            height_hwpunit=character.height_hwpunit,
+            bold=character.bold,
+            text_color=character.text_color,
         ),
         paragraph_style=ParagraphStyle(
-            align_type=_integer(paragraph, "AlignType"),
-            line_spacing=_integer(paragraph, "LineSpacing"),
-            left_margin_hwpunit=_integer(paragraph, "LeftMargin"),
-            right_margin_hwpunit=_integer(paragraph, "RightMargin"),
-            indentation_hwpunit=_integer(paragraph, "Indentation"),
-            previous_spacing_hwpunit=_integer(paragraph, "PrevSpacing"),
-            next_spacing_hwpunit=_integer(paragraph, "NextSpacing"),
+            align_type=paragraph.alignment,
+            line_spacing=paragraph.line_spacing,
+            left_margin_hwpunit=paragraph.left_margin_hwpunit,
+            right_margin_hwpunit=paragraph.right_margin_hwpunit,
+            indentation_hwpunit=paragraph.indentation_hwpunit,
+            previous_spacing_hwpunit=paragraph.previous_spacing_hwpunit,
+            next_spacing_hwpunit=paragraph.next_spacing_hwpunit,
         ),
         page_setup=PageSetup(
-            paper_width_mm=_number(page, "PaperWidth"),
-            paper_height_mm=_number(page, "PaperHeight"),
-            landscape=_integer(page, "Landscape"),
-            top_margin_mm=_number(page, "TopMargin"),
-            bottom_margin_mm=_number(page, "BottomMargin"),
-            left_margin_mm=_number(page, "LeftMargin"),
-            right_margin_mm=_number(page, "RightMargin"),
-            header_mm=_number(page, "HeaderLen"),
-            footer_mm=_number(page, "FooterLen"),
-            gutter_mm=_number(page, "GutterLen"),
-            gutter_type=_integer(page, "GutterType"),
+            paper_width_mm=_number(page_setup, "PaperWidth"),
+            paper_height_mm=_number(page_setup, "PaperHeight"),
+            landscape=_integer(page_setup, "Landscape"),
+            top_margin_mm=_number(page_setup, "TopMargin"),
+            bottom_margin_mm=_number(page_setup, "BottomMargin"),
+            left_margin_mm=_number(page_setup, "LeftMargin"),
+            right_margin_mm=_number(page_setup, "RightMargin"),
+            header_mm=_number(page_setup, "HeaderLen"),
+            footer_mm=_number(page_setup, "FooterLen"),
+            gutter_mm=_number(page_setup, "GutterLen"),
+            gutter_type=_integer(page_setup, "GutterType"),
         ),
+    )
+
+
+def with_selected_cell_addresses(
+    context: LiveContext,
+    addresses: tuple[str, ...],
+    error: str = "",
+) -> LiveContext:
+    if context.active_target.kind != "selected_cells":
+        return context
+    normalized = tuple(
+        dict.fromkeys(
+            address.strip().upper() for address in addresses if address.strip()
+        )
+    )
+    return context.model_copy(
+        update={
+            "active_target": context.active_target.model_copy(
+                update={
+                    "cell_addresses": normalized,
+                    "cell_address_error": error.strip() or None,
+                }
+            )
+        }
     )
 
 
@@ -255,7 +263,9 @@ def inspect_styles(
     try:
         style_elements = ElementTree.fromstring(style_xml).findall(".//STYLE")
     except ElementTree.ParseError as error:
-        raise HwpLiveError("한컴 문서 스타일 메모리 응답을 해석하지 못했습니다") from error
+        raise HwpLiveError(
+            "한컴 문서 스타일 메모리 응답을 해석하지 못했습니다"
+        ) from error
     if not style_elements:
         raise HwpLiveError("한컴 문서에서 스타일 목록을 찾지 못했습니다")
     styles: list[DocumentStyle] = []
@@ -266,7 +276,9 @@ def inspect_styles(
         try:
             style_id = int(raw_style_id) if raw_style_id is not None else -1
         except ValueError as error:
-            raise HwpLiveError("한컴 문서 스타일 ID 형식이 올바르지 않습니다") from error
+            raise HwpLiveError(
+                "한컴 문서 스타일 ID 형식이 올바르지 않습니다"
+            ) from error
         if style_id < 0 or not isinstance(name, str) or not name:
             raise HwpLiveError("한컴 문서 스타일 정보 형식이 올바르지 않습니다")
         styles.append(

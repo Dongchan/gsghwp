@@ -17,6 +17,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import ContentBlock, Tool
 from pydantic import JsonValue, TypeAdapter
 
+from hwp_mcp_catalog import host_visible_tool_catalog
 from hwp_mcp_registry import configured_mcp_profile
 from hwp_mcp_resources import register_guidance_resources
 from hwp_mcp_worker_protocol import HwpWorkerCallTimeout
@@ -42,31 +43,12 @@ _RUNTIME_ACTIONS: Final[Mapping[str, Literal["status", "reload"]]] = MappingProx
         "hwp_reload": "reload",
     }
 )
-_RELOAD_TOOL = Tool(
-    name="hwp_reload",
-    description=(
-        "현재 Codex 연결을 유지한 채 설치 소스에서 HWP MCP 워커를 다시 시작하고 "
-        "갱신된 런타임 신원과 도구 스키마 해시를 반환합니다."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
-    outputSchema=RuntimeStatus.model_json_schema(),
-)
 
 
 @dataclass(frozen=True, slots=True)
 class _RuntimeRoute:
     action: Literal["status", "reload"]
     through_gateway: bool
-
-
-def _public_tools(worker_tools: Sequence[Tool]) -> tuple[Tool, ...]:
-    return tuple(tool for tool in worker_tools if tool.name != _RELOAD_TOOL.name) + (
-        _RELOAD_TOOL,
-    )
 
 
 def _runtime_action(
@@ -100,7 +82,7 @@ class ReloadingHwpMCP(FastMCP[None]):
     @override
     async def list_tools(self) -> list[Tool]:
         worker = await self._supervisor.list_tools()
-        return list(_public_tools(worker.tools))
+        return list(host_visible_tool_catalog(worker.tools).tools)
 
     def initialization_options(self) -> InitializationOptions:
         return self._mcp_server.create_initialization_options(
@@ -124,7 +106,7 @@ class ReloadingHwpMCP(FastMCP[None]):
             if reload_worker
             else await self._supervisor.status()
         )
-        tools = _public_tools(worker.tools)
+        tools = host_visible_tool_catalog(worker.tools).tools
         runtime = worker.runtime.model_copy(
             update={
                 "process_id": os.getpid(),

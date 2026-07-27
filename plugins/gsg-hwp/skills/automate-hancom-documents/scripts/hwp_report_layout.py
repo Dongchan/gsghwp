@@ -87,6 +87,7 @@ _NUMBER = re.compile(
 _BORDER = CellBorder(style="solid", width="0.12mm", color=(150, 160, 156))
 _BORDERS = CellBorders(left=_BORDER, right=_BORDER, top=_BORDER, bottom=_BORDER)
 _PADDING = CellPadding(left_mm=1.2, right_mm=1.2, top_mm=0.4, bottom_mm=0.4)
+_REPORT_FONT_NAME = "맑은 고딕"
 
 
 def _display_width(value: str) -> int:
@@ -126,6 +127,33 @@ def _body(value: str, row: int) -> TableCell:
     )
 
 
+def _paragraph(
+    text: str,
+    *,
+    style_role: Literal["body", "heading"],
+    font_size_pt: float,
+    bold: bool,
+    space_before_mm: float,
+    space_after_mm: float,
+) -> ParagraphBlock:
+    return ParagraphBlock(
+        kind="paragraph",
+        text=text,
+        style_role=style_role,
+        bold=bold,
+        font_name=_REPORT_FONT_NAME,
+        font_size_pt=font_size_pt,
+        text_color=(0, 0, 0),
+        alignment="left",
+        line_spacing_percent=160,
+        space_before_mm=space_before_mm,
+        space_after_mm=space_after_mm,
+        left_margin_mm=0,
+        right_margin_mm=0,
+        indentation_mm=0,
+    )
+
+
 def _table(table: ReportTable) -> TableBlock:
     text_rows = (table.headers, *table.rows)
     minimums = recommended_column_minimums(table.headers, table.rows)
@@ -146,9 +174,7 @@ def _table(table: ReportTable) -> TableBlock:
         auto_fit_row_heights=True,
         repeat_header=True,
         split_wide_table=len(table.headers) > 1,
-        repeat_key_columns=(
-            table.repeat_key_columns if len(table.headers) > 1 else 0
-        ),
+        repeat_key_columns=(table.repeat_key_columns if len(table.headers) > 1 else 0),
     )
 
 
@@ -158,34 +184,59 @@ def report_layout_plan(report: ReportPlan) -> LayoutPlan:
         blocks.append(PageBreakBlock(kind="page_break"))
     if report.title is not None:
         blocks.append(
-            ParagraphBlock(
-                kind="paragraph",
-                text=report.title,
+            _paragraph(
+                report.title,
                 style_role="heading",
+                font_size_pt=16,
                 bold=True,
+                space_before_mm=0,
+                space_after_mm=3,
             )
         )
     blocks.extend(
-        ParagraphBlock(kind="paragraph", text=text, style_role="body")
+        _paragraph(
+            text,
+            style_role="body",
+            font_size_pt=10,
+            bold=False,
+            space_before_mm=0,
+            space_after_mm=1,
+        )
         for text in report.introduction
     )
     for section in report.sections:
         if section.page_break_before and blocks:
             blocks.append(PageBreakBlock(kind="page_break"))
         blocks.append(
-            ParagraphBlock(
-                kind="paragraph",
-                text=section.title,
+            _paragraph(
+                section.title,
                 style_role="heading",
+                font_size_pt=13,
                 bold=True,
+                space_before_mm=3,
+                space_after_mm=2,
             )
         )
         blocks.extend(
-            ParagraphBlock(kind="paragraph", text=text, style_role="body")
+            _paragraph(
+                text,
+                style_role="body",
+                font_size_pt=10,
+                bold=False,
+                space_before_mm=0,
+                space_after_mm=1,
+            )
             for text in section.paragraphs
         )
         blocks.extend(
-            ParagraphBlock(kind="paragraph", text=f"○ {text}", style_role="body")
+            _paragraph(
+                f"○ {text}",
+                style_role="body",
+                font_size_pt=10,
+                bold=False,
+                space_before_mm=0,
+                space_after_mm=1,
+            )
             for text in section.bullets
         )
         blocks.extend(_table(table) for table in section.tables)

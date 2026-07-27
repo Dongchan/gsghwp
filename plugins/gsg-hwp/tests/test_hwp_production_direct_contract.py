@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from typing import ClassVar, cast
 
+import pytest
+
 
 SCRIPTS = (
     Path(__file__).resolve().parents[1]
@@ -23,10 +25,48 @@ from hwp_live_structure_contract import (  # noqa: E402
     FastPageInspection,
     StructurePosition,
 )
+from hwp_operation_contract import WorkflowTargetCandidate  # noqa: E402
 from hwp_public_action_contract import PublicObjectTargetStore  # noqa: E402
+from hwp_public_contract import PublicTableTarget  # noqa: E402
+from hwp_public_table_target import (  # noqa: E402
+    PublicTableTargetStore,
+    UnknownPublicTargetError,
+)
 
 
-def test_fast_inspection_instance_id_is_a_public_object_target() -> None:
+def _table_inspection(
+    *,
+    document_id: int,
+    full_name: str,
+    page: int,
+    start: int,
+    count: int,
+) -> FastPageInspection:
+    return FastPageInspection(
+        document_id=document_id,
+        full_name=full_name,
+        page=page,
+        page_count=max(page, 3),
+        text="",
+        controls=tuple(
+            FastPageControl(
+                control_type="tbl",
+                instance_id=f"table-{index}",
+                anchor=StructurePosition(
+                    list_id=0,
+                    paragraph=index,
+                    character=0,
+                ),
+                rows=1,
+                columns=1,
+            )
+            for index in range(start, start + count)
+        ),
+    )
+
+
+def test_fast_inspection_raw_id_falls_back_to_direct_resolution_after_clear() -> None:
+    # Given
     store = PublicObjectTargetStore()
     inspection = FastPageInspection(
         document_id=17,
@@ -45,63 +85,57 @@ def test_fast_inspection_instance_id_is_a_public_object_target() -> None:
         ),
     )
 
+    # When
     store.remember_inspection(inspection)
-    resolved = store.resolve_control("native-table-42", None)
-
-    assert resolved is not None
-    assert resolved.document_path == inspection.full_name
-    assert resolved.target.page_hint == inspection.page
-    assert resolved.target.control_instance_id == "native-table-42"
-
+    cached = store.resolve_control("native-table-42", None)
     store.clear()
+    direct = store.resolve_control("native-table-42", inspection.full_name)
 
-    assert store.resolve_control("native-table-42", None) is None
+    # Then
+    assert cached is not None
+    assert cached.document_path == inspection.full_name
+    assert cached.target.page_hint == inspection.page
+    assert direct is not None
+    assert direct.document_path == inspection.full_name
+    assert direct.target.page_hint is None
+    assert direct.target.control_instance_id == "native-table-42"
 
 
-def test_new_fast_inspection_invalidates_previous_object_ids() -> None:
+def test_opaque_object_ids_remain_document_scoped_and_cache_bound() -> None:
+    # Given
     store = PublicObjectTargetStore()
-    first = FastPageInspection(
-        document_id=17,
-        full_name="C:/documents/first.hwp",
-        page=1,
-        page_count=2,
-        text="",
-        controls=(
-            FastPageControl(
-                control_type="tbl",
-                instance_id="first-table",
-                anchor=StructurePosition(list_id=0, paragraph=0, character=0),
-                rows=1,
-                columns=1,
+    opaque_id = store.remember(
+        (
+            WorkflowTargetCandidate(
+                kind="picture",
+                page=2,
+                picture_index=1,
             ),
         ),
+        "C:/documents/first.hwp",
+    )[0]
+
+    # When
+    same_document = store.resolve_picture(
+        opaque_id,
+        "C:/documents/first.hwp",
     )
-    second = first.model_copy(
-        update={
-            "document_id": 18,
-            "full_name": "C:/documents/second.hwp",
-            "controls": (
-                FastPageControl(
-                    control_type="gso",
-                    instance_id="second-picture",
-                    anchor=StructurePosition(
-                        list_id=0,
-                        paragraph=1,
-                        character=0,
-                    ),
-                ),
-            ),
-        }
+    other_document = store.resolve_picture(
+        opaque_id,
+        "C:/documents/second.hwp",
     )
+    store.clear()
+    after_clear = store.resolve_picture(opaque_id, "C:/documents/first.hwp")
 
-    store.remember_inspection(first)
-    store.remember_inspection(second)
+    # Then
+    assert same_document is not None
+    assert same_document.document_path == "C:/documents/first.hwp"
+    assert other_document is None
+    assert after_clear is None
 
-    assert store.resolve_control("first-table", None) is None
-    assert store.resolve_picture("second-picture", None) is not None
 
-
-def test_fast_inspection_object_ids_are_bounded() -> None:
+def test_raw_ids_remain_direct_beyond_fast_inspection_cache_bound() -> None:
+    # Given
     store = PublicObjectTargetStore()
     controls = tuple(
         FastPageControl(
@@ -122,10 +156,158 @@ def test_fast_inspection_object_ids_are_bounded() -> None:
         controls=controls,
     )
 
+    # When
     store.remember_inspection(inspection)
+    cached = store.resolve_control("table-255", None)
+    direct = store.resolve_control("table-256", inspection.full_name)
 
-    assert store.resolve_control("table-255", None) is not None
-    assert store.resolve_control("table-256", None) is None
+    # Then
+    assert cached is not None
+    assert cached.document_path == inspection.full_name
+    assert cached.target.page_hint == inspection.page
+    assert direct is not None
+    assert direct.document_path == inspection.full_name
+    assert direct.target.page_hint is None
+    assert direct.target.control_instance_id == "table-256"
+
+
+def test_same_document_page_inspections_keep_previous_raw_target_hints() -> None:
+    # Given
+    table_store = PublicTableTargetStore()
+    object_store = PublicObjectTargetStore()
+    first = _table_inspection(
+        document_id=17,
+        full_name=r"C:\Documents\Sample.hwp",
+        page=1,
+        start=1,
+        count=1,
+    )
+    second = _table_inspection(
+        document_id=17,
+        full_name=r"c:\documents\sample.hwp",
+        page=2,
+        start=2,
+        count=1,
+    )
+
+    # When
+    table_store.remember_inspection(first)
+    object_store.remember_inspection(first)
+    table_store.remember_inspection(second)
+    object_store.remember_inspection(second)
+    table_target = table_store.resolve(PublicTableTarget(target_id="table-1"))
+    object_target = object_store.resolve_control("table-1", None)
+
+    # Then
+    assert table_target.document_path == first.full_name
+    assert table_target.target.page_hint == 1
+    assert object_target is not None
+    assert object_target.document_path == first.full_name
+    assert object_target.target.page_hint == 1
+
+
+def test_inspected_target_cache_is_bounded_across_pages() -> None:
+    # Given
+    table_store = PublicTableTargetStore()
+    object_store = PublicObjectTargetStore()
+    first = _table_inspection(
+        document_id=17,
+        full_name="C:/documents/sample.hwp",
+        page=1,
+        start=0,
+        count=200,
+    )
+    second = _table_inspection(
+        document_id=17,
+        full_name="C:/documents/sample.hwp",
+        page=2,
+        start=200,
+        count=100,
+    )
+
+    # When
+    table_store.remember_inspection(first)
+    object_store.remember_inspection(first)
+    table_store.remember_inspection(second)
+    object_store.remember_inspection(second)
+
+    # Then
+    assert (
+        table_store.resolve(PublicTableTarget(target_id="table-43")).target.page_hint
+        is None
+    )
+    assert (
+        table_store.resolve(PublicTableTarget(target_id="table-44")).target.page_hint
+        == 1
+    )
+    assert (
+        table_store.resolve(PublicTableTarget(target_id="table-299")).target.page_hint
+        == 2
+    )
+    evicted_object = object_store.resolve_control(
+        "table-43",
+        "C:/documents/sample.hwp",
+    )
+    retained_object = object_store.resolve_control("table-44", None)
+    newest_object = object_store.resolve_control("table-299", None)
+    assert evicted_object is not None
+    assert evicted_object.target.page_hint is None
+    assert retained_object is not None
+    assert retained_object.target.page_hint == 1
+    assert newest_object is not None
+    assert newest_object.target.page_hint == 2
+
+
+def test_document_transition_invalidates_raw_hints_and_opaque_targets() -> None:
+    # Given
+    table_store = PublicTableTargetStore()
+    object_store = PublicObjectTargetStore()
+    table_opaque = table_store.remember(
+        (WorkflowTargetCandidate(kind="table", page=1, table_index=1),),
+        "C:/documents/first.hwp",
+    )[0]
+    object_opaque = object_store.remember(
+        (WorkflowTargetCandidate(kind="picture", page=1, picture_index=1),),
+        "C:/documents/first.hwp",
+    )[0]
+    first = _table_inspection(
+        document_id=17,
+        full_name="C:/documents/first.hwp",
+        page=1,
+        start=1,
+        count=1,
+    )
+    second = _table_inspection(
+        document_id=23,
+        full_name="C:/documents/second.hwp",
+        page=1,
+        start=2,
+        count=1,
+    )
+
+    # When
+    table_store.remember_inspection(first)
+    object_store.remember_inspection(first)
+    same_document_table = table_store.resolve(PublicTableTarget(target_id=table_opaque))
+    same_document_object = object_store.resolve_picture(object_opaque, None)
+    table_store.remember_inspection(second)
+    object_store.remember_inspection(second)
+    raw_after_transition = table_store.resolve(
+        PublicTableTarget(
+            target_id="table-1",
+            document_path=second.full_name,
+        )
+    )
+
+    # Then
+    assert same_document_table.document_path == first.full_name
+    assert same_document_object is not None
+    assert same_document_object.document_path == first.full_name
+    with pytest.raises(UnknownPublicTargetError):
+        _ = table_store.resolve(PublicTableTarget(target_id=table_opaque))
+    assert object_store.resolve_picture(object_opaque, None) is None
+    assert raw_after_transition.document_path == second.full_name
+    assert raw_after_transition.target.page_hint is None
 
 
 class _PoisonedIdentityDocument:
@@ -236,7 +418,6 @@ class _InspectionController:
 
     def restore_activation(self) -> None:
         pass
-
 
     def replace_selection(
         self,

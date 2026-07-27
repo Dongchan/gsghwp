@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# noqa: E501  # noqa: SIZE_OK — this module is the declarative MCP tool catalog.
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from os import environ
@@ -8,7 +10,11 @@ from typing import Final, Literal
 
 from hwp_mcp_search import rank_tool_specs
 from hwp_operation_contract import HwpWorkflowId
-from hwp_operation_descriptor import descriptor_workflows_for_tool
+from hwp_operation_descriptor import (
+    OperationVerificationMode,
+    descriptor_workflows_for_tool,
+    operation_descriptor,
+)
 from hwp_public_action_metadata import (
     HWP_ADD_CAPTION_DESCRIPTION,
     HWP_APPEND_EXCEL_TABLE_DESCRIPTION,
@@ -68,10 +74,46 @@ type CapabilityCategory = Literal[
     "verification",
 ]
 type CapabilityOperation = Literal["read", "write", "session"]
+type ToolEffect = Literal["read", "document", "file", "artifact", "session"]
+type ToolHandlerSource = Literal["bindings", "catalog", "server", "gateway", "proxy"]
+type ToolExposure = Literal["worker", "proxy"]
+type ToolBindingOwner = Literal[
+    "operation",
+    "document_wrappers",
+    "qa",
+    "public_tools",
+    "public_table_tools",
+    "public_visibility_tools",
+    "public_table_edit_tools",
+    "public_object_tools",
+    "public_inspection_tools",
+    "public_selection_tools",
+    "public_document_tools",
+    "public_live_edit_tools",
+    "reference_image_tools",
+]
+type ToolVerificationDelegate = Literal["forwarded_tool"]
 
 
 _ALL_PROFILES: Final = frozenset[McpProfile](("production", "qa"))
 _QA_ONLY: Final = frozenset[McpProfile](("qa",))
+_PUBLIC_WRITE_CONTINUATION_GUIDANCE: Final = (
+    " 성공 시 affected_pages·state_token·selected_target_id·affected_target_ids로 "
+    "재조회 없이 계속하고, 응답 손실·동일 payload 재시도는 같은 operation_id를 쓰세요."
+)
+_LAYOUT_BULK_GUIDANCE: Final = (
+    " 여러 편집은 layout.blocks에 묶어 한 번의 bulk 호출로 실행하세요."
+)
+
+
+class McpToolSpecError(RuntimeError):
+    tool_name: str
+    reason: str
+
+    def __init__(self, tool_name: str, reason: str) -> None:
+        super().__init__(f"{tool_name}: {reason}")
+        self.tool_name = tool_name
+        self.reason = reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +123,11 @@ class McpToolSpec:
     category: CapabilityCategory
     operation: CapabilityOperation
     execution_path: ExecutionPath
+    handler_source: ToolHandlerSource = "bindings"
+    binding_owner: ToolBindingOwner | None = None
+    exposure: ToolExposure = "worker"
+    verification_delegate: ToolVerificationDelegate | None = None
+    effect_override: ToolEffect | None = None
     requires_session: bool = True
     requires_state_token: bool = False
     profiles: frozenset[McpProfile] = _QA_ONLY
@@ -88,14 +135,25 @@ class McpToolSpec:
     workflows: tuple[HwpWorkflowId, ...] = ()
 
     def __post_init__(self) -> None:
+        effect = self.effect
+        allowed_effects: Mapping[CapabilityOperation, frozenset[ToolEffect]] = {
+            "read": frozenset(("read", "artifact")),
+            "write": frozenset(("document", "file", "artifact", "session")),
+            "session": frozenset(("session",)),
+        }
+        if effect not in allowed_effects[self.operation]:
+            raise McpToolSpecError(
+                self.name,
+                f"effect {effect!r} is incompatible with operation {self.operation!r}",
+            )
         descriptor_workflows = descriptor_workflows_for_tool(self.name)
         if (
             self.workflow is not None
             and descriptor_workflows
             and self.workflow not in descriptor_workflows
         ):
-            raise ValueError(
-                f"{self.name} workflow does not match its operation descriptor"
+            raise McpToolSpecError(
+                self.name, "workflow does not match its operation descriptor"
             )
         workflows = (
             descriptor_workflows
@@ -105,6 +163,65 @@ class McpToolSpec:
         object.__setattr__(self, "workflows", workflows)
         if self.workflow is None and workflows:
             object.__setattr__(self, "workflow", workflows[0])
+        if (self.exposure == "proxy") != (self.handler_source == "proxy"):
+            raise McpToolSpecError(
+                self.name, "proxy exposure and handler source must match"
+            )
+        if self.handler_source != "bindings" and self.binding_owner is not None:
+            raise McpToolSpecError(
+                self.name, "binding owner requires the bindings handler source"
+            )
+        if (
+            "production" in self.profiles
+            and self.may_mutate
+            and not self.has_readback_verifier
+        ):
+            raise McpToolSpecError(
+                self.name, "mutating production tool has no verifier"
+            )
+        if (
+            "production" in self.profiles
+            and self.operation == "write"
+            and self.handler_source == "bindings"
+        ):
+            description = self.description + _PUBLIC_WRITE_CONTINUATION_GUIDANCE
+            if self.name in {"hwp_append_layout", "hwp_insert_layout"}:
+                description += _LAYOUT_BULK_GUIDANCE
+            object.__setattr__(self, "description", description)
+
+    @property
+    def effect(self) -> ToolEffect:
+        if self.effect_override is not None:
+            return self.effect_override
+        if self.operation == "read":
+            return "read"
+        if self.operation == "write":
+            return "document"
+        if self.operation == "session":
+            return "session"
+        raise McpToolSpecError(
+            self.name, f"has unsupported operation {self.operation!r}"
+        )
+
+    @property
+    def may_mutate(self) -> bool:
+        return self.effect in {"document", "file"}
+
+    @property
+    def verification_modes(self) -> tuple[OperationVerificationMode, ...]:
+        modes: list[OperationVerificationMode] = []
+        for workflow_id in self.workflows:
+            descriptor = operation_descriptor(workflow_id)
+            if descriptor is None:
+                continue
+            for mode in descriptor.verification_modes:
+                if mode not in modes:
+                    modes.append(mode)
+        return tuple(modes)
+
+    @property
+    def has_readback_verifier(self) -> bool:
+        return bool(self.verification_modes) or self.verification_delegate is not None
 
 
 class McpProfileError(RuntimeError):
@@ -135,7 +252,7 @@ MCP_TOOL_SPECS: Final = (
     ),
     McpToolSpec(
         "hwp_open_document",
-        "열린 한컴 프로세스를 전체 경로 또는 selector로 지정해 기존 문서를 새 탭이나 새 창에 열고, 원래 활성 문서를 복원한 뒤 정확한 document_id를 다시 읽습니다.",
+        "열린 한컴 프로세스를 전체 경로 또는 selector로 지정해 기존 문서를 새 탭이나 새 창에 열고, 기본적으로 원래 활성 문서를 복원한 뒤 정확한 document_id를 다시 읽습니다. restore_reference=false이면 새 문서를 활성 상태로 유지합니다.",
         "document",
         "session",
         "rot_com",
@@ -184,6 +301,7 @@ MCP_TOOL_SPECS: Final = (
         "image",
         "read",
         "python_catalog",
+        effect_override="artifact",
         requires_session=False,
         profiles=_ALL_PROFILES,
     ),
@@ -236,6 +354,7 @@ MCP_TOOL_SPECS: Final = (
         "diagnostic",
         "write",
         "win32_ui",
+        effect_override="session",
         requires_session=False,
         profiles=_QA_ONLY,
     ),
@@ -462,6 +581,7 @@ MCP_TOOL_SPECS: Final = (
         "document",
         "write",
         "native_required",
+        effect_override="file",
         profiles=_ALL_PROFILES,
     ),
     McpToolSpec(
@@ -470,6 +590,7 @@ MCP_TOOL_SPECS: Final = (
         "verification",
         "write",
         "native_required",
+        effect_override="file",
         profiles=_ALL_PROFILES,
     ),
     McpToolSpec(
@@ -566,6 +687,8 @@ MCP_TOOL_SPECS: Final = (
         "verification",
         "read",
         "com_dispatch",
+        binding_owner="public_inspection_tools",
+        effect_override="artifact",
         requires_session=False,
         profiles=_ALL_PROFILES,
     ),
@@ -583,15 +706,17 @@ MCP_TOOL_SPECS: Final = (
         "catalog",
         "read",
         "python_catalog",
+        handler_source="catalog",
         requires_session=False,
         profiles=_ALL_PROFILES,
     ),
     McpToolSpec(
         "hwp_search_tools",
-        "한컴 작업 설명을 검색해 바로 사용할 구체적인 MCP 도구를 짧은 목록으로 반환합니다.",
+        "한컴 도구를 검색합니다. 공식 API 찾아봐·API 열어봐·API 확인·명세 확인은 include_official_api=true 호출에만 상세·근거를 최대 5건 포함합니다.",
         "catalog",
         "read",
         "python_catalog",
+        handler_source="catalog",
         requires_session=False,
         profiles=_ALL_PROFILES,
     ),
@@ -610,15 +735,29 @@ MCP_TOOL_SPECS: Final = (
         "diagnostic",
         "read",
         "python_catalog",
+        handler_source="server",
         requires_session=False,
         profiles=_ALL_PROFILES,
     ),
     McpToolSpec(
         "hwp_execute",
-        "현재 클라이언트의 도구 목록이 오래되어 선택한 구체 HWP 도구가 보이지 않을 때, 설치 서버에 등록된 정확한 도구명과 인자를 그대로 전달합니다. 일반 작업에서는 보이는 구체 도구를 직접 사용합니다.",
+        "설치 도구를 정확한 이름·인자로 전달하고 보이는 도구는 직접 호출합니다.",
         "catalog",
         "write",
         "mcp_forward",
+        handler_source="gateway",
+        verification_delegate="forwarded_tool",
+        requires_session=False,
+        profiles=_ALL_PROFILES,
+    ),
+    McpToolSpec(
+        "hwp_reload",
+        "현재 Codex 연결을 유지한 채 설치 소스에서 HWP MCP 워커를 다시 시작하고 갱신된 런타임 신원과 도구 스키마 해시를 반환합니다.",
+        "diagnostic",
+        "session",
+        "mcp_forward",
+        handler_source="proxy",
+        exposure="proxy",
         requires_session=False,
         profiles=_ALL_PROFILES,
     ),
@@ -628,6 +767,7 @@ MCP_TOOL_SPECS: Final = (
         "catalog",
         "read",
         "python_catalog",
+        handler_source="catalog",
         requires_session=False,
     ),
     McpToolSpec(
@@ -636,6 +776,7 @@ MCP_TOOL_SPECS: Final = (
         "catalog",
         "read",
         "python_catalog",
+        handler_source="catalog",
         requires_session=False,
     ),
 )
@@ -661,8 +802,24 @@ def tool_spec(name: str) -> McpToolSpec:
     return _TOOL_BY_NAME[name]
 
 
+def tool_effect(name: str) -> ToolEffect:
+    return tool_spec(name).effect
+
+
 def tool_specs(profile: McpProfile) -> tuple[McpToolSpec, ...]:
-    return tuple(spec for spec in MCP_TOOL_SPECS if profile in spec.profiles)
+    return tuple(
+        spec
+        for spec in MCP_TOOL_SPECS
+        if profile in spec.profiles and spec.exposure == "worker"
+    )
+
+
+def proxy_tool_specs(profile: McpProfile) -> tuple[McpToolSpec, ...]:
+    return tuple(
+        spec
+        for spec in MCP_TOOL_SPECS
+        if profile in spec.profiles and spec.exposure == "proxy"
+    )
 
 
 def tool_names(profile: McpProfile) -> frozenset[str]:

@@ -129,6 +129,13 @@ class HwpAction(Protocol):
 
 
 class HwpComApplication(HwpRegistrar, Protocol):
+    def Open(
+        self,
+        path: str,
+        format: str | None,
+        arguments: str | None,
+    ) -> bool: ...
+
     @property
     def SelectionMode(self) -> int: ...
 

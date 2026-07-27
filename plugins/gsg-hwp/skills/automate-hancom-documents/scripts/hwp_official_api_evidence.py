@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
+from typing import cast
 
 
 _STATE_NAMES = (
@@ -12,6 +14,12 @@ _STATE_NAMES = (
     "control_count",
     "control_hash",
 )
+_FIXTURE_EVIDENCE = {
+    "fixture_scope": "active_document_owner_context",
+    "fixture_isolation_guaranteed": False,
+    "operation_effect_verified": False,
+    "evidence_scope": "invoke_and_state_observation_only",
+}
 
 
 def _integer(value: str) -> int:
@@ -23,6 +31,58 @@ def _state(fields: Sequence[str], start: int) -> dict[str, int]:
         name: _integer(fields[start + offset])
         for offset, name in enumerate(_STATE_NAMES)
     }
+
+
+def _valid_document_state(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    state = cast(dict[str, object], value)
+    page_count = state.get("page_count")
+    modified = state.get("modified")
+    position = tuple(state.get(name) for name in ("list", "paragraph", "character"))
+    control_count = state.get("control_count")
+    return (
+        isinstance(page_count, int)
+        and page_count > 0
+        and modified in {0, 1}
+        and all(isinstance(item, int) and item >= 0 for item in position)
+        and isinstance(control_count, int)
+        and control_count >= 0
+    )
+
+
+def _document_states_valid(parsed: Mapping[str, object]) -> bool:
+    return _valid_document_state(parsed.get("before")) and _valid_document_state(
+        parsed.get("after")
+    )
+
+
+def _false_automation_result_is_query(
+    parsed: Mapping[str, object],
+) -> bool:
+    if parsed.get("member_kind") != "method":
+        return True
+    name = parsed.get("name")
+    if not isinstance(name, str):
+        return False
+    matches = cast(
+        list[str],
+        re.findall(
+            r"[A-Z]+(?=[A-Z][a-z]|[0-9]|$)|[A-Z]?[a-z]+|[0-9]+",
+            name,
+        ),
+    )
+    tokens = tuple(token.casefold() for token in matches)
+    return tokens[:1] in {
+        ("get",),
+        ("is",),
+        ("can",),
+        ("has",),
+        ("check",),
+        ("query",),
+        ("find",),
+        ("read",),
+    } or bool({"exist", "exists", "equivalent"}.intersection(tokens))
 
 
 def _action(fields: Sequence[str]) -> dict[str, object]:
@@ -134,35 +194,59 @@ def parse_native_response(response: str) -> dict[str, object]:
     if len(fields) < 2 or fields[0] != "HCV1":
         raise ValueError("native response framing is invalid")
     if fields[1] == "ERROR":
-        return {
+        parsed: dict[str, object] = {
             "kind": "error",
             "code": fields[2] if len(fields) > 2 else "",
             "message": fields[3] if len(fields) > 3 else "",
         }
-    if fields[1] == "ACTION":
-        return _action(fields)
-    if fields[1] == "PARAMETER_SET":
-        return _parameter_set(fields, lines[1:])
-    if fields[1] == "AUTOMATION":
-        return _automation(fields, lines[1:])
-    raise ValueError("native response kind is invalid")
+    elif fields[1] == "ACTION":
+        parsed = _action(fields)
+    elif fields[1] == "PARAMETER_SET":
+        parsed = _parameter_set(fields, lines[1:])
+    elif fields[1] == "AUTOMATION":
+        parsed = _automation(fields, lines[1:])
+    else:
+        raise ValueError("native response kind is invalid")
+    parsed.update(_FIXTURE_EVIDENCE)
+    parsed["document_state_valid"] = _document_states_valid(parsed)
+    return parsed
 
 
-def classify_native_evidence(parsed: dict[str, object]) -> str:
+def classify_native_evidence(parsed: Mapping[str, object]) -> str:
     kind = parsed.get("kind")
+    if not _document_states_valid(parsed):
+        return "failed"
     if kind == "action":
         created = parsed.get("create_action_hresult") == 0
         invoked = (
-            parsed.get("execute_hresult") == 0 or parsed.get("run_hresult") == 0
-        )
+            parsed.get("execute_hresult") == 0 and parsed.get("execute_return") == 1
+        ) or (parsed.get("run_hresult") == 0 and parsed.get("run_return") == 1)
         return "passed" if created and invoked else "failed"
     if kind == "parameter_set":
         created = parsed.get("create_set_hresult") == 0
-        complete = parsed.get("failed_items") == 0
-        return "passed" if created and complete else "failed"
+        item_count = parsed.get("item_count")
+        passed_items = parsed.get("passed_items")
+        complete = (
+            isinstance(item_count, int)
+            and item_count >= 0
+            and passed_items == item_count
+            and parsed.get("failed_items") == 0
+        )
+        execute_hresult = parsed.get("execute_hresult")
+        execute_return = parsed.get("execute_return")
+        invoked = (execute_hresult == 0 and execute_return == 1) or (
+            execute_hresult == 1 and execute_return == -1
+        )
+        return "passed" if created and complete and invoked else "failed"
     if kind == "automation":
         resolved = parsed.get("owner_hresult") == 0
         prepared = parsed.get("argument_hresult") == 0
         invoked = parsed.get("invoke_hresult") == 0
-        return "passed" if resolved and prepared and invoked else "failed"
+        returned_false = parsed.get("variant_type") == 11 and str(
+            parsed.get("value")
+        ).casefold() in {"false", "0"}
+        result_valid = not returned_false or _false_automation_result_is_query(parsed)
+        return (
+            "passed" if resolved and prepared and invoked and result_valid else "failed"
+        )
     return "failed"

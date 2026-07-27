@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import fields
 from pathlib import Path
+
+import pytest
 
 
 SCRIPTS = (
@@ -12,6 +15,8 @@ SCRIPTS = (
 )
 sys.path.insert(0, str(SCRIPTS))
 
+import hwp_workflow_router as workflow_router  # noqa: E402
+from hwp_errors import HwpLiveError  # noqa: E402
 from hwp_live_contract import OpenDocument  # noqa: E402
 from hwp_live_session_workflow import WORKFLOW_REQUIRED_INPUTS  # noqa: E402
 from hwp_mcp_registry import tool_spec  # noqa: E402
@@ -59,9 +64,47 @@ def test_text_patch_workflows_share_one_certified_readback_recipe_shape() -> Non
         assert descriptor.routing_steps == expected_steps
         assert descriptor.recipe is not None
         assert descriptor.recipe.steps == expected_steps
-        assert descriptor.verification_modes == (
-            "native_operation_specific_readback",
-        )
+        assert descriptor.verification_modes == ("native_operation_specific_readback",)
+
+
+def test_router_owns_search_metadata_without_execution_definitions() -> None:
+    field_names = {field.name for field in fields(workflow_router._WorkflowDefinition)}
+
+    assert "execution" not in field_names
+    assert "steps" not in field_names
+    for definition in workflow_router._DEFINITIONS:
+        assert operation_descriptor(definition.workflow_id) is not None
+
+
+def test_workflow_registration_rejects_missing_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = workflow_router._WorkflowDefinition(
+        workflow_id="text.insert",
+        description="test definition",
+        groups=(("text",),),
+    )
+    monkeypatch.setattr(workflow_router, "operation_descriptor", lambda _workflow: None)
+
+    with pytest.raises(HwpLiveError):
+        workflow_router._register_workflow_definitions((definition,))
+
+
+def test_text_selection_and_layout_routing_keeps_descriptor_behavior() -> None:
+    workflows = (
+        "text.insert",
+        "text.replace",
+        "document.replace_selection",
+        "document.append_layout",
+        "document.insert_layout",
+    )
+
+    for workflow in workflows:
+        descriptor = operation_descriptor(workflow)
+        assert descriptor is not None
+        resolution = resolve_explicit_workflow(workflow, workflow)
+        assert resolution.steps == descriptor.routing_steps
+        assert resolution.candidates[0].execution == descriptor.execution
 
 
 def test_descriptor_drives_certification_routing_schema_and_tool_mapping() -> None:
@@ -80,8 +123,7 @@ def test_descriptor_drives_certification_routing_schema_and_tool_mapping() -> No
         assert resolution.steps == descriptor.routing_steps
         assert resolution.candidates[0].execution == descriptor.execution
         assert (
-            WORKFLOW_REQUIRED_INPUTS[descriptor.workflow_id]
-            == descriptor.input_schema
+            WORKFLOW_REQUIRED_INPUTS[descriptor.workflow_id] == descriptor.input_schema
         )
 
         for public_tool in descriptor.public_tools:

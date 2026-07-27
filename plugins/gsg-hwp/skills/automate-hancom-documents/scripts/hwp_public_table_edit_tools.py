@@ -106,6 +106,10 @@ class HwpPublicTableEditTools:
         cell: PublicCellReference | None = None,
         row_height_mm: Annotated[float | None, Field(ge=1, le=250)] = None,
         column_width_mm: Annotated[float | None, Field(ge=1, le=250)] = None,
+        padding_left_mm: Annotated[float | None, Field(ge=0, le=20)] = None,
+        padding_right_mm: Annotated[float | None, Field(ge=0, le=20)] = None,
+        padding_top_mm: Annotated[float | None, Field(ge=0, le=20)] = None,
+        padding_bottom_mm: Annotated[float | None, Field(ge=0, le=20)] = None,
         bold: bool | None = None,
         font_name: Annotated[str | None, Field(min_length=1, max_length=100)] = None,
         font_size_pt: Annotated[float | None, Field(ge=1, le=96)] = None,
@@ -153,6 +157,15 @@ class HwpPublicTableEditTools:
                     border_width=border_width,
                     border_color=border_color,
                 )
+                parameters = dict(requested.to_parameters())
+                for name, value in (
+                    ("padding_left_mm", padding_left_mm),
+                    ("padding_right_mm", padding_right_mm),
+                    ("padding_top_mm", padding_top_mm),
+                    ("padding_bottom_mm", padding_bottom_mm),
+                ):
+                    if value is not None:
+                        parameters[name] = value
                 return await self._execute(
                     request.resolution.query,
                     HwpOperateInputs(
@@ -160,7 +173,7 @@ class HwpPublicTableEditTools:
                         document=resolved.target.document_path,
                         operation="table.format",
                         target=resolved.target.target,
-                        parameters=dict(requested.to_parameters()),
+                        parameters=parameters,
                         policy=HwpOperatePolicy(ambiguity="return_candidates"),
                         postconditions=HwpOperatePostconditions(verify_structure=True),
                     ),

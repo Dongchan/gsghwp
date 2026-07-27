@@ -27,6 +27,16 @@ class _ForwardedRuntimeStatus(BaseModel):
     result: RuntimeStatus
 
 
+class _CatalogRecord(BaseModel):
+    count: int
+    schema_hash: str
+    names: tuple[str, ...]
+
+
+class _CompatibilityManifest(BaseModel):
+    tool_catalogs: dict[str, _CatalogRecord]
+
+
 def _worker_script(tmp_path: Path) -> Path:
     path = tmp_path / "test_hwp_worker.py"
     _ = path.write_text(
@@ -56,6 +66,10 @@ def test_proxy_refreshes_worker_and_tool_catalog_without_new_client_session(
 ) -> None:
     watched_source = tmp_path / "runtime-source.py"
     _ = watched_source.write_text("VERSION = 1\n", encoding="utf-8")
+    manifest = _CompatibilityManifest.model_validate_json(
+        (SCRIPTS.parents[2] / "compatibility-manifest.json").read_text(encoding="utf-8")
+    )
+    host_catalog = manifest.tool_catalogs["host_visible_tools"]
     proxy = build_proxy(
         HwpWorkerLaunch(
             python_executable=Path(sys.executable),
@@ -108,6 +122,10 @@ def test_proxy_refreshes_worker_and_tool_catalog_without_new_client_session(
 
         names = {tool.name for tool in first_tools.tools}
         assert {"hwp_runtime_info", "hwp_reload", "hwp_execute"} <= names
+        assert tuple(tool.name for tool in first_tools.tools) == host_catalog.names
+        assert len(first_tools.tools) == host_catalog.count
+        assert tool_schema_hash(first_tools.tools) == host_catalog.schema_hash
+        assert sum(tool.name == "hwp_reload" for tool in first_tools.tools) == 1
         assert first.worker_state == "idle"
         assert first.reload_state == "not_requested"
         assert changed.worker_state == "idle"

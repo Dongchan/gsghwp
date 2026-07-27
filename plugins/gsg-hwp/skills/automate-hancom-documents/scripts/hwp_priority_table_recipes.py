@@ -159,6 +159,7 @@ def operate_table_recipe(
                     "execution_mode": "native_in_process",
                     "native_protocol": 9,
                     "verification": "native_structure_no_change",
+                    "verified": True,
                     "commands_executed": 0,
                     "native_elapsed_microseconds": 0,
                     "current_page": before.page,
@@ -173,7 +174,23 @@ def operate_table_recipe(
             return _result(resolution, "needs_input", "셀 주소별 그림 경로가 필요합니다", required_inputs=("inputs.assets.images",))
         commands, updated_addresses = prepare_table_image_commands(table, assets, policy)
         if not updated_addresses:
-            return _result(resolution, "executed", "기존 그림 보존 정책에 따라 변경할 셀이 없습니다")
+            return _result(
+                resolution,
+                "executed",
+                "기존 그림 보존 정책에 따라 변경할 셀이 없습니다",
+            ).model_copy(
+                update={
+                    "execution_mode": "native_in_process",
+                    "native_protocol": 9,
+                    "verification": "native_structure_no_change",
+                    "verified": True,
+                    "commands_executed": 0,
+                    "native_elapsed_microseconds": 0,
+                    "current_page": before.page,
+                    "page_count": before.page_count,
+                    "modified": False,
+                }
+            )
         commands_executed, elapsed = _execute(
             candidate,
             NativeActionRequest(candidate.document.DocumentID, candidate.document.FullName, commands),
@@ -192,7 +209,8 @@ def operate_table_recipe(
     return _result(resolution, "executed", "프로토콜 9 C++/ATL 네이티브 표 recipe를 실행하고 검증했습니다").model_copy(
         update={
             "execution_mode": "native_in_process", "native_protocol": 9,
-            "verification": "native_snapshot_before_after", "commands_executed": commands_executed,
+            "verification": "native_snapshot_before_after", "verified": True,
+            "commands_executed": commands_executed,
             "native_elapsed_microseconds": elapsed, "current_page": after.page,
             "page_count": after.page_count, "modified": True,
             "updated_addresses": updated_addresses,

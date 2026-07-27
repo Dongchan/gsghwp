@@ -48,10 +48,12 @@ public:
         std::vector<CellTopologyCell> cells,
         std::wstring* error) noexcept;
     void Clear() noexcept;
+    void InvalidateGeometry() noexcept;
     bool Empty() const noexcept;
     long Rows() const noexcept;
     long Columns() const noexcept;
     const CellTopologyCell* Find(const std::wstring& address) const noexcept;
+    const CellTopologyCell* OwnerAt(long row, long column) const noexcept;
     const std::vector<CellTopologyCell>& Cells() const noexcept;
     bool HasSamePhysicalShape(const CellTopology& other) const noexcept;
     std::vector<std::wstring> IntersectingColumn(long physicalColumn) const;
@@ -80,6 +82,7 @@ public:
 private:
     std::vector<CellTopologyCell> cells_;
     std::map<std::wstring, size_t> byAddress_;
+    std::vector<size_t> ownerBySlot_;
     long rows_ = 0;
     long columns_ = 0;
 };

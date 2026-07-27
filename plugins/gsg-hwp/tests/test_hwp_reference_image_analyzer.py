@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 import anyio
 from PIL import Image, ImageDraw
@@ -21,6 +25,11 @@ from hwp_reference_image_analyzer import (  # noqa: E402
     analyze_reference_image,
     load_cached_reference_image_analysis,
 )
+from hwp_reference_image_cache import (  # noqa: E402
+    ReferenceImageResourceLimits,
+    acquire_reference_image_lock,
+    prune_reference_image_cache,
+)
 from hwp_live_session import LiveHwpController  # noqa: E402
 from hwp_mcp import build_server  # noqa: E402
 from hwp_mcp_forward import HwpExecuteArguments  # noqa: E402
@@ -34,6 +43,7 @@ from hwp_reference_image_layout_bridge import (  # noqa: E402
 from hwp_reference_image_summary import (  # noqa: E402
     CompactReferenceImageAnalysis,
     ReferenceAnalysisDetail,
+    compact_reference_image_analysis,
 )
 from hwp_reference_image_pixels import PixelCanvas  # noqa: E402
 from hwp_reference_image_segments import detect_visible_segments  # noqa: E402
@@ -210,6 +220,44 @@ def test_edge_drawing_stitches_a_slightly_skewed_box_edge() -> None:
     assert len(right_edges) == 1
 
 
+def test_varied_grid_line_widths_route_to_reference_layout_bulk(
+    tmp_path: Path,
+) -> None:
+    cases = (
+        ("thin.png", (640, 420), 3, 3, 2, 48),
+        ("medium.png", (900, 600), 4, 5, 6, 72),
+        ("thick.png", (720, 720), 6, 4, 12, 14),
+    )
+    artifact_root = tmp_path / "analysis"
+
+    for name, size, rows, columns, stroke, margin in cases:
+        source = tmp_path / name
+        image = Image.new("RGB", size, "white")
+        draw = ImageDraw.Draw(image)
+        left = top = margin
+        right = size[0] - margin - 1
+        bottom = size[1] - margin - 1
+        for column in range(columns + 1):
+            x = round(left + (right - left) * column / columns)
+            draw.line((x, top, x, bottom), fill=(28, 46, 62), width=stroke)
+        for row in range(rows + 1):
+            y = round(top + (bottom - top) * row / rows)
+            draw.line((left, y, right, y), fill=(28, 46, 62), width=stroke)
+        image.save(source)
+
+        compact = compact_reference_image_analysis(
+            analyze_reference_image(source, artifact_root=artifact_root)
+        )
+
+        assert compact.recommended_execution_mode == "reference_layout_bulk", (
+            name,
+            compact.structure,
+            compact.reason_codes,
+        )
+        assert compact.structure.horizontal_segments >= rows + 1
+        assert compact.structure.vertical_segments >= columns + 1
+
+
 def test_registered_image_analyzer_is_forwardable_without_hwp_session(
     tmp_path: Path,
 ) -> None:
@@ -276,3 +324,264 @@ def test_registered_image_analyzer_is_forwardable_without_hwp_session(
     assert detail.analysis_id == direct.analysis_id
     assert detail.section == "visible_segments"
     assert len(detail.items) <= 1
+
+
+def test_large_reference_image_is_bounded_and_resource_profile_changes_cache_key(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "large.png"
+    Image.new("RGB", (1200, 900), "white").save(source)
+    compact_limits = ReferenceImageResourceLimits(
+        max_source_bytes=16 * 1024 * 1024,
+        max_source_pixels=2_000_000,
+        max_analysis_pixels=120_000,
+        max_analysis_artifact_bytes=32 * 1024 * 1024,
+        max_cache_bytes=64 * 1024 * 1024,
+        max_cache_entries=8,
+        ttl_seconds=3600,
+        lock_timeout_seconds=5,
+        stale_lock_seconds=60,
+    )
+    larger_limits = ReferenceImageResourceLimits(
+        max_source_bytes=16 * 1024 * 1024,
+        max_source_pixels=2_000_000,
+        max_analysis_pixels=240_000,
+        max_analysis_artifact_bytes=32 * 1024 * 1024,
+        max_cache_bytes=64 * 1024 * 1024,
+        max_cache_entries=8,
+        ttl_seconds=3600,
+        lock_timeout_seconds=5,
+        stale_lock_seconds=60,
+    )
+
+    compact = analyze_reference_image(
+        source,
+        artifact_root=tmp_path / "artifacts",
+        limits=compact_limits,
+    )
+    larger = analyze_reference_image(
+        source,
+        artifact_root=tmp_path / "artifacts",
+        limits=larger_limits,
+    )
+
+    assert compact.image_width == 1200
+    assert compact.image_height == 900
+    assert compact.analysis_width * compact.analysis_height <= 120_000
+    assert compact.analysis_downsampled is True
+    assert compact.analysis_id != larger.analysis_id
+
+
+def test_source_pixel_limit_rejects_before_pixel_canvas_allocation(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "too-many-pixels.png"
+    Image.new("RGB", (101, 101), "white").save(source)
+    limits = ReferenceImageResourceLimits(
+        max_source_bytes=1024 * 1024,
+        max_source_pixels=10_000,
+        max_analysis_pixels=10_000,
+        max_analysis_artifact_bytes=1024 * 1024,
+        max_cache_bytes=4 * 1024 * 1024,
+        max_cache_entries=4,
+        ttl_seconds=3600,
+        lock_timeout_seconds=5,
+        stale_lock_seconds=60,
+    )
+
+    with (
+        patch.object(
+            PixelCanvas,
+            "from_image",
+            side_effect=AssertionError("pixel canvas must not be allocated"),
+        ),
+        pytest.raises(ValueError, match="pixel limit"),
+    ):
+        _ = analyze_reference_image(
+            source,
+            artifact_root=tmp_path / "artifacts",
+            limits=limits,
+        )
+
+
+def test_incomplete_cached_analysis_is_rebuilt_instead_of_reported_as_hit(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "incomplete.png"
+    Image.new("RGB", (160, 120), "white").save(source)
+    artifact_root = tmp_path / "artifacts"
+    first = analyze_reference_image(source, artifact_root=artifact_root)
+    first.overlay_path.unlink()
+
+    rebuilt = analyze_reference_image(source, artifact_root=artifact_root)
+
+    assert rebuilt.analysis_id == first.analysis_id
+    assert rebuilt.cache_hit is False
+    assert rebuilt.overlay_path.is_file()
+
+
+def test_concurrent_same_image_analysis_publishes_one_complete_cache_entry(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "concurrent.png"
+    image = Image.new("RGB", (320, 180), "white")
+    ImageDraw.Draw(image).rectangle((20, 20, 300, 160), outline="black")
+    image.save(source)
+    artifact_root = tmp_path / "artifacts"
+
+    with ThreadPoolExecutor(max_workers=2) as calls:
+        results = tuple(
+            call.result(timeout=10)
+            for call in (
+                calls.submit(
+                    analyze_reference_image,
+                    source,
+                    artifact_root=artifact_root,
+                ),
+                calls.submit(
+                    analyze_reference_image,
+                    source,
+                    artifact_root=artifact_root,
+                ),
+            )
+        )
+
+    assert {result.cache_hit for result in results} == {False, True}
+    assert results[0].analysis_id == results[1].analysis_id
+    result_path = artifact_root / results[0].analysis_id / "result.json"
+    assert (
+        ReferenceImageAnalysis.model_validate_json(
+            result_path.read_text(encoding="utf-8")
+        ).analysis_id
+        == results[0].analysis_id
+    )
+
+
+def test_separate_processes_share_one_atomic_reference_image_cache_entry(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "process-concurrent.png"
+    image = Image.new("RGB", (240, 140), "white")
+    ImageDraw.Draw(image).rectangle((20, 20, 220, 120), outline="black")
+    image.save(source)
+    artifact_root = tmp_path / "artifacts"
+    script = (
+        "from pathlib import Path;"
+        "from hwp_reference_image_analyzer import analyze_reference_image;"
+        "import sys;"
+        "result=analyze_reference_image("
+        "Path(sys.argv[1]),artifact_root=Path(sys.argv[2]));"
+        "print(str(result.cache_hit).lower())"
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(SCRIPTS)
+
+    def invoke() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            (
+                sys.executable,
+                "-c",
+                script,
+                str(source),
+                str(artifact_root),
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=environment,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as calls:
+        completed = tuple(
+            call.result(timeout=35)
+            for call in (calls.submit(invoke), calls.submit(invoke))
+        )
+
+    assert tuple(result.returncode for result in completed) == (0, 0)
+    assert {result.stdout.strip() for result in completed} == {"false", "true"}
+    assert not tuple(artifact_root.glob(".partial-*"))
+
+
+def test_failed_analysis_does_not_publish_a_valid_cache_hit(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "failed.png"
+    Image.new("RGB", (160, 120), "white").save(source)
+    artifact_root = tmp_path / "artifacts"
+
+    with (
+        patch(
+            "hwp_reference_image_analyzer.save_overlay",
+            side_effect=OSError("simulated artifact failure"),
+        ),
+        pytest.raises(OSError, match="simulated artifact failure"),
+    ):
+        _ = analyze_reference_image(source, artifact_root=artifact_root)
+
+    assert not tuple(artifact_root.glob("ria-*/result.json"))
+    recovered = analyze_reference_image(source, artifact_root=artifact_root)
+    assert recovered.cache_hit is False
+
+
+def test_cache_pruning_enforces_entry_and_byte_limits_oldest_first(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    for index in range(3):
+        directory = artifact_root / f"ria-{index:016x}"
+        directory.mkdir()
+        result = directory / "result.json"
+        _ = result.write_bytes(b"x" * 48)
+        os.utime(result, (100 + index, 100 + index))
+    limits = ReferenceImageResourceLimits(
+        max_source_bytes=1024,
+        max_source_pixels=10_000,
+        max_analysis_pixels=10_000,
+        max_analysis_artifact_bytes=64,
+        max_cache_bytes=96,
+        max_cache_entries=2,
+        ttl_seconds=10_000_000_000,
+        lock_timeout_seconds=5,
+        stale_lock_seconds=60,
+    )
+
+    prune_reference_image_cache(artifact_root, limits)
+
+    assert tuple(path.name for path in sorted(artifact_root.glob("ria-*"))) == (
+        "ria-0000000000000001",
+        "ria-0000000000000002",
+    )
+
+
+def test_cache_pruning_does_not_remove_in_progress_analysis(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    protected_id = "ria-0000000000000001"
+    removable_id = "ria-0000000000000002"
+    for analysis_id in (protected_id, removable_id):
+        directory = artifact_root / analysis_id
+        directory.mkdir(parents=True)
+        _ = (directory / "result.json").write_text("{}", encoding="utf-8")
+    limits = ReferenceImageResourceLimits(
+        max_source_bytes=1024,
+        max_source_pixels=10_000,
+        max_analysis_pixels=10_000,
+        max_analysis_artifact_bytes=1024,
+        max_cache_bytes=1024,
+        max_cache_entries=1,
+        ttl_seconds=10_000_000_000,
+        lock_timeout_seconds=5,
+        stale_lock_seconds=60,
+    )
+    lock = acquire_reference_image_lock(artifact_root, protected_id, limits)
+    try:
+        prune_reference_image_cache(artifact_root, limits)
+        assert (artifact_root / protected_id).is_dir()
+    finally:
+        lock.close()
+
+    prune_reference_image_cache(artifact_root, limits)
+    assert len(tuple(artifact_root.glob("ria-*"))) == 1

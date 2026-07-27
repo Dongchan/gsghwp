@@ -15,7 +15,7 @@ def _same_line(left: PixelSegment, right: PixelSegment) -> bool:
 def _coalesce(segments: list[PixelSegment]) -> tuple[PixelSegment, ...]:
     ordered = sorted(
         segments,
-        key=lambda item: (item.orientation, item.position, item.start, item.end),
+        key=lambda item: (item.orientation, item.start, item.end, item.position),
     )
     retained: list[PixelSegment] = []
     for segment in ordered:
@@ -65,9 +65,7 @@ def filter_layout_segments(
     segments: list[PixelSegment],
 ) -> tuple[PixelSegment, ...]:
     candidates = _coalesce(segments)
-    horizontal = tuple(
-        item for item in candidates if item.orientation == "horizontal"
-    )
+    horizontal = tuple(item for item in candidates if item.orientation == "horizontal")
     vertical = tuple(item for item in candidates if item.orientation == "vertical")
     retained_horizontal = [
         item
@@ -80,20 +78,22 @@ def filter_layout_segments(
         if item.end - item.start >= max(24, canvas.height // 40)
     ]
     for item in vertical:
-        if item in retained_vertical or item.end - item.start < max(12, canvas.height // 100):
+        if item in retained_vertical or item.end - item.start < max(
+            12, canvas.height // 100
+        ):
             continue
         supports = sum(
-            _horizontal_supports(item, candidate)
-            for candidate in retained_horizontal
+            _horizontal_supports(item, candidate) for candidate in retained_horizontal
         )
         if supports >= 2:
             retained_vertical.append(item)
     for item in horizontal:
-        if item in retained_horizontal or item.end - item.start < max(20, canvas.width // 50):
+        if item in retained_horizontal or item.end - item.start < max(
+            20, canvas.width // 50
+        ):
             continue
         supports = sum(
-            _vertical_supports(item, candidate)
-            for candidate in retained_vertical
+            _vertical_supports(item, candidate) for candidate in retained_vertical
         )
         if supports >= 2:
             retained_horizontal.append(item)

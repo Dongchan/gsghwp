@@ -1,42 +1,38 @@
 from __future__ import annotations
 
-from typing import Final
-
 from pydantic import JsonValue
 
+from hwp_mcp_registry import ToolEffect, tool_effect
 
-_NON_MUTATING_TOOLS: Final[frozenset[str]] = frozenset(
-    {
-        "hwp_connect",
-        "hwp_disconnect",
-        "hwp_get_capabilities",
-        "hwp_get_official_api_coverage",
-        "hwp_get_operation_status",
-        "hwp_inspect",
-        "hwp_inspect_page_fast",
-        "hwp_inspect_structure",
-        "hwp_inspect_window_state",
-        "hwp_list_open_documents",
-        "hwp_list_styles",
-        "hwp_list_window_states",
-        "hwp_render_page",
-        "hwp_runtime_info",
-        "hwp_search_official_api",
-        "hwp_search_tools",
-        "hwp_watch_state",
-    }
-)
+
+def worker_tool_effect(
+    name: str,
+    arguments: dict[str, JsonValue],
+) -> ToolEffect:
+    target_name = name
+    target_arguments = arguments
+    if name == "hwp_execute":
+        forwarded = arguments.get("tool_name")
+        if not isinstance(forwarded, str) or forwarded == "hwp_execute":
+            return "document"
+        target_name = forwarded
+        nested = arguments.get("arguments")
+        target_arguments = nested if isinstance(nested, dict) else {}
+
+    if target_name in {"hwp_operate", "hwp_operate_production"}:
+        resolve_only = target_arguments.get("resolve_only")
+        allow_change = target_arguments.get("allow_document_change")
+        if resolve_only is True or allow_change is False:
+            return "read"
+
+    try:
+        return tool_effect(target_name)
+    except KeyError:
+        return "document"
 
 
 def worker_tool_may_mutate(
     name: str,
     arguments: dict[str, JsonValue],
 ) -> bool:
-    if name in _NON_MUTATING_TOOLS:
-        return False
-    if name in {"hwp_operate", "hwp_operate_production"}:
-        resolve_only = arguments.get("resolve_only")
-        allow_change = arguments.get("allow_document_change")
-        if resolve_only is True or allow_change is False:
-            return False
-    return True
+    return worker_tool_effect(name, arguments) in {"document", "file"}

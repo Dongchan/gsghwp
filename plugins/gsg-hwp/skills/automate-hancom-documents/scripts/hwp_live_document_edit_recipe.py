@@ -21,7 +21,11 @@ from hwp_live_edit_history_runtime import (
 from hwp_live_document_edit_commands import (
     build_delete_page_commands,
 )
-from hwp_live_document_edit_verification import verify_control_deletion
+from hwp_live_document_edit_verification import (
+    capture_history_structure_snapshot,
+    verify_control_deletion,
+    verify_history_structure_change,
+)
 from hwp_live_native_action_models import (
     NativeActionCommand,
     NativePageControl,
@@ -192,6 +196,22 @@ def operate_native_document_edit(
     before = read_native_snapshot(request.candidate.window_handle)
     if before is None:
         raise HwpLiveError("실시간 편집 전 문서 상태를 읽지 못했습니다")
+    history_structure_before = None
+    if history is not None:
+        direction, _steps = history
+        if (
+            request.history.available(
+                direction,
+                request.routing_page.document_id,
+                request.routing_page.full_name,
+            )
+            == 0
+        ):
+            history_structure_before = capture_history_structure_snapshot(
+                request.candidate,
+                request.routing_page.page,
+                before.page_count,
+            )
     custom_history = False
     managed_history = False
     checkpoint_history = should_capture_full_document_checkpoint(
@@ -288,6 +308,16 @@ def operate_native_document_edit(
         raise HwpLiveError("실시간 편집 후 문서 상태를 읽지 못했습니다")
     if before.document_id != after.document_id or before.full_name != after.full_name:
         raise HwpLiveError("실시간 편집 중 대상 문서가 바뀌었습니다")
+    if history_structure_before is not None:
+        history_structure_after = capture_history_structure_snapshot(
+            request.candidate,
+            request.routing_page.page,
+            after.page_count,
+        )
+        verify_history_structure_change(
+            history_structure_before,
+            history_structure_after,
+        )
     if managed_history and workflow == "document.undo":
         restored_entry = request.history.peek(
             "redo",
@@ -330,11 +360,7 @@ def operate_native_document_edit(
             "changed": True,
             "execution_mode": "native_in_process",
             "native_protocol": 9,
-            "verification": (
-                "native_snapshot_before_after"
-                if managed_history or workflow not in {"document.undo", "document.redo"}
-                else "native_action_result"
-            ),
+            "verification": "native_snapshot_before_after",
             "verified": True,
             "commands_executed": commands_executed,
             "commands_completed": commands_executed,

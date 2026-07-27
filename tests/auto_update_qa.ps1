@@ -55,6 +55,17 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $pluginRoot = Join-Path $repositoryRoot "plugins\gsg-hwp"
 $modulePath = Join-Path $pluginRoot "scripts\GsgHwp.Update.psm1"
 $policyPath = Join-Path $pluginRoot "update-policy.json"
+$plugin = Get-Content -LiteralPath (Join-Path $pluginRoot ".codex-plugin\plugin.json") `
+    -Raw -Encoding UTF8 | ConvertFrom-Json
+$packageManifest = Get-Content -LiteralPath (
+    Join-Path $pluginRoot "compatibility-manifest.json"
+) -Raw -Encoding UTF8 | ConvertFrom-Json
+$pluginVersion = [string]$plugin.version
+$parsedPluginVersion = [version]$pluginVersion
+$candidatePatch = $parsedPluginVersion.Build + 1
+$candidateVersion = "{0}.{1}.{2}" -f $parsedPluginVersion.Major,
+    $parsedPluginVersion.Minor,
+    $candidatePatch
 
 Assert-True -Condition (Test-Path -LiteralPath $modulePath -PathType Leaf) `
     -Message "Automatic update module is missing"
@@ -63,11 +74,14 @@ Assert-True -Condition (Test-Path -LiteralPath $policyPath -PathType Leaf) `
 
 Import-Module -Name $modulePath -Force
 
-Assert-Equal -Expected 1 -Actual (Compare-GsgHwpVersion -Left "1.1.0" -Right "1.0.4") `
+Assert-Equal -Expected 1 `
+    -Actual (Compare-GsgHwpVersion -Left $candidateVersion -Right $pluginVersion) `
     -Message "Newer version comparison failed"
-Assert-Equal -Expected 0 -Actual (Compare-GsgHwpVersion -Left "1.1.0" -Right "1.1.0") `
+Assert-Equal -Expected 0 `
+    -Actual (Compare-GsgHwpVersion -Left $pluginVersion -Right $pluginVersion) `
     -Message "Equal version comparison failed"
-Assert-Equal -Expected -1 -Actual (Compare-GsgHwpVersion -Left "1.0.4" -Right "1.1.0") `
+Assert-Equal -Expected -1 `
+    -Actual (Compare-GsgHwpVersion -Left $pluginVersion -Right $candidateVersion) `
     -Message "Older version comparison failed"
 
 $policy = Read-GsgHwpUpdatePolicy -Path $policyPath
@@ -92,12 +106,15 @@ Assert-True -Condition ($launcherSource -notmatch "Get-Command\s+['`"]?python") 
 
 $validManifest = [pscustomobject][ordered]@{
     schema_version = 1
-    distribution = "1.1.1"
-    source_version = "0.5.74"
-    package_url = "https://github.com/innae1121-bit/gsghwp/releases/download/v1.1.1/gsg-hwp-plugin-v1.1.1.zip"
+    distribution = $candidateVersion
+    source_version = [string]$packageManifest.source_version
+    package_url = (
+        "https://github.com/innae1121-bit/gsghwp/releases/download/v{0}/gsg-hwp-plugin-v{0}.zip" -f
+            $candidateVersion
+    )
     package_sha256 = ("a" * 64)
     package_root = "gsg-hwp"
-    native_bridge = "0.5.122"
+    native_bridge = [string]$packageManifest.native_bridge
     published_utc = "2026-07-25T00:00:00Z"
 }
 Assert-True -Condition (Test-GsgHwpUpdateManifest -Manifest $validManifest) `
@@ -120,9 +137,9 @@ $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) "GsgHwpUpdateQa-$te
 try {
     $localAppData = Join-Path $temporaryRoot "LocalAppData"
     $packagesRoot = Join-Path $localAppData "GSG_HWP\packages"
-    $candidateRoot = Join-Path $packagesRoot "1.1.1\gsg-hwp"
+    $candidateRoot = Join-Path $packagesRoot ("{0}\gsg-hwp" -f $candidateVersion)
     New-Item -ItemType Directory -Path $candidateRoot -Force | Out-Null
-    [pscustomobject][ordered]@{ distribution = "1.1.1" } |
+    [pscustomobject][ordered]@{ distribution = $candidateVersion } |
         ConvertTo-Json |
         Set-Content -LiteralPath (Join-Path $candidateRoot "compatibility-manifest.json") `
             -Encoding UTF8
@@ -131,7 +148,7 @@ try {
     New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
     [pscustomobject][ordered]@{
         schema_version = 1
-        distribution = "1.1.1"
+        distribution = $candidateVersion
         package_root = $candidateRoot
         previous_package_root = $pluginRoot
     } |

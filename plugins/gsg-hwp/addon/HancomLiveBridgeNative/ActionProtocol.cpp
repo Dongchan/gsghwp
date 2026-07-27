@@ -1,5 +1,7 @@
 #include "ActionProtocol.h"
 
+#include "ProtocolEncoding.h"
+
 #include <WinCrypt.h>
 
 #include <cerrno>
@@ -12,6 +14,8 @@
 
 namespace hancom::actions {
 namespace {
+
+using hancom::encoding::EncodeUtf8Base64;
 
 constexpr size_t kMaximumPayloadCharacters = 8'000'000;
 constexpr size_t kMaximumCommands = 20'000;
@@ -79,51 +83,6 @@ bool DecodeUtf8Base64(const std::wstring& encoded, std::wstring* const decoded) 
                characterCount) == characterCount;
 }
 
-std::wstring EncodeUtf8Base64(const std::wstring& value) {
-    const int byteCount = WideCharToMultiByte(
-        CP_UTF8,
-        WC_ERR_INVALID_CHARS,
-        value.c_str(),
-        static_cast<int>(value.size()),
-        nullptr,
-        0,
-        nullptr,
-        nullptr);
-    if (byteCount < 0) {
-        return L"";
-    }
-    std::vector<BYTE> bytes(static_cast<size_t>(byteCount));
-    if (byteCount != 0 && WideCharToMultiByte(
-            CP_UTF8,
-            WC_ERR_INVALID_CHARS,
-            value.c_str(),
-            static_cast<int>(value.size()),
-            reinterpret_cast<LPSTR>(bytes.data()),
-            byteCount,
-            nullptr,
-            nullptr) != byteCount) {
-        return L"";
-    }
-    DWORD encodedCount = 0;
-    if (!CryptBinaryToStringW(
-            bytes.data(),
-            static_cast<DWORD>(bytes.size()),
-            CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-            nullptr,
-            &encodedCount)) {
-        return L"";
-    }
-    std::vector<wchar_t> encoded(encodedCount);
-    if (!CryptBinaryToStringW(
-            bytes.data(),
-            static_cast<DWORD>(bytes.size()),
-            CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-            encoded.data(),
-            &encodedCount)) {
-        return L"";
-    }
-    return std::wstring(encoded.data());
-}
 
 bool Fail(
     Error* const error,
@@ -345,6 +304,10 @@ bool ParseRequest(
             } else if (fields[0] == L"SAVE_DOCUMENT_FILE" && fields.size() == 2 &&
                 DecodeUtf8Base64(fields[1], &command.first) && !command.first.empty()) {
                 command.kind = CommandKind::SaveDocumentFile;
+            } else if (fields[0] == L"RESTORE_DOCUMENT_FILE" && fields.size() == 3 &&
+                DecodeUtf8Base64(fields[1], &command.first) && !command.first.empty() &&
+                ParseLong(fields[2], &command.page) && command.page > 0) {
+                command.kind = CommandKind::RestoreDocumentFile;
             } else if (fields[0] == L"APPLY_COPIED_TABLE_ANCHOR" && fields.size() == 2 &&
                 DecodeUtf8Base64(fields[1], &command.first) && !command.first.empty()) {
                 command.kind = CommandKind::ApplyCopiedTableAnchor;

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, replace
+from typing import Final, Literal
 
 from hwp_errors import HwpLiveError
 from hwp_live_native_action_models import (
     CaptureTableCommand,
+    CellCommand,
+    NativeActionCommand,
     NativeActionRequest,
     SelectControlCommand,
     SetCellTextCommand,
@@ -31,6 +33,32 @@ from hwp_table_format_inference import infer_table_cell_edits
 
 
 _ADDRESS = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
+_NATIVE_CALL_DEADLINE_MICROSECONDS: Final = 180_000_000
+_NATIVE_CALL_SAFETY_FACTOR: Final = 6
+_OBSERVED_SAFE_EDIT_COUNT: Final = 100
+_OBSERVED_SAFE_TABLE_CELL_COUNT: Final = 100
+_OBSERVED_SAFE_WORST_MICROSECONDS: Final = 24_155_000
+# The live-safe sample includes one execution topology plus one preflight
+# topology per edited cell. Keep both command count and topology work within
+# that measured envelope; neither dimension alone is a safe chunk-size proxy.
+_OBSERVED_SAFE_TOPOLOGY_WORK: Final = _OBSERVED_SAFE_TABLE_CELL_COUNT * (
+    _OBSERVED_SAFE_EDIT_COUNT + 1
+)
+_NATIVE_CALL_TARGET_MICROSECONDS: Final = (
+    _NATIVE_CALL_DEADLINE_MICROSECONDS // _NATIVE_CALL_SAFETY_FACTOR
+)
+_NATIVE_CALL_EDIT_BUDGET: Final = min(
+    _OBSERVED_SAFE_EDIT_COUNT,
+    _NATIVE_CALL_TARGET_MICROSECONDS
+    * _OBSERVED_SAFE_EDIT_COUNT
+    // _OBSERVED_SAFE_WORST_MICROSECONDS,
+)
+_NATIVE_CALL_TOPOLOGY_WORK_BUDGET: Final = min(
+    _OBSERVED_SAFE_TOPOLOGY_WORK,
+    _NATIVE_CALL_TARGET_MICROSECONDS
+    * _OBSERVED_SAFE_TOPOLOGY_WORK
+    // _OBSERVED_SAFE_WORST_MICROSECONDS,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,10 +68,15 @@ class PreparedWorkflowTableFill:
     control_instance_id: str
     replacements: tuple[tuple[str, str], ...]
     native_protocol: Literal[9, 12]
+    command_groups: tuple[tuple[NativeActionCommand, ...], ...] = ()
 
 
 def _cell_map(table: StructureTable) -> dict[str, StructureCell]:
     return {cell.address: cell for cell in table.cells}
+
+
+def _normalized_cell_text(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _column_letters(index: int) -> str:
@@ -79,7 +112,9 @@ def _owner_cell(
         raise HwpLiveError(f"대상 한컴 표에 {address.upper()} 셀이 없습니다")
     owner = cells.get(cell.owner_address)
     if owner is None:
-        raise HwpLiveError(f"대상 한컴 표의 병합 셀 소유자를 찾지 못했습니다: {address}")
+        raise HwpLiveError(
+            f"대상 한컴 표의 병합 셀 소유자를 찾지 못했습니다: {address}"
+        )
     return owner
 
 
@@ -98,7 +133,9 @@ def _record_replacements(
             value = record.get(column.source_key, "")
             existing = replacements.get(owner.address)
             if existing is not None and existing != value:
-                raise HwpLiveError(f"병합 셀 {owner.address}에 서로 다른 값을 입력할 수 없습니다")
+                raise HwpLiveError(
+                    f"병합 셀 {owner.address}에 서로 다른 값을 입력할 수 없습니다"
+                )
             replacements[owner.address] = value
     return replacements
 
@@ -123,7 +160,9 @@ def _row_replacements(
             )
             existing = replacements.get(owner.address)
             if existing is not None and existing != value:
-                raise HwpLiveError(f"병합 셀 {owner.address}에 서로 다른 값을 입력할 수 없습니다")
+                raise HwpLiveError(
+                    f"병합 셀 {owner.address}에 서로 다른 값을 입력할 수 없습니다"
+                )
             replacements[owner.address] = value
     return replacements
 
@@ -136,7 +175,9 @@ def table_fill_replacements(
 ) -> tuple[tuple[str, str], ...]:
     modes = int(bool(data.cells)) + int(bool(data.rows)) + int(bool(data.records))
     if modes != 1:
-        raise HwpLiveError("inputs.data에는 cells, rows, records 중 정확히 하나를 전달하세요")
+        raise HwpLiveError(
+            "inputs.data에는 cells, rows, records 중 정확히 하나를 전달하세요"
+        )
     cells = _cell_map(table)
     if data.cells:
         replacements = {
@@ -203,6 +244,13 @@ def prepare_table_fill(
         data,
         fill_blanks_only=policy.fill_blanks_only,
     )
+    cells = _cell_map(table)
+    replacements = tuple(
+        (address, value)
+        for address, value in replacements
+        if _normalized_cell_text(_owner_cell(cells, address).text)
+        != _normalized_cell_text(value)
+    )
     if policy.preserve_style:
         edits = infer_table_cell_edits(
             table,
@@ -211,10 +259,8 @@ def prepare_table_fill(
             surrounding_texts=surrounding_texts,
         )
         replacements = tuple((edit.address, edit.replacement) for edit in edits)
-        edit_commands = tuple(
-            command
-            for edit in edits
-            for command in (
+        command_groups = tuple(
+            (
                 (
                     SetCellTextCommand(
                         edit.address,
@@ -238,12 +284,15 @@ def prepare_table_fill(
                     for patch in edit.patches
                 )
             )
+            for edit in edits
         )
+        edit_commands = tuple(command for group in command_groups for command in group)
         native_protocol: Literal[9, 12] = 12
     else:
-        edit_commands = tuple(
-            SetCellTextCommand(address, value) for address, value in replacements
+        command_groups = tuple(
+            (SetCellTextCommand(address, value),) for address, value in replacements
         )
+        edit_commands = tuple(group[0] for group in command_groups)
         native_protocol = 9
     commands = (
         SelectControlCommand(control_id),
@@ -260,7 +309,121 @@ def prepare_table_fill(
         control_instance_id=control_id,
         replacements=replacements,
         native_protocol=native_protocol,
+        command_groups=command_groups,
     )
+
+
+def _table_fill_group_topology_work(
+    group: tuple[NativeActionCommand, ...],
+    *,
+    table_cell_count: int,
+) -> int:
+    return table_cell_count * sum(
+        isinstance(command, TextPatchCommand) for command in group
+    )
+
+
+def _table_fill_chunk(
+    prepared: PreparedWorkflowTableFill,
+    replacements: tuple[tuple[str, str], ...],
+    command_groups: tuple[tuple[NativeActionCommand, ...], ...],
+) -> PreparedWorkflowTableFill:
+    first_address = replacements[0][0]
+    prefix = prepared.request.commands[:2]
+    request = replace(
+        prepared.request,
+        commands=(
+            *prefix,
+            # A CELL command makes the native request ineligible for the
+            # quadratic all-cell preflight. SET_CELL_TEXT retains its stale
+            # guard/readback and TEXT_PATCH retains match/readback validation.
+            CellCommand(first_address),
+            *(command for group in command_groups for command in group),
+        ),
+    )
+    return replace(
+        prepared,
+        request=request,
+        replacements=replacements,
+        command_groups=command_groups,
+    )
+
+
+def table_fill_chunks(
+    prepared: PreparedWorkflowTableFill,
+    table: StructureTable,
+) -> tuple[PreparedWorkflowTableFill, ...]:
+    replacement_count = len(prepared.replacements)
+    if replacement_count == 0:
+        return (prepared,)
+    table_cell_count = max(1, len(table.cells))
+    request_edit_commands = prepared.request.commands[2:]
+    original_text_patch_count = sum(
+        isinstance(command, TextPatchCommand) for command in request_edit_commands
+    )
+    original_topology_work = table_cell_count * (
+        replacement_count + original_text_patch_count + 1
+    )
+    if (
+        len(request_edit_commands) <= _NATIVE_CALL_EDIT_BUDGET
+        and original_topology_work <= _NATIVE_CALL_TOPOLOGY_WORK_BUDGET
+    ):
+        return (prepared,)
+    if len(prepared.command_groups) != replacement_count:
+        raise HwpLiveError(
+            "대량 표 채움 명령과 대상 셀의 대응 관계가 올바르지 않습니다"
+        )
+    if not (
+        len(prepared.request.commands) >= 2
+        and isinstance(prepared.request.commands[0], SelectControlCommand)
+        and isinstance(prepared.request.commands[1], CaptureTableCommand)
+    ):
+        raise HwpLiveError("대량 표 채움 요청의 표 선택 명령 순서가 올바르지 않습니다")
+
+    chunks: list[PreparedWorkflowTableFill] = []
+    start = 0
+    edit_count = 0
+    topology_work = table_cell_count
+    for index, group in enumerate(prepared.command_groups):
+        group_edit_count = len(group)
+        group_topology_work = _table_fill_group_topology_work(
+            group,
+            table_cell_count=table_cell_count,
+        )
+        if (
+            group_edit_count > _NATIVE_CALL_EDIT_BUDGET
+            or table_cell_count + group_topology_work
+            > _NATIVE_CALL_TOPOLOGY_WORK_BUDGET
+        ):
+            address = prepared.replacements[index][0]
+            raise HwpLiveError(
+                f"{address} 셀의 서식 보존 명령은 안전한 네이티브 호출 예산을 "
+                + "한 셀 단위로 초과하여 분할할 수 없습니다"
+            )
+        if index > start and (
+            edit_count + group_edit_count > _NATIVE_CALL_EDIT_BUDGET
+            or topology_work + group_topology_work > _NATIVE_CALL_TOPOLOGY_WORK_BUDGET
+        ):
+            chunks.append(
+                _table_fill_chunk(
+                    prepared,
+                    prepared.replacements[start:index],
+                    prepared.command_groups[start:index],
+                )
+            )
+            start = index
+            edit_count = 0
+            topology_work = table_cell_count
+        edit_count += group_edit_count
+        topology_work += group_topology_work
+    chunks.append(
+        _table_fill_chunk(
+            prepared,
+            prepared.replacements[start:],
+            prepared.command_groups[start:],
+        )
+    )
+    return tuple(chunks)
 
 
 def verify_table_fill(

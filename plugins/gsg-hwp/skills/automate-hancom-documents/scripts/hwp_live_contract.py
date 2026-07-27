@@ -93,6 +93,8 @@ class ActiveHwpTarget(ContractModel):
     control_type: str | None = None
     control_instance_id: str | None = None
     cell_address: str | None = Field(default=None, pattern=r"^[A-Z]+[1-9][0-9]*$")
+    cell_addresses: tuple[str, ...] = ()
+    cell_address_error: str | None = None
 
 
 class CharacterStyle(ContractModel):

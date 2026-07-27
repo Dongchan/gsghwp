@@ -20,16 +20,24 @@ using hancom::dispatch::AsString;
 using hancom::dispatch::Method;
 using hancom::dispatch::PropertyGet;
 
+constexpr std::uint64_t kFnvOffset = 1469598103934665603ULL;
+constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+constexpr std::uint64_t kDocumentSectionLength = 65536ULL;
+
+void AddHashCharacter(
+    std::uint64_t* const hash,
+    const wchar_t character) noexcept {
+    *hash ^= static_cast<std::uint16_t>(character);
+    *hash *= kFnvPrime;
+}
+
 void AddHashRange(
     std::uint64_t* const hash,
     const std::wstring& value,
     const size_t begin,
     const size_t end) noexcept {
-    constexpr std::uint64_t kPrime = 1099511628211ULL;
     for (size_t index = begin; index < end; ++index) {
-        const wchar_t character = value[index];
-        *hash ^= static_cast<std::uint16_t>(character);
-        *hash *= kPrime;
+        AddHashCharacter(hash, value[index]);
     }
 }
 
@@ -98,7 +106,8 @@ size_t FindElementEnd(
 void CaptureHwpmlHash(
     const std::wstring& content,
     std::uint64_t* const hash,
-    std::uint64_t* const length) noexcept {
+    std::uint64_t* const length,
+    std::vector<DocumentSectionFingerprint>* const sections) noexcept {
     constexpr wchar_t kBinaryDataTag[] = L"<BINDATA";
     constexpr wchar_t kBinaryDataEnd[] = L"</BINDATA>";
     constexpr wchar_t kSizeAttribute[] = L" Size=\"";
@@ -109,18 +118,47 @@ void CaptureHwpmlHash(
     constexpr wchar_t kParameterSetTag[] = L"<PARAMETERSET";
     constexpr wchar_t kParameterSetEnd[] = L"</PARAMETERSET>";
     constexpr wchar_t kNormalizedParameterSet[] = L"<PARAMETERSET/>";
-    *hash = 1469598103934665603ULL;
+    *hash = kFnvOffset;
     *length = 0;
-    const auto appendRange = [hash, length, &content](
+    sections->clear();
+    std::uint64_t sectionHash = kFnvOffset;
+    std::uint64_t sectionLength = 0;
+    const auto appendRange = [
+        hash,
+        length,
+        sections,
+        &sectionHash,
+        &sectionLength](
+        const std::wstring& value,
+        const size_t begin,
+        const size_t end) noexcept {
+        for (size_t index = begin; index < end; ++index) {
+            const wchar_t character = value[index];
+            AddHashCharacter(hash, character);
+            AddHashCharacter(&sectionHash, character);
+            ++*length;
+            ++sectionLength;
+            if (sectionLength == kDocumentSectionLength) {
+                sections->push_back({sectionHash});
+                sectionHash = kFnvOffset;
+                sectionLength = 0;
+            }
+        }
+    };
+    const auto appendContentRange = [&appendRange, &content](
                                  const size_t begin,
                                  const size_t end) noexcept {
-        AddHashRange(hash, content, begin, end);
-        *length += static_cast<std::uint64_t>(end - begin);
+        appendRange(content, begin, end);
     };
-    const auto appendLiteral = [hash, length](
+    const auto appendLiteral = [&appendRange](
                                    const std::wstring& value) noexcept {
-        AddHash(hash, value);
-        *length += static_cast<std::uint64_t>(value.size());
+        appendRange(value, 0, value.size());
+    };
+    const auto finish = [sections, &sectionHash, &sectionLength]() noexcept {
+        if (sectionLength != 0) {
+            sections->push_back({sectionHash});
+            sectionLength = 0;
+        }
     };
     size_t cursor = 0;
     while (cursor < content.size()) {
@@ -139,10 +177,11 @@ void CaptureHwpmlHash(
                 kParameterSetEnd,
                 parameterSetStart);
             if (parameterSetEnd == std::wstring::npos) {
-                appendRange(cursor, content.size());
+                appendContentRange(cursor, content.size());
+                finish();
                 return;
             }
-            appendRange(cursor, parameterSetStart);
+            appendContentRange(cursor, parameterSetStart);
             appendLiteral(kNormalizedParameterSet);
             cursor = parameterSetEnd;
             continue;
@@ -151,38 +190,41 @@ void CaptureHwpmlHash(
             (tagStart == std::wstring::npos || caretStart < tagStart)) {
             const size_t caretEnd = content.find(L'>', caretStart);
             if (caretEnd == std::wstring::npos) {
-                appendRange(cursor, content.size());
+                appendContentRange(cursor, content.size());
+                finish();
                 return;
             }
-            appendRange(cursor, caretStart);
+            appendContentRange(cursor, caretStart);
             appendLiteral(kNormalizedCaretPosition);
             cursor = caretEnd + 1;
             continue;
         }
         if (tagStart == std::wstring::npos) {
-            appendRange(cursor, content.size());
+            appendContentRange(cursor, content.size());
+            finish();
             return;
         }
         const size_t tagEnd = content.find(L'>', tagStart);
         if (tagEnd == std::wstring::npos) {
-            appendRange(cursor, content.size());
+            appendContentRange(cursor, content.size());
+            finish();
             return;
         }
-        appendRange(cursor, tagStart);
+        appendContentRange(cursor, tagStart);
         const size_t sizeAttribute = content.find(kSizeAttribute, tagStart);
         if (sizeAttribute != std::wstring::npos && sizeAttribute < tagEnd) {
             const size_t valueStart =
                 sizeAttribute + std::size(kSizeAttribute) - 1;
             const size_t valueEnd = content.find(L'"', valueStart);
             if (valueEnd == std::wstring::npos || valueEnd > tagEnd) {
-                appendRange(tagStart, tagEnd + 1);
+                appendContentRange(tagStart, tagEnd + 1);
             } else {
-                appendRange(tagStart, valueStart);
+                appendContentRange(tagStart, valueStart);
                 appendLiteral(kNormalizedSize);
-                appendRange(valueEnd, tagEnd + 1);
+                appendContentRange(valueEnd, tagEnd + 1);
             }
         } else {
-            appendRange(tagStart, tagEnd + 1);
+            appendContentRange(tagStart, tagEnd + 1);
         }
         if (tagEnd > tagStart && content[tagEnd - 1] == L'/') {
             cursor = tagEnd + 1;
@@ -190,13 +232,15 @@ void CaptureHwpmlHash(
         }
         const size_t dataEnd = content.find(kBinaryDataEnd, tagEnd + 1);
         if (dataEnd == std::wstring::npos) {
-            appendRange(tagEnd + 1, content.size());
+            appendContentRange(tagEnd + 1, content.size());
+            finish();
             return;
         }
         appendLiteral(kNormalizedBinaryData);
-        appendRange(dataEnd, dataEnd + std::size(kBinaryDataEnd) - 1);
+        appendContentRange(dataEnd, dataEnd + std::size(kBinaryDataEnd) - 1);
         cursor = dataEnd + std::size(kBinaryDataEnd) - 1;
     }
+    finish();
 }
 
 bool CaptureTextFile(
@@ -204,7 +248,8 @@ bool CaptureTextFile(
     const wchar_t* const format,
     const bool requireContent,
     std::uint64_t* const hash,
-    std::uint64_t* const length) noexcept {
+    std::uint64_t* const length,
+    std::vector<DocumentSectionFingerprint>* const sections = nullptr) noexcept {
     CComVariant raw;
     std::wstring content;
     if (FAILED(Method(
@@ -217,9 +262,12 @@ bool CaptureTextFile(
         return false;
     }
     if (wcscmp(format, L"HWPML2X") == 0) {
-        CaptureHwpmlHash(content, hash, length);
+        if (sections == nullptr) {
+            return false;
+        }
+        CaptureHwpmlHash(content, hash, length, sections);
     } else {
-        *hash = 1469598103934665603ULL;
+        *hash = kFnvOffset;
         AddHash(hash, content);
         *length = static_cast<std::uint64_t>(content.size());
     }
@@ -300,7 +348,8 @@ DocumentFingerprint CaptureDocumentFingerprint(IDispatch* const hwp) noexcept {
         L"HWPML2X",
         true,
         &fingerprint.documentHash,
-        &fingerprint.documentLength);
+        &fingerprint.documentLength,
+        &fingerprint.documentSections);
     fingerprint.captured =
         fingerprint.state.pageCount > 0 &&
         fingerprint.state.controlCount >= 0 &&

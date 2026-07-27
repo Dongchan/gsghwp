@@ -226,6 +226,9 @@ def sync_table_template_series(
         for target, block in zip(verified, plan.blocks, strict=True):
             _verify_target(target, block)
         _verify_captions(window_handle, verified, plan.caption_title)
+        repeated = repeated.model_copy(
+            update={"verified": True, "verification_error": None}
+        )
         if cleaned is None:
             return repeated
         return repeated.model_copy(
@@ -322,6 +325,8 @@ def sync_table_template_series(
         current_page=after.current_page,
         page_count=after.page_count,
         modified=after.modified,
+        verified=True,
+        verification_error=None,
         content_elapsed_microseconds=executed.elapsed_microseconds,
         image_timing_count=executed.image_timing_count,
         image_max_microseconds=executed.image_max_microseconds,

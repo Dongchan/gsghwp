@@ -19,6 +19,12 @@
 - Do not issue an arbitrary number of Undo commands. For an explicit rollback request, call `hwp_undo` with 1–20 steps; use `hwp_redo` only when the user explicitly asks to restore cancelled edits. Do not save implicitly after a failure; save-and-reopen is allowed only when the user explicitly requests `document.save_reopen_verify`.
 - A failed API call does not persist a document-wide write lock. A later independent operation may continue, while a retry that depends on the failed operation must use fresh target data.
 
+## Process loss and modal dialogs
+
+- A blocked call watches the target HWP process and reports its exit without waiting for the overall call timeout. A process-loss result contains the `target_process_lost=true` and `reconnect_required=true` signals and invalidates the old live session. Do not retry through that session; reconnect only after the target HWP document is available again.
+- If the process died after a mutation began, treat `reconcile_required=true` and `retry_safe=false` as an uncertain result. Report it and require explicit recovery confirmation before possible re-execution.
+- A blocking Hancom modal reports `target_modal_dialog=true`, the dialog diagnostic, and `reconnect_required=true`. Production diagnostics never dismiss the dialog. Have the user inspect or close it, then reconnect; if the result also says `reconcile_required=true`, follow the same uncertain-mutation rule.
+
 ## Idempotency recovery
 
 - Journal entries include `started_at`, `updated_at`, heartbeat time, attempt number, and `failed` or `aborted` terminal state.

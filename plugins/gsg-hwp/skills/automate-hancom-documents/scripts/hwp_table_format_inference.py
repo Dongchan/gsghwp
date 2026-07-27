@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# noqa: E501  # noqa: SIZE_OK — numeric table-format inference is one deterministic state machine.
+
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -16,8 +18,7 @@ from hwp_operation_contract import TableFormatCandidate
 NumericValueMode = Literal["infer", "display", "base"]
 
 _NUMBER = re.compile(
-    r"(?<!\d)[+-]?(?:(?:\d{1,3}(?:[,\u00a0 ]\d{3})+)|\d+)(?:\.\d+)?"
-    + r"(?![\d,.])"
+    r"(?<!\d)[+-]?(?:(?:\d{1,3}(?:[,\u00a0 ]\d{3})+)|\d+)(?:\.\d+)?" + r"(?![\d,.])"
 )
 _KOREAN_NUMBER = re.compile(r"[일이삼사오육칠팔구십백천만억조]+")
 _ENGLISH_SCALES = {
@@ -77,7 +78,15 @@ class TableFormatAmbiguity(HwpLiveError):
         reason: str,
         candidates: tuple[TableFormatCandidate, ...] = (),
     ) -> None:
-        super().__init__(reason)
+        message = (
+            reason
+            if candidates
+            else (
+                f"{reason}. cells의 해당 주소에 단위·괄호·줄바꿈을 포함한 "
+                "최종 표시 문자열을 직접 지정하세요"
+            )
+        )
+        super().__init__(message)
         self.candidates = candidates
 
 
@@ -270,7 +279,14 @@ def _inferred_scale(
     return factor, tuple(evidence)
 
 
-def _pattern_key(text: str) -> tuple[object, ...] | None:
+type _TableFormatPatternKey = tuple[
+    tuple[str, ...],
+    tuple[int, ...],
+    tuple[str | None, ...],
+]
+
+
+def _pattern_key(text: str) -> _TableFormatPatternKey | None:
     tokens = _numeric_tokens(text)
     if not tokens:
         return None
@@ -284,7 +300,9 @@ def _pattern_key(text: str) -> tuple[object, ...] | None:
 def _template_text(table: StructureTable, target: StructureCell) -> str:
     if target.text:
         return target.text
-    grouped: defaultdict[tuple[object, ...], list[StructureCell]] = defaultdict(list)
+    grouped: defaultdict[_TableFormatPatternKey, list[StructureCell]] = defaultdict(
+        list
+    )
     for cell in _owner_cells(table):
         if (
             cell.address != target.address
@@ -296,13 +314,16 @@ def _template_text(table: StructureTable, target: StructureCell) -> str:
         return ""
     ranked = sorted(
         grouped.values(),
-        key=lambda cells: (-len(cells), min(abs(target.row - cell.row) for cell in cells)),
+        key=lambda cells: (
+            -len(cells),
+            min(abs(target.row - cell.row) for cell in cells),
+        ),
     )
-    if len(ranked[0]) < 2 or (
-        len(ranked) > 1 and len(ranked[0]) == len(ranked[1])
-    ):
+    if len(ranked[0]) < 2 or (len(ranked) > 1 and len(ranked[0]) == len(ranked[1])):
         candidates = ", ".join(
-            f"{cell.address}={cell.text!r}" for cells in ranked[:3] for cell in cells[:2]
+            f"{cell.address}={cell.text!r}"
+            for cells in ranked[:3]
+            for cell in cells[:2]
         )
         raise TableFormatAmbiguity(
             f"{target.address} 빈 셀에 적용할 같은 열의 표시 형식이 하나로 정해지지 않습니다"
@@ -336,7 +357,9 @@ def _format_decimal(
         old_integer = pattern.raw.lstrip("+-").partition(".")[0]
         if len(old_integer) > 1 and old_integer.startswith("0"):
             integer, dot, fraction = formatted.partition(".")
-            formatted = integer.zfill(len(old_integer)) + (dot + fraction if dot else "")
+            formatted = integer.zfill(len(old_integer)) + (
+                dot + fraction if dot else ""
+            )
     if quantized < 0:
         return f"-{formatted}"
     if pattern.raw.startswith("+"):
@@ -414,17 +437,13 @@ def _rebuild_text(
             "새 값의 숫자 개수·단위·괄호·줄바꿈 구조가 기존 셀과 달라 자동 변경하지 않았습니다"
         )
     rebuilt = [template_literals[0]]
-    for index, (pattern, value) in enumerate(
-        zip(template_tokens, values, strict=True)
-    ):
+    for index, (pattern, value) in enumerate(zip(template_tokens, values, strict=True)):
         token_divisor = (
             divisor
             if scaled_token_indices is None or index in scaled_token_indices
             else 1
         )
-        rebuilt.append(
-            _format_decimal(value.value, pattern, divisor=token_divisor)
-        )
+        rebuilt.append(_format_decimal(value.value, pattern, divisor=token_divisor))
         rebuilt.append(template_literals[index + 1])
     return "".join(rebuilt)
 
@@ -509,7 +528,7 @@ def infer_table_cell_edits(
         evidence.extend(scale_evidence)
         evidence_tuple = tuple(dict.fromkeys(evidence))
         template_tokens = _numeric_tokens(template)
-        scaled_token_indices = (
+        scaled_token_indices: frozenset[int] = (
             frozenset()
             if scale is None
             else _scaled_token_indices(template_tokens, requested_tokens, scale)
@@ -521,13 +540,9 @@ def infer_table_cell_edits(
         ):
             raise TableFormatAmbiguity(
                 f"{address} 셀 주변에서 기준값을 표시값으로 안전하게 바꿀 "
-                "배율·숫자 토큰을 하나로 찾지 못했습니다"
+                + "배율·숫자 토큰을 하나로 찾지 못했습니다"
             )
-        if (
-            numeric_value_mode == "infer"
-            and scale is not None
-            and scaled_token_indices
-        ):
+        if numeric_value_mode == "infer" and scale is not None and scaled_token_indices:
             display = _rebuild_text(template, requested, divisor=1)
             base = _rebuild_text(
                 template,

@@ -8,7 +8,7 @@ from pydantic import Field
 from typing_extensions import TypeIs
 
 import hwp_public_table_metadata as metadata
-from hwp_live_template_repeat import TableTemplateRepeatPlan
+from hwp_live_template_repeat import TableTemplateRepeatPlan, TemplateTableBlock
 from hwp_operation_contract import (
     HwpOperateAssets,
     HwpOperateGuards,
@@ -38,7 +38,12 @@ from hwp_public_table_plan import (
     resolve_public_table,
     series_plan,
 )
-from hwp_public_table_target import PublicTableDataInput, PublicTableTargetStore
+from hwp_public_table_target import (
+    CanonicalPublicTableTarget,
+    PublicTableDataInput,
+    PublicTableTargetStore,
+    UnknownPublicTargetError,
+)
 
 
 class PublicTableExecutor(PublicTableStructureReader, Protocol):
@@ -84,7 +89,9 @@ def _is_resolved_table(
     return isinstance(value, ResolvedPublicTable)
 
 
-def _is_repeat_plan(value: TableTemplateRepeatPlan | TablePlanInputFailure) -> TypeIs[TableTemplateRepeatPlan]:
+def _is_repeat_plan(
+    value: TableTemplateRepeatPlan | TablePlanInputFailure,
+) -> TypeIs[TableTemplateRepeatPlan]:
     return isinstance(value, TableTemplateRepeatPlan)
 
 
@@ -92,6 +99,31 @@ def _is_mapped_images(
     value: MappedTableImages | TablePlanInputFailure,
 ) -> TypeIs[MappedTableImages]:
     return isinstance(value, MappedTableImages)
+
+
+def _fast_inspection_repeat_plan(
+    targets: PublicTableTargetStore,
+    target: PublicTableTarget | None,
+    count: int,
+    caption_pattern: str | None,
+) -> tuple[CanonicalPublicTableTarget, TableTemplateRepeatPlan] | None:
+    try:
+        selected = targets.resolve(target)
+    except UnknownPublicTargetError:
+        return None
+    control_id = selected.target.control_instance_id
+    page = selected.target.page_hint
+    if control_id is None or page is None:
+        return None
+    return (
+        selected,
+        TableTemplateRepeatPlan(
+            source_page=page,
+            source_control_id=control_id,
+            caption_title=caption_pattern,
+            blocks=tuple(TemplateTableBlock() for _ in range(count)),
+        ),
+    )
 
 
 @final
@@ -121,7 +153,9 @@ class HwpPublicTableTools:
         resolved = await resolve_public_table(self._executor, self._targets, request)
         match resolved:
             case OperationResult() as failed:
-                document_path = None if request.target is None else request.target.document_path
+                document_path = (
+                    None if request.target is None else request.target.document_path
+                )
                 return self._public_result(failed, document_path)
             case _ as unreachable if not _is_resolved_table(unreachable):
                 assert_never(unreachable)
@@ -174,22 +208,37 @@ class HwpPublicTableTools:
         operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
         count: Annotated[int, Field(ge=1, le=100)],
-        caption_pattern: Annotated[str | None, Field(min_length=1, max_length=2_000)] = None,
+        caption_pattern: Annotated[
+            str | None, Field(min_length=1, max_length=2_000)
+        ] = None,
     ) -> PublicActionResult:
         request = _new_request(metadata.REPEAT_INTENT, target, operation_id)
-        resolved = await self._resolved(request)
-        match resolved:
-            case PublicActionResult():
-                return resolved
-            case _ as unreachable if not _is_resolved_table(unreachable):
-                assert_never(unreachable)
-            case _:
-                plan = repeat_plan(resolved, count, caption_pattern)
+        direct = _fast_inspection_repeat_plan(
+            self._targets,
+            target,
+            count,
+            caption_pattern,
+        )
+        if direct is not None:
+            selected, plan = direct
+            document_path = selected.document_path
+            operation_target = selected.target
+        else:
+            resolved = await self._resolved(request)
+            match resolved:
+                case PublicActionResult():
+                    return resolved
+                case _ as unreachable if not _is_resolved_table(unreachable):
+                    assert_never(unreachable)
+                case _:
+                    plan = repeat_plan(resolved, count, caption_pattern)
+            document_path = resolved.document_path
+            operation_target = resolved.target
         inputs = HwpOperateInputs(
             request_id=request.request_id,
-            document=resolved.document_path,
+            document=document_path,
             operation="table.repeat_template",
-            target=resolved.target,
+            target=operation_target,
             policy=HwpOperatePolicy(preserve_style=True, ambiguity="return_candidates"),
             postconditions=HwpOperatePostconditions(
                 record_count=count,
@@ -198,7 +247,7 @@ class HwpPublicTableTools:
             recipe=HwpPriorityRecipeInputs(table_template=plan),
         )
         result = await self._executor.execute(metadata.REPEAT_INTENT, inputs, None)
-        return self._public_result(result, resolved.document_path)
+        return self._public_result(result, document_path)
 
     async def hwp_build_table_series(
         self,
@@ -218,7 +267,9 @@ class HwpPublicTableTools:
                 planned = series_plan(resolved, tuple(items))
         match planned:
             case TablePlanInputFailure() as failure:
-                return self._public_result(_needs_input_result(request, failure), resolved.document_path)
+                return self._public_result(
+                    _needs_input_result(request, failure), resolved.document_path
+                )
             case _ as unreachable if not _is_repeat_plan(unreachable):
                 assert_never(unreachable)
             case _:
@@ -260,7 +311,9 @@ class HwpPublicTableTools:
                 )
         match mapped:
             case TablePlanInputFailure() as failure:
-                return self._public_result(_needs_input_result(request, failure), resolved.document_path)
+                return self._public_result(
+                    _needs_input_result(request, failure), resolved.document_path
+                )
             case _ as unreachable if not _is_mapped_images(unreachable):
                 assert_never(unreachable)
             case _:
@@ -277,5 +330,7 @@ class HwpPublicTableTools:
             ),
             postconditions=HwpOperatePostconditions(verify_structure=True),
         )
-        result = await self._executor.execute(metadata.TABLE_IMAGES_INTENT, inputs, None)
+        result = await self._executor.execute(
+            metadata.TABLE_IMAGES_INTENT, inputs, None
+        )
         return self._public_result(result, resolved.document_path)

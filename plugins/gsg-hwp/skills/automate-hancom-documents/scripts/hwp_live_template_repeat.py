@@ -3,16 +3,18 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import Self
+from typing import Final, Self
 
 from pydantic import Field, field_validator, model_validator
 
 from hwp_errors import HwpLiveError
+from hwp_image_fit import fit_image_in_box
 from hwp_live_native_action_models import (
     CaptureTableCommand,
     NativeActionCommand,
     NativeActionRequest,
     NativeActionResult,
+    NativeDetailedCaption,
     NativePageCell,
     NativePageControl,
     NativePageInspection,
@@ -26,6 +28,7 @@ from hwp_live_native_batch import (
     execute_native_actions,
     inspect_native_page,
     inspect_native_pages,
+    inspect_native_structure,
     read_native_snapshot,
 )
 from hwp_live_native_template_repeat import (
@@ -39,6 +42,9 @@ from hwp_live_native_template_repeat import (
     table_copy_content_commands,
 )
 from hwp_live_values import ContractModel
+
+
+_HWPUNITS_PER_MILLIMETER: Final = 7_200 / 25.4
 
 
 def _address(value: str) -> str:
@@ -96,7 +102,9 @@ class TemplateTableBlock(ContractModel):
         if len(image_addresses) != len(set(image_addresses)):
             raise ValueError("image cell addresses must be unique within a block")
         if set(text_addresses) & set(image_addresses):
-            raise ValueError("one cell cannot receive text and an image in the same block")
+            raise ValueError(
+                "one cell cannot receive text and an image in the same block"
+            )
         if (self.delete_rows_from is None) != (self.delete_row_count == 0):
             raise ValueError("row deletion start and count must be provided together")
         if self.delete_rows_from is not None:
@@ -139,6 +147,8 @@ class TableTemplateRepeatResult(ContractModel):
     current_page: int = Field(ge=1)
     page_count: int = Field(ge=1)
     modified: bool
+    verified: bool = False
+    verification_error: str | None = Field(default=None, max_length=4_000)
     caption_profile_elapsed_microseconds: int = Field(default=0, ge=0)
     clone_elapsed_microseconds: int = Field(default=0, ge=0)
     caption_elapsed_microseconds: int = Field(default=0, ge=0)
@@ -226,7 +236,58 @@ def _caption_title_format_source(
     )
 
 
+def _required_table_caption(
+    window_handle: int,
+    page: int,
+    table_id: str,
+) -> NativeDetailedCaption:
+    inspected = inspect_native_structure(window_handle, page)
+    if inspected is None:
+        raise HwpLiveError(
+            f"{table_id} 표에 연결된 캡션 확인 불가: 네이티브 상세 구조 결과가 없습니다"
+        )
+    errors = tuple(
+        error
+        for error in inspected.inspection_errors
+        if error.control_instance_id == table_id
+    )
+    if errors:
+        raise HwpLiveError(
+            f"{table_id} 표에 연결된 캡션 확인 불가: {errors[0].message}"
+        )
+    captions = tuple(
+        caption
+        for caption in inspected.captions
+        if caption.table_instance_id == table_id
+    )
+    if len(captions) != 1:
+        message = (
+            f"{table_id} 표에 연결된 캡션을 정확히 하나 확인하지 못했습니다: "
+            + f"{len(captions)}개"
+        )
+        raise HwpLiveError(message)
+    return captions[0]
+
+
+def _attached_caption_display_number(
+    caption: NativeDetailedCaption,
+    table_id: str,
+    expected_title: str,
+) -> int:
+    if not caption.automatic_number:
+        raise HwpLiveError(
+            f"{table_id} 표에 연결된 캡션의 자동 번호를 확인하지 못했습니다"
+        )
+    display_number = caption_display_number(caption.text, expected_title)
+    if display_number is None:
+        raise HwpLiveError(
+            f"{table_id} 표에 연결된 캡션의 표시 번호 또는 제목 확인 불가"
+        )
+    return display_number
+
+
 def _verify_repeated_caption_numbers(
+    window_handle: int,
     pages: tuple[NativePageInspection, ...],
     created_control_ids: tuple[str, ...],
     caption_title: str,
@@ -248,8 +309,14 @@ def _verify_repeated_caption_numbers(
     for offset, control_id in enumerate(created_control_ids, start=1):
         expected_title = copy_caption_title(caption_title, offset)
         expected_number = source_display_number + offset
-        actual_number = caption_display_number(
-            page_by_control[control_id].text,
+        caption = _required_table_caption(
+            window_handle,
+            page_by_control[control_id].page,
+            control_id,
+        )
+        actual_number = _attached_caption_display_number(
+            caption,
+            control_id,
             expected_title,
         )
         if actual_number != expected_number:
@@ -258,6 +325,140 @@ def _verify_repeated_caption_numbers(
                 actual_number,
             )
             raise HwpLiveError(message)
+
+
+def _matches_picture_dimension(actual: int | None, expected_mm: float) -> bool:
+    if actual is None:
+        return False
+    expected = round(expected_mm * _HWPUNITS_PER_MILLIMETER)
+    tolerance = max(2, round(abs(expected) * 0.005))
+    return abs(actual - expected) <= tolerance
+
+
+def _verify_repeated_table(
+    pages: tuple[NativePageInspection, ...],
+    table_id: str,
+    block: TemplateTableBlock,
+    source_rows: int | None,
+) -> None:
+    errors = tuple(
+        error
+        for page in pages
+        for error in page.inspection_errors
+        if error.control_instance_id == table_id
+    )
+    if errors:
+        raise HwpLiveError(f"{table_id} 표 사후 구조 조회 오류: {errors[0].message}")
+    controls = tuple(
+        control
+        for page in pages
+        for control in page.controls
+        if control.control_type == "tbl" and control.instance_id == table_id
+    )
+    if not controls:
+        raise HwpLiveError(f"{table_id} 표를 사후 조회에서 찾지 못했습니다")
+    rows = {control.rows for control in controls if control.rows is not None}
+    if source_rows is None:
+        if block.delete_row_count:
+            raise HwpLiveError(f"{table_id} 표의 삭제 후 행 수를 검증하지 못했습니다")
+    else:
+        expected_rows = source_rows - block.delete_row_count
+        if rows != {expected_rows}:
+            message = (
+                f"{table_id} 표 행 수가 요청과 다릅니다: expected={expected_rows}, "
+                f"actual={sorted(rows)}"
+            )
+            raise HwpLiveError(message)
+    cells = {
+        cell.address: cell
+        for page in pages
+        for cell in page.cells
+        if cell.table_instance_id == table_id
+    }
+    if not cells:
+        raise HwpLiveError(f"{table_id} 표의 셀 구조를 사후 조회하지 못했습니다")
+    for expected in block.text_cells:
+        actual = cells.get(expected.address)
+        if actual is None or actual.text.removesuffix("\r\n") != expected.replacement:
+            raise HwpLiveError(
+                f"{table_id} 표 {expected.address} 셀 내용이 요청과 다릅니다"
+            )
+    for expected in block.images:
+        cell = cells.get(expected.address)
+        if cell is None:
+            raise HwpLiveError(
+                f"{table_id} 표 {expected.address} 그림 셀을 찾지 못했습니다"
+            )
+        pictures = {
+            control.instance_id: control
+            for page in pages
+            for control in page.controls
+            if control.control_type == "gso"
+            and control.anchor.list_id == cell.list_id
+            and control.instance_id
+        }
+        if len(pictures) != 1:
+            raise HwpLiveError(
+                f"{table_id} 표 {expected.address} 그림 반영을 하나로 확인하지 못했습니다"
+            )
+        picture = next(iter(pictures.values()))
+        fitted_width_mm, fitted_height_mm = fit_image_in_box(
+            expected.path,
+            width_mm=expected.width_mm,
+            height_mm=expected.height_mm,
+        )
+        if picture.width_hwpunit is None or picture.height_hwpunit is None:
+            raise HwpLiveError(
+                f"{table_id} 표 {expected.address} 그림 실제 크기 확인 불가"
+            )
+        if not _matches_picture_dimension(
+            picture.width_hwpunit,
+            fitted_width_mm,
+        ) or not _matches_picture_dimension(
+            picture.height_hwpunit,
+            fitted_height_mm,
+        ):
+            message = (
+                f"{table_id} 표 {expected.address} 그림 실제 크기가 "
+                + "요청한 비율 유지 상자 맞춤 크기와 다릅니다"
+            )
+            raise HwpLiveError(message)
+
+
+def _repeat_verification_error(
+    window_handle: int,
+    plan: TableTemplateRepeatPlan,
+    table_ids: tuple[str, ...],
+    source_rows: int | None,
+    after: NativeSnapshot,
+    caption_profile: NativeCaptionProfile | None,
+) -> str | None:
+    try:
+        last_page = max(plan.source_page, after.current_page)
+        pages = inspect_native_pages(
+            window_handle,
+            tuple(range(plan.source_page, last_page + 1)),
+            include_cells=True,
+        )
+        if not pages:
+            raise HwpLiveError("반복 표의 네이티브 사후 구조를 읽지 못했습니다")
+        for table_id, block in zip(table_ids, plan.blocks, strict=True):
+            _verify_repeated_table(pages, table_id, block, source_rows)
+        if plan.caption_title is not None and len(table_ids) > 1:
+            if caption_profile is None or caption_profile.display_number is None:
+                raise HwpLiveError(
+                    "복제 표 캡션의 표시 번호 기준을 네이티브 결과에서 확인하지 못했습니다"
+                )
+            _verify_repeated_caption_numbers(
+                window_handle,
+                pages,
+                table_ids[1:],
+                plan.caption_title,
+                caption_profile.display_number,
+            )
+    except HwpLiveError as error:
+        return str(error)[:4_000]
+    return None
 
 
 def _read_source_caption_profile(
@@ -290,7 +491,9 @@ def _read_source_caption_profile(
             or selection.start.paragraph != selection.end.paragraph
             or not selected.selected_text.rstrip().endswith(caption_title)
         ):
-            raise HwpLiveError("원본 표에서 지정한 캡션 제목과 실제 캡션을 일치시켜 읽지 못했습니다")
+            raise HwpLiveError(
+                "원본 표에서 지정한 캡션 제목과 실제 캡션을 일치시켜 읽지 못했습니다"
+            )
         profile = NativeCaptionProfile(
             selected.style_id,
             selected.character_format,
@@ -355,7 +558,9 @@ def _native_blocks(
         if source[address].text.removesuffix("\r\n") != value
     )
     if stale:
-        raise HwpLiveError(f"원본 표 셀 내용이 조회 조건과 다릅니다: {', '.join(stale)}")
+        raise HwpLiveError(
+            f"원본 표 셀 내용이 조회 조건과 다릅니다: {', '.join(stale)}"
+        )
     image_lists = {source[address].list_id for address in image_addresses}
     existing_objects = tuple(
         control.instance_id
@@ -376,8 +581,15 @@ def repeat_table_template(
     inspected = _required_page(window_handle, plan.source_page)
     source_control = _source_control(inspected, plan.source_control_id)
     source = _source_cells(inspected, plan.source_control_id)
-    if plan.caption_title is not None and plan.caption_title not in inspected.text:
-        raise HwpLiveError("원본 표 쪽에서 지정한 캡션 제목을 찾지 못했습니다")
+    source_caption = (
+        _required_table_caption(
+            window_handle,
+            plan.source_page,
+            plan.source_control_id,
+        )
+        if plan.caption_title is not None
+        else None
+    )
     blocks = _native_blocks(plan, source, inspected)
     before = read_native_snapshot(window_handle)
     if before is None:
@@ -389,19 +601,22 @@ def repeat_table_template(
     caption_elapsed_microseconds = 0
     caption_profile: NativeCaptionProfile | None = None
     if plan.caption_title is not None:
+        if source_caption is None:
+            raise HwpLiveError("원본 표에 연결된 캡션 확인 불가")
         caption_profile, caption_results = _read_source_caption_profile(
             window_handle,
             before,
             source_control,
             plan.caption_title,
         )
-        display_number = caption_display_number(
-            inspected.text,
+        display_number = _attached_caption_display_number(
+            source_caption,
+            plan.source_control_id,
             plan.caption_title,
         )
         caption_profile = replace(
             caption_profile,
-            automatic_number=display_number is not None,
+            automatic_number=source_caption.automatic_number,
             display_number=display_number,
         )
         stage_results.extend(caption_results)
@@ -428,6 +643,9 @@ def repeat_table_template(
     table_ids = (plan.source_control_id, *created)
     fill_commands: list[NativeActionCommand] = []
     for table_id, block in zip(table_ids, blocks, strict=True):
+        content_commands = table_copy_content_commands(block)
+        if not content_commands:
+            continue
         fill_commands.extend(
             (
                 SelectControlCommand(table_id),
@@ -435,36 +653,29 @@ def repeat_table_template(
                 RunCommand("ShapeObjTableSelCell"),
             )
         )
-        fill_commands.extend(table_copy_content_commands(block))
-    filled = _required_action(
-        window_handle,
-        NativeActionRequest(
-            document_id=before.document_id,
-            full_name=before.full_name,
-            commands=tuple(fill_commands),
-        ),
-    )
-    stage_results.append(filled)
+        fill_commands.extend(content_commands)
+    filled: NativeActionResult | None = None
+    if fill_commands:
+        filled = _required_action(
+            window_handle,
+            NativeActionRequest(
+                document_id=before.document_id,
+                full_name=before.full_name,
+                commands=tuple(fill_commands),
+            ),
+        )
+        stage_results.append(filled)
     after = read_native_snapshot(window_handle)
     if after is None:
         raise HwpLiveError("반복 표 배치 후 한컴 문서 상태를 읽지 못했습니다")
-    if (
-        plan.caption_title is not None
-        and caption_profile is not None
-        and caption_profile.display_number is not None
-        and created
-    ):
-        verification_pages = inspect_native_pages(
-            window_handle,
-            tuple(range(plan.source_page, after.current_page + 1)),
-            include_cells=False,
-        )
-        _verify_repeated_caption_numbers(
-            verification_pages,
-            created,
-            plan.caption_title,
-            caption_profile.display_number,
-        )
+    verification_error = _repeat_verification_error(
+        window_handle,
+        plan,
+        table_ids,
+        source_control.rows,
+        after,
+        caption_profile,
+    )
     return TableTemplateRepeatResult(
         source_control_id=plan.source_control_id,
         created_control_ids=created,
@@ -478,10 +689,14 @@ def repeat_table_template(
         current_page=after.current_page,
         page_count=after.page_count,
         modified=after.modified,
+        verified=verification_error is None,
+        verification_error=verification_error,
         caption_profile_elapsed_microseconds=caption_profile_elapsed_microseconds,
         clone_elapsed_microseconds=clone_elapsed_microseconds,
         caption_elapsed_microseconds=caption_elapsed_microseconds,
-        content_elapsed_microseconds=filled.elapsed_microseconds,
+        content_elapsed_microseconds=(
+            0 if filled is None else filled.elapsed_microseconds
+        ),
         image_timing_count=sum(result.image_timing_count for result in stage_results),
         image_max_microseconds=max(
             (result.image_max_microseconds for result in stage_results),

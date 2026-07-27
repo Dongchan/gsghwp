@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import Field, model_validator
 
+from hwp_color_normalization import ColorInput
 from hwp_live_table_contract import BorderStyle, BorderWidth, CellPadding
-from hwp_live_values import Alignment, ContractModel, Rgb
+from hwp_live_values import Alignment, ContractModel
 from hwp_reference_layout_gap import ProtectedGap
 from hwp_reference_layout_gap_validation import validate_protected_gaps
 
@@ -16,6 +17,7 @@ OcrMode = Literal["off", "auto"]
 ReferenceVerticalAlignment = Literal["inherit", "top", "center", "bottom"]
 ReferenceLineSpacingType = Literal["percent", "fixed", "margin"]
 ReferenceBreakMode = Literal["line", "paragraph"]
+_MAX_PARAGRAPH_SPACING_HWPUNIT: Final = 28_346
 
 
 class ReferenceMerge(ContractModel):
@@ -38,7 +40,7 @@ class VisibleEdge(ContractModel):
     end: int = Field(ge=1, le=50)
     style: BorderStyle = "solid"
     width: BorderWidth = "0.12mm"
-    color: Rgb = (0, 0, 0)
+    color: ColorInput = (0, 0, 0)
 
     @model_validator(mode="after")
     def validate_interval(self) -> VisibleEdge:
@@ -52,8 +54,8 @@ class ReferenceStyle(ContractModel):
     font_name: str | None = Field(default=None, max_length=100)
     font_size_pt: float | None = Field(default=None, ge=1, le=96)
     bold: bool | None = None
-    text_color: Rgb | None = None
-    fill_color: Rgb | None = None
+    text_color: ColorInput | None = None
+    fill_color: ColorInput | None = None
     alignment: Alignment = "inherit"
     vertical_alignment: ReferenceVerticalAlignment = "inherit"
     width_ratio_percent: int = Field(default=100, ge=50, le=200)
@@ -62,7 +64,17 @@ class ReferenceStyle(ContractModel):
     line_spacing_percent: int | None = Field(default=None, ge=50, le=500)
     line_spacing_hwpunit: int | None = Field(default=None, ge=0, le=100_000)
     paragraph_before_mm: float = Field(default=0, ge=0, le=100)
+    paragraph_before_hwpunit: int | None = Field(
+        default=None,
+        ge=0,
+        le=_MAX_PARAGRAPH_SPACING_HWPUNIT,
+    )
     paragraph_after_mm: float = Field(default=0, ge=0, le=100)
+    paragraph_after_hwpunit: int | None = Field(
+        default=None,
+        ge=0,
+        le=_MAX_PARAGRAPH_SPACING_HWPUNIT,
+    )
     padding: CellPadding | None = None
 
     @model_validator(mode="after")

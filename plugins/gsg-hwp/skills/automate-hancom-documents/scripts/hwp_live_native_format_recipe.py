@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from hwp_errors import HwpLiveError
 from hwp_live_api import HwpComApplication
+from hwp_live_native_action_contract import NativeActionFailure
 from hwp_live_native_action_models import (
     NativeActionRequest,
     NativeDetailedInspection,
@@ -15,18 +16,23 @@ from hwp_live_native_batch import (
     read_native_snapshot,
 )
 from hwp_live_native_format_commands import (
+    AxisSizeTarget,
+    CellRangeTarget,
     MergeCommandPlan,
+    NativeFormatCommandBatch,
+    NativeFormatExecutionPlan,
     SplitCommandPlan,
     TableFormatCommandPlan,
     TextFormatCommandPlan,
     build_native_format_commands,
+    build_native_format_execution_plan,
 )
 from hwp_live_native_format_contract import (
     NativeFormatRecipeRequest as NativeFormatRecipeRequest,
     PreparedFormatOperation,
     is_native_format_workflow,
 )
-from hwp_live_native_format_inputs import InputFailure
+from hwp_live_native_format_inputs import InputFailure, table_cell_coordinate
 from hwp_live_native_history import execute_native_history
 from hwp_live_native_format_prepare import (
     PreparationFailure,
@@ -96,16 +102,11 @@ def _verify_structural_plan(
     plan = prepared.plan
     if isinstance(plan, TableFormatCommandPlan):
         formatting = plan.formatting
-        if (
-            formatting.row_height_mm is None
-            and formatting.column_width_mm is None
-        ):
+        if formatting.row_height_mm is None and formatting.column_width_mm is None:
             return
         detail = inspect_native_structure(window_handle, after_page)
         if detail is None:
-            raise HwpLiveError(
-                "표 행·열 크기 변경 후 실제 셀 속성을 읽지 못했습니다"
-            )
+            raise HwpLiveError("표 행·열 크기 변경 후 실제 셀 속성을 읽지 못했습니다")
         cells = tuple(
             item
             for item in detail.cells
@@ -126,9 +127,8 @@ def _verify_structural_plan(
         )
         if expected_width is not None and any(
             cell.width_hwpunit is None
-            or abs(
-                cell.width_hwpunit - expected_width * cell.column_span
-            ) > cell.column_span
+            or abs(cell.width_hwpunit - expected_width * cell.column_span)
+            > cell.column_span
             for cell in cells
         ):
             raise HwpLiveError(
@@ -136,9 +136,8 @@ def _verify_structural_plan(
             )
         if expected_height is not None and any(
             cell.height_hwpunit is None
-            or abs(
-                cell.height_hwpunit - expected_height * cell.row_span
-            ) > cell.row_span
+            or abs(cell.height_hwpunit - expected_height * cell.row_span)
+            > cell.row_span
             for cell in cells
         ):
             raise HwpLiveError(
@@ -274,6 +273,399 @@ def _resolve_selected_table_cells(
     )
 
 
+def _fallback_axis_targets(
+    cells: tuple[str, ...],
+    *,
+    column: bool,
+) -> tuple[AxisSizeTarget, ...]:
+    label = "column" if column else "row"
+    return tuple(
+        AxisSizeTarget(
+            f"{label}:fallback:{index}",
+            address,
+            (address,),
+        )
+        for index, address in enumerate(cells)
+    )
+
+
+def _topology_axis_targets(
+    prepared: PreparedFormatOperation,
+    detail: NativeDetailedInspection,
+    *,
+    column: bool,
+) -> tuple[AxisSizeTarget, ...]:
+    plan = prepared.plan
+    assert isinstance(plan, TableFormatCommandPlan)
+    topology = table_topology(detail, plan.table.instance_id)
+    selected = tuple(topology.by_address.get(address.upper()) for address in plan.cells)
+    if any(cell is None for cell in selected):
+        raise HwpLiveError("표 크기 변경 대상 셀이 실제 CellTopology에 없습니다")
+    physical = tuple(cell for cell in selected if cell is not None)
+    axes = sorted(
+        {
+            axis
+            for cell in physical
+            for axis in range(
+                (
+                    table_cell_coordinate(cell.address)[1]
+                    if column
+                    else table_cell_coordinate(cell.address)[0]
+                ),
+                (
+                    table_cell_coordinate(cell.address)[1] + cell.column_span
+                    if column
+                    else table_cell_coordinate(cell.address)[0] + cell.row_span
+                ),
+            )
+        }
+    )
+    label = "column" if column else "row"
+    targets: list[AxisSizeTarget] = []
+    for axis in axes:
+        anchor = next(
+            (
+                cell
+                for cell in topology.cells
+                if (
+                    table_cell_coordinate(cell.address)[1]
+                    if column
+                    else table_cell_coordinate(cell.address)[0]
+                )
+                == axis
+                and (cell.column_span if column else cell.row_span) == 1
+            ),
+            None,
+        )
+        if anchor is None:
+            return _fallback_axis_targets(plan.cells, column=column)
+        affected = tuple(
+            cell.address
+            for cell in physical
+            if (
+                (
+                    table_cell_coordinate(cell.address)[1]
+                    if column
+                    else table_cell_coordinate(cell.address)[0]
+                )
+                <= axis
+                < (
+                    table_cell_coordinate(cell.address)[1] + cell.column_span
+                    if column
+                    else table_cell_coordinate(cell.address)[0] + cell.row_span
+                )
+            )
+        )
+        targets.append(
+            AxisSizeTarget(
+                f"{label}:{axis}",
+                anchor.address,
+                affected,
+            )
+        )
+    return tuple(targets)
+
+
+def _with_topology_size_targets(
+    prepared: PreparedFormatOperation,
+    detail: NativeDetailedInspection,
+) -> PreparedFormatOperation:
+    plan = prepared.plan
+    if not isinstance(plan, TableFormatCommandPlan) or len(plan.cells) < 2:
+        return prepared
+    formatted = plan.formatting
+    column_targets = (
+        None
+        if formatted.column_width_mm is None
+        else _topology_axis_targets(prepared, detail, column=True)
+    )
+    row_targets = (
+        None
+        if formatted.row_height_mm is None
+        else _topology_axis_targets(prepared, detail, column=False)
+    )
+    if column_targets is None and row_targets is None:
+        return prepared
+    resolved_plan = TableFormatCommandPlan(
+        plan.formatting,
+        plan.table,
+        plan.cells,
+        column_targets,
+        row_targets,
+        plan.cell_geometry_targets,
+        plan.table_cell_count,
+    )
+    return PreparedFormatOperation(
+        resolved_plan,
+        prepared.target_id,
+        prepared.target_basis,
+        prepared.updated_addresses,
+    )
+
+
+def _topology_cell_geometry_targets(
+    prepared: PreparedFormatOperation,
+    detail: NativeDetailedInspection,
+) -> tuple[tuple[CellRangeTarget, ...] | None, int]:
+    plan = prepared.plan
+    assert isinstance(plan, TableFormatCommandPlan)
+    topology = table_topology(detail, plan.table.instance_id)
+    selected = tuple(topology.by_address.get(address.upper()) for address in plan.cells)
+    if any(cell is None for cell in selected):
+        raise HwpLiveError("셀 geometry 변경 대상이 실제 CellTopology에 없습니다")
+    physical = tuple(cell for cell in selected if cell is not None)
+    if any(cell.row_span != 1 or cell.column_span != 1 for cell in physical):
+        # NativeDetailedCell does not expose the native right/down neighbour
+        # graph. A merged rectangle therefore cannot prove the exact block
+        # extension path in Python and must retain the cell-local sequence.
+        return None, topology.cell_count
+    try:
+        region = topology.selection_region_by_addresses(plan.cells)
+    except HwpLiveError:
+        return None, topology.cell_count
+    if frozenset(region) != frozenset(address.upper() for address in plan.cells):
+        return None, topology.cell_count
+    top = min(table_cell_coordinate(cell.address)[0] for cell in physical)
+    left = min(table_cell_coordinate(cell.address)[1] for cell in physical)
+    bottom = max(
+        table_cell_coordinate(cell.address)[0] + cell.row_span - 1 for cell in physical
+    )
+    right = max(
+        table_cell_coordinate(cell.address)[1] + cell.column_span - 1
+        for cell in physical
+    )
+
+    def cell_at(row: int, column: int):
+        return next(
+            (
+                cell
+                for cell in topology.cells
+                if table_cell_coordinate(cell.address)[0]
+                <= row
+                < table_cell_coordinate(cell.address)[0] + cell.row_span
+                and table_cell_coordinate(cell.address)[1]
+                <= column
+                < table_cell_coordinate(cell.address)[1] + cell.column_span
+            ),
+            None,
+        )
+
+    first = cell_at(top, left)
+    endpoint = cell_at(bottom, right)
+    if first is None or endpoint is None:
+        return None, topology.cell_count
+    current = first
+    right_steps = 0
+    while table_cell_coordinate(current.address)[1] + current.column_span - 1 < right:
+        next_column = table_cell_coordinate(current.address)[1] + current.column_span
+        next_cell = cell_at(top, next_column)
+        if next_cell is None or next_cell is current:
+            return None, topology.cell_count
+        right_steps += 1
+        current = next_cell
+    down_steps = 0
+    while table_cell_coordinate(current.address)[0] + current.row_span - 1 < bottom:
+        next_row = table_cell_coordinate(current.address)[0] + current.row_span
+        next_cell = cell_at(next_row, right)
+        if next_cell is None or next_cell is current:
+            return None, topology.cell_count
+        down_steps += 1
+        current = next_cell
+    if current.address != endpoint.address:
+        return None, topology.cell_count
+    return (
+        (
+            CellRangeTarget(
+                "cell_geometry:range",
+                first.address,
+                right_steps,
+                down_steps,
+                plan.cells,
+            ),
+        ),
+        topology.cell_count,
+    )
+
+
+def _with_topology_cell_geometry_targets(
+    prepared: PreparedFormatOperation,
+    detail: NativeDetailedInspection,
+) -> PreparedFormatOperation:
+    plan = prepared.plan
+    if (
+        not isinstance(plan, TableFormatCommandPlan)
+        or len(plan.cells) < 2
+        or plan.formatting.formatting.padding is None
+    ):
+        return prepared
+    targets, table_cell_count = _topology_cell_geometry_targets(prepared, detail)
+    resolved_plan = TableFormatCommandPlan(
+        plan.formatting,
+        plan.table,
+        plan.cells,
+        plan.column_size_targets,
+        plan.row_size_targets,
+        targets,
+        table_cell_count,
+    )
+    return PreparedFormatOperation(
+        resolved_plan,
+        prepared.target_id,
+        prepared.target_basis,
+        prepared.updated_addresses,
+    )
+
+
+def _failed_table_format_batch(
+    request: NativeFormatRecipeRequest,
+    before: NativeSnapshot,
+    prepared: PreparedFormatOperation,
+    execution: NativeFormatExecutionPlan,
+    batch: NativeFormatCommandBatch,
+    batch_index: int,
+    completed_group_keys: set[str],
+    commands_completed_before: int,
+    elapsed_before: int,
+    error: HwpLiveError | None,
+) -> OperationResult:
+    failure_commands = (
+        min(error.commands_completed, len(batch.commands))
+        if isinstance(error, NativeActionFailure)
+        else 0
+    )
+    completed_group_keys.update(batch.completed_group_keys(failure_commands))
+    affected_addresses = execution.affected_addresses(completed_group_keys)
+    uncertain_addresses = (
+        batch.uncertain_addresses(failure_commands)
+        if isinstance(error, NativeActionFailure) and error.partial_mutation
+        else ()
+    )
+    prior_mutation = bool(completed_group_keys)
+    if error is None:
+        partial_mutation: bool | None = prior_mutation
+        retry_safe = not prior_mutation
+        failed_step = "native_format_protocol"
+        detail = "프로토콜 9 네이티브 실행기를 사용할 수 없습니다"
+    elif isinstance(error, NativeActionFailure):
+        partial_mutation = prior_mutation or error.partial_mutation
+        retry_safe = error.retry_safe and not partial_mutation
+        failed_step = error.failed_step or error.location or "native_format_batch"
+        detail = str(error)
+    else:
+        partial_mutation = True if prior_mutation else None
+        retry_safe = False
+        failed_step = "native_format_batch"
+        detail = str(error)
+    detail = detail[:1_000]
+    uncertain_preview = ", ".join(uncertain_addresses[:8])
+    uncertain = (
+        (
+            uncertain_preview
+            if len(uncertain_addresses) <= 8
+            else f"{len(uncertain_addresses)}개 중 {uncertain_preview}, ..."
+        )
+        if uncertain_addresses
+        else "없음(실패 명령 내부 적용 여부는 네이티브 증거가 없으면 확정 불가)"
+    )
+    message = (
+        f"표 서식 호출 {batch_index + 1}/{len(execution.batches)}에서 실패했습니다. "
+        f"완료 명령 그룹이 적용한 주소 {len(affected_addresses)}개, "
+        f"실패 그룹 적용 불확실 주소: {uncertain}. {detail}"
+    )
+    commands_completed = commands_completed_before + failure_commands
+    return _result(
+        request,
+        "partial_change" if partial_mutation is True else "operation_failed",
+        message,
+    ).model_copy(
+        update={
+            "changed": partial_mutation is True,
+            "execution_mode": "native_in_process",
+            "native_protocol": 9,
+            "verification": "native_operation_specific_readback",
+            "verified": False,
+            "commands_executed": commands_completed,
+            "commands_completed": commands_completed,
+            "native_elapsed_microseconds": elapsed_before,
+            "current_page": before.current_page,
+            "page_count": before.page_count,
+            "modified": True if partial_mutation is True else before.modified,
+            "partial_change": partial_mutation is True,
+            "partial_mutation": partial_mutation,
+            "retry_safe": retry_safe,
+            "reconcile_required": partial_mutation is not False,
+            "failed_step": failed_step,
+            "structure_digest_before": (
+                error.structure_digest_before
+                if isinstance(error, NativeActionFailure)
+                else None
+            ),
+            "structure_digest_after": (
+                error.structure_digest_after
+                if isinstance(error, NativeActionFailure)
+                else None
+            ),
+            "resolved_target_id": prepared.target_id,
+            "target_resolution_basis": prepared.target_basis,
+            "updated_addresses": affected_addresses,
+        }
+    )
+
+
+def _execute_table_format_batches(
+    request: NativeFormatRecipeRequest,
+    before: NativeSnapshot,
+    prepared: PreparedFormatOperation,
+) -> tuple[int, int, int] | OperationResult:
+    plan = prepared.plan
+    assert isinstance(plan, TableFormatCommandPlan)
+    execution = build_native_format_execution_plan(plan)
+    completed_group_keys: set[str] = set()
+    commands_completed = 0
+    elapsed_microseconds = 0
+    for batch_index, batch in enumerate(execution.batches):
+        try:
+            native = execute_native_actions(
+                request.candidate.window_handle,
+                NativeActionRequest(
+                    request.routing_page.document_id,
+                    request.routing_page.full_name,
+                    batch.commands,
+                ),
+                minimum_version=9,
+            )
+        except HwpLiveError as error:
+            return _failed_table_format_batch(
+                request,
+                before,
+                prepared,
+                execution,
+                batch,
+                batch_index,
+                completed_group_keys,
+                commands_completed,
+                elapsed_microseconds,
+                error,
+            )
+        if native is None:
+            return _failed_table_format_batch(
+                request,
+                before,
+                prepared,
+                execution,
+                batch,
+                batch_index,
+                completed_group_keys,
+                commands_completed,
+                elapsed_microseconds,
+                None,
+            )
+        commands_completed += native.commands_executed
+        elapsed_microseconds += native.elapsed_microseconds
+        completed_group_keys.update(item.group.key for item in batch.groups)
+    return commands_completed, elapsed_microseconds, len(execution.batches)
+
+
 def _execute_prepared(
     request: NativeFormatRecipeRequest,
     before: NativeSnapshot,
@@ -283,7 +675,19 @@ def _execute_prepared(
     detail_page: int | None = None
     match plan:  # noqa: E501  # noqa: MATCH_OK — closed union is fully enumerated
         case TableFormatCommandPlan():
-            detail_page = plan.table.page if not plan.cells else None
+            formatted = plan.formatting
+            needs_axis_topology = len(plan.cells) > 1 and (
+                formatted.column_width_mm is not None
+                or formatted.row_height_mm is not None
+            )
+            needs_cell_geometry_topology = (
+                len(plan.cells) > 1 and formatted.formatting.padding is not None
+            )
+            detail_page = (
+                plan.table.page
+                if not plan.cells or needs_axis_topology or needs_cell_geometry_topology
+                else None
+            )
         case MergeCommandPlan() | SplitCommandPlan():
             detail_page = plan.table.page
         case TextFormatCommandPlan():
@@ -320,6 +724,25 @@ def _execute_prepared(
             )
         prepared = selected
         plan = prepared.plan
+    if (
+        isinstance(plan, TableFormatCommandPlan)
+        and before_detail is not None
+        and len(plan.cells) > 1
+        and (
+            plan.formatting.column_width_mm is not None
+            or plan.formatting.row_height_mm is not None
+        )
+    ):
+        prepared = _with_topology_size_targets(prepared, before_detail)
+        plan = prepared.plan
+    if (
+        isinstance(plan, TableFormatCommandPlan)
+        and before_detail is not None
+        and len(plan.cells) > 1
+        and plan.formatting.formatting.padding is not None
+    ):
+        prepared = _with_topology_cell_geometry_targets(prepared, before_detail)
+        plan = prepared.plan
     if isinstance(plan, (MergeCommandPlan, SplitCommandPlan)):
         assert before_detail is not None
         preflight = topology_preflight(prepared, before_detail)
@@ -338,20 +761,33 @@ def _execute_prepared(
                     "target_resolution_basis": prepared.target_basis,
                 }
             )
-    commands = build_native_format_commands(prepared.plan)
-    native = execute_native_actions(
-        request.candidate.window_handle,
-        NativeActionRequest(
-            request.routing_page.document_id,
-            request.routing_page.full_name,
-            commands,
-        ),
-        minimum_version=9,
-    )
-    if native is None:
-        raise HwpLiveError(
-            "한컴 프로토콜 9 네이티브 서식 recipe를 사용할 수 없습니다"
+    if isinstance(plan, TableFormatCommandPlan):
+        executed = _execute_table_format_batches(
+            request,
+            before,
+            prepared,
         )
+        if isinstance(executed, OperationResult):
+            return executed
+        commands_executed, elapsed_microseconds, native_call_count = executed
+    else:
+        commands = build_native_format_commands(prepared.plan)
+        native = execute_native_actions(
+            request.candidate.window_handle,
+            NativeActionRequest(
+                request.routing_page.document_id,
+                request.routing_page.full_name,
+                commands,
+            ),
+            minimum_version=9,
+        )
+        if native is None:
+            raise HwpLiveError(
+                "한컴 프로토콜 9 네이티브 서식 recipe를 사용할 수 없습니다"
+            )
+        commands_executed = native.commands_executed
+        elapsed_microseconds = native.elapsed_microseconds
+        native_call_count = 1
     after = read_native_snapshot(request.candidate.window_handle)
     if after is None:
         raise HwpLiveError("네이티브 서식 작업 후 문서 상태를 읽지 못했습니다")
@@ -359,9 +795,7 @@ def _execute_prepared(
         request.postconditions.preserve_page_count
         and after.page_count != before.page_count
     ):
-        raise HwpLiveError(
-            "서식 작업 후 페이지 수 보존 완료조건을 만족하지 못했습니다"
-        )
+        raise HwpLiveError("서식 작업 후 페이지 수 보존 완료조건을 만족하지 못했습니다")
     if isinstance(prepared.plan, TextFormatCommandPlan):
         verify_text_format(prepared.plan.formatting, before, after)
     _verify_structural_plan(
@@ -373,16 +807,19 @@ def _execute_prepared(
     return _result(
         request,
         "executed",
-        "프로토콜 9 C++/ATL 네이티브 서식 recipe를 실행하고 검증했습니다",
+        (
+            "프로토콜 9 C++/ATL 네이티브 서식 recipe를 "
+            f"{native_call_count}회 제한 호출로 실행하고 검증했습니다"
+        ),
     ).model_copy(
         update={
             "execution_mode": "native_in_process",
             "native_protocol": 9,
             "verification": "native_operation_specific_readback",
             "verified": True,
-            "commands_executed": native.commands_executed,
-            "commands_completed": native.commands_executed,
-            "native_elapsed_microseconds": native.elapsed_microseconds,
+            "commands_executed": commands_executed,
+            "commands_completed": commands_executed,
+            "native_elapsed_microseconds": elapsed_microseconds,
             "current_page": after.current_page,
             "page_count": after.page_count,
             "modified": after.modified,

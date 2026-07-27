@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Final, Literal
 
 from hwp_color_normalization import parse_rgb_color
-from hwp_live_table_contract import CellBorder, CellBorders, TableCell
+from hwp_live_table_contract import CellBorder, CellBorders, CellPadding, TableCell
 from hwp_live_values import Alignment, Rgb
 from hwp_operation_contract import OperationInputValue
 
@@ -30,6 +30,10 @@ _TABLE_KEYS: Final = _TEXT_KEYS | frozenset(
         "cell",
         "row_height_mm",
         "column_width_mm",
+        "padding_left_mm",
+        "padding_right_mm",
+        "padding_top_mm",
+        "padding_bottom_mm",
         "vertical_alignment",
         "fill_color",
         "border_style",
@@ -101,6 +105,13 @@ def _millimeters(value: OperationInputValue | None) -> float | None:
         return None
     parsed = float(value)
     return parsed if 1 <= parsed <= 250 else None
+
+
+def _padding_millimeters(value: OperationInputValue | None) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    return parsed if 0 <= parsed <= 20 else None
 
 
 def _rgb(value: OperationInputValue | None) -> Rgb | None:
@@ -196,6 +207,41 @@ def parse_table_format(
             "schema_conflict",
             "행 높이와 열 너비는 1mm 이상 250mm 이하여야 합니다",
         )
+    padding_names = (
+        "padding_left_mm",
+        "padding_right_mm",
+        "padding_top_mm",
+        "padding_bottom_mm",
+    )
+    supplied_padding = tuple(name for name in padding_names if name in parameters)
+    if supplied_padding and len(supplied_padding) != len(padding_names):
+        return InputFailure(
+            "schema_conflict",
+            "셀 여백은 왼쪽·오른쪽·위·아래 값을 모두 지정해야 합니다",
+            tuple(f"inputs.parameters.{name}" for name in padding_names),
+        )
+    left_padding = _padding_millimeters(parameters.get("padding_left_mm"))
+    right_padding = _padding_millimeters(parameters.get("padding_right_mm"))
+    top_padding = _padding_millimeters(parameters.get("padding_top_mm"))
+    bottom_padding = _padding_millimeters(parameters.get("padding_bottom_mm"))
+    padding_values = (left_padding, right_padding, top_padding, bottom_padding)
+    if supplied_padding and any(value is None for value in padding_values):
+        return InputFailure(
+            "schema_conflict",
+            "셀 여백은 0mm 이상 20mm 이하여야 합니다",
+        )
+    padding = None
+    if supplied_padding:
+        assert left_padding is not None
+        assert right_padding is not None
+        assert top_padding is not None
+        assert bottom_padding is not None
+        padding = CellPadding(
+            left_mm=left_padding,
+            right_mm=right_padding,
+            top_mm=top_padding,
+            bottom_mm=bottom_padding,
+        )
     text = parse_text_format(format_parameters) if format_parameters else TextFormatSpec(None, None, None, None, "inherit", None)
     if isinstance(text, InputFailure):
         return text
@@ -219,6 +265,7 @@ def parse_table_format(
         or column_width is not None
         or "vertical_alignment" in parameters
         or fill is not None
+        or padding is not None
         or has_border
     )
     if not has_format:
@@ -238,6 +285,7 @@ def parse_table_format(
             vertical_alignment=vertical,
             line_spacing_percent=text.line_spacing,
             fill_color=fill,
+            padding=padding,
             borders=borders,
         ),
         row_height,

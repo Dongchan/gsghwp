@@ -1,6 +1,6 @@
 [project]
 name = "gsg-hwp-beta"
-version = "0.3.89"
+version = "0.3.91"
 description = "Hancom document automation plugin runtime"
 license = "MIT"
 requires-python = ">=3.12,<3.13"
@@ -16,6 +16,7 @@ dependencies = [
     "rich==14.3.2",
     "reportlab==4.4.9",
     "pypdf==6.10.0",
+    "pymupdf==1.28.0",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +26,15 @@ test = [
     "ruff==0.15.22",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# tmp/ 에는 작업 산출물과 저장소 소스 복제본이 쌓인다. 수집하면 동일 모듈명이
+# 중복되어 import mismatch 오류가 난다(실측 92건). 항상 제외한다.
+norecursedirs = ["tmp", ".venv", "legacy", "addon", "*.egg", ".git"]
+
 [tool.basedpyright]
 extraPaths = ["skills/automate-hancom-documents/scripts"]
 reportImplicitRelativeImport = false
+# tmp/ 에는 작업 산출물과 저장소 소스 복제본이 쌓인다(실측 70건 오탐).
+# addon/ 의 빌드·진단 산출물도 타입 검사 대상이 아니다.
+exclude = ["tmp", ".venv", "legacy", "addon/**/bin", "**/__pycache__"]

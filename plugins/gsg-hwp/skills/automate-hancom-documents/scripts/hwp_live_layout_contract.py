@@ -7,6 +7,7 @@ from unicodedata import normalize
 
 from pydantic import Field, model_validator
 
+from hwp_color_normalization import ColorInput
 from hwp_image_fit import fit_image_in_box
 from hwp_live_table_contract import (
     CellBorder,
@@ -15,7 +16,7 @@ from hwp_live_table_contract import (
     TableBlock,
     TableCell,
 )
-from hwp_live_values import Alignment, ContractModel, Rgb
+from hwp_live_values import Alignment, ContractModel
 from hwp_reference_layout_contract import ReferenceLayoutBlock
 from hwp_reference_layout_patch import ReferenceLayoutPatchBlock
 
@@ -35,7 +36,7 @@ class ParagraphBlock(ContractModel):
     bold: bool | None = None
     font_name: str | None = Field(default=None, max_length=100)
     font_size_pt: float | None = Field(default=None, ge=1, le=96)
-    text_color: Rgb | None = None
+    text_color: ColorInput | None = None
     alignment: Alignment = "inherit"
     line_spacing_percent: int | None = Field(default=None, ge=50, le=500)
     space_before_mm: float | None = Field(default=None, ge=0, le=100)

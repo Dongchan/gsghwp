@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from importlib import import_module
-from typing import Protocol, runtime_checkable
+from threading import Lock, local
+from time import monotonic, perf_counter_ns
+from typing import Final, Never, Protocol, runtime_checkable
+from weakref import ReferenceType, ref
 
 from pywintypes import com_error
 
@@ -62,17 +66,182 @@ class _DispatchSource(Protocol):
     def QueryInterface(self, interface_id: object) -> object: ...
 
 
+_NATIVE_DISPATCH_CACHE_TTL_SECONDS: Final = 0.5
+_NATIVE_DISPATCH_CACHE_MAX_ENTRIES: Final = 16
 _document_routes: dict[int, int] = {}
+_document_route_generations: dict[int, int] = {}
+_document_route_lock = Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class NativeDispatchCacheMetrics:
+    cache_hits: int
+    cache_misses: int
+    rot_scans: int
+    dispatch_creations: int
+    invalidations: int
+    lookup_nanoseconds: int
+
+
+class NativeActivationCallError(HwpLiveError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeDispatchCacheEntry:
+    batch_ref: ReferenceType[_BatchDispatch]
+    expires_at: float
+
+
+class _NativeDispatchThreadState(local):
+    entries: dict[tuple[int, int, int | None, int], _NativeDispatchCacheEntry]
+    operation_depth: int
+    operation_entries: dict[
+        tuple[int, int, int | None, int],
+        _BatchDispatch,
+    ]
+
+    def __init__(self) -> None:
+        self.entries = {}
+        self.operation_depth = 0
+        self.operation_entries = {}
+
+
+_native_dispatch_state = _NativeDispatchThreadState()
+_native_dispatch_metrics_lock = Lock()
+_native_dispatch_cache_hits = 0
+_native_dispatch_cache_misses = 0
+_native_dispatch_rot_scans = 0
+_native_dispatch_creations = 0
+_native_dispatch_invalidations = 0
+_native_dispatch_lookup_nanoseconds = 0
+
+
+def _record_native_dispatch_metrics(
+    *,
+    cache_hit: bool | None = None,
+    rot_scan: bool = False,
+    dispatch_creation: bool = False,
+    invalidation: bool = False,
+    lookup_nanoseconds: int = 0,
+) -> None:
+    global _native_dispatch_cache_hits
+    global _native_dispatch_cache_misses
+    global _native_dispatch_creations
+    global _native_dispatch_invalidations
+    global _native_dispatch_lookup_nanoseconds
+    global _native_dispatch_rot_scans
+    with _native_dispatch_metrics_lock:
+        if cache_hit is True:
+            _native_dispatch_cache_hits += 1
+        elif cache_hit is False:
+            _native_dispatch_cache_misses += 1
+        if rot_scan:
+            _native_dispatch_rot_scans += 1
+        if dispatch_creation:
+            _native_dispatch_creations += 1
+        if invalidation:
+            _native_dispatch_invalidations += 1
+        _native_dispatch_lookup_nanoseconds += lookup_nanoseconds
+
+
+def native_dispatch_cache_metrics() -> NativeDispatchCacheMetrics:
+    with _native_dispatch_metrics_lock:
+        return NativeDispatchCacheMetrics(
+            cache_hits=_native_dispatch_cache_hits,
+            cache_misses=_native_dispatch_cache_misses,
+            rot_scans=_native_dispatch_rot_scans,
+            dispatch_creations=_native_dispatch_creations,
+            invalidations=_native_dispatch_invalidations,
+            lookup_nanoseconds=_native_dispatch_lookup_nanoseconds,
+        )
+
+
+def reset_native_dispatch_cache_metrics() -> None:
+    global _native_dispatch_cache_hits
+    global _native_dispatch_cache_misses
+    global _native_dispatch_creations
+    global _native_dispatch_invalidations
+    global _native_dispatch_lookup_nanoseconds
+    global _native_dispatch_rot_scans
+    with _native_dispatch_metrics_lock:
+        _native_dispatch_cache_hits = 0
+        _native_dispatch_cache_misses = 0
+        _native_dispatch_rot_scans = 0
+        _native_dispatch_creations = 0
+        _native_dispatch_invalidations = 0
+        _native_dispatch_lookup_nanoseconds = 0
+
+
+def _route_state(window_handle: int) -> tuple[int | None, int]:
+    with _document_route_lock:
+        return (
+            _document_routes.get(window_handle),
+            _document_route_generations.get(window_handle, 0),
+        )
+
+
+def _invalidate_native_dispatch(window_handle: int) -> None:
+    with _document_route_lock:
+        _document_route_generations[window_handle] = (
+            _document_route_generations.get(window_handle, 0) + 1
+        )
+    entries = _native_dispatch_state.entries
+    _native_dispatch_state.entries = {
+        key: entry for key, entry in entries.items() if key[1] != window_handle
+    }
+    operation_entries = _native_dispatch_state.operation_entries
+    _native_dispatch_state.operation_entries = {
+        key: batch
+        for key, batch in operation_entries.items()
+        if key[1] != window_handle
+    }
+    _record_native_dispatch_metrics(invalidation=True)
+
+
+def _raise_native_call_error(
+    window_handle: int,
+    message: str,
+    error: BaseException,
+    failure_type: type[HwpLiveError] = HwpLiveError,
+) -> Never:
+    _invalidate_native_dispatch(window_handle)
+    detail = ""
+    if isinstance(error, com_error) and error.args and isinstance(error.args[0], int):
+        detail = f" (HRESULT 0x{error.args[0] & 0xFFFFFFFF:08X})"
+    elif str(error):
+        detail = f" ({type(error).__name__}: {str(error)[:500]})"
+    raise failure_type(message + detail) from error
 
 
 def select_native_document_route(window_handle: int, document_id: int) -> None:
     if window_handle <= 0 or document_id <= 0:
         raise ValueError("한컴 네이티브 문서 라우팅 값은 양수여야 합니다")
-    _document_routes[window_handle] = document_id
+    with _document_route_lock:
+        previous = _document_routes.get(window_handle)
+        _document_routes[window_handle] = document_id
+        if previous != document_id:
+            _document_route_generations[window_handle] = (
+                _document_route_generations.get(window_handle, 0) + 1
+            )
 
 
 def clear_native_document_route(window_handle: int) -> None:
-    _ = _document_routes.pop(window_handle, None)
+    with _document_route_lock:
+        _ = _document_routes.pop(window_handle, None)
+        _document_route_generations[window_handle] = (
+            _document_route_generations.get(window_handle, 0) + 1
+        )
+    entries = _native_dispatch_state.entries
+    _native_dispatch_state.entries = {
+        key: entry for key, entry in entries.items() if key[1] != window_handle
+    }
+    operation_entries = _native_dispatch_state.operation_entries
+    _native_dispatch_state.operation_entries = {
+        key: batch
+        for key, batch in operation_entries.items()
+        if key[1] != window_handle
+    }
 
 
 class _BatchDispatch(Protocol):
@@ -106,6 +275,31 @@ class _BatchDispatch(Protocol):
     def ActivateDocument(self, document_id: int) -> str: ...
 
     def ActivationStatus(self, document_id: int) -> int: ...
+
+
+def enter_native_dispatch_operation_scope() -> None:
+    state = _native_dispatch_state
+    if state.operation_depth == 0:
+        state.operation_entries.clear()
+    state.operation_depth += 1
+
+
+def exit_native_dispatch_operation_scope() -> None:
+    state = _native_dispatch_state
+    if state.operation_depth < 1:
+        raise RuntimeError("네이티브 dispatch 작업 scope 깊이가 일치하지 않습니다")
+    state.operation_depth -= 1
+    if state.operation_depth == 0:
+        state.operation_entries.clear()
+
+
+@contextmanager
+def native_dispatch_operation_scope() -> Generator[None, None, None]:
+    enter_native_dispatch_operation_scope()
+    try:
+        yield
+    finally:
+        exit_native_dispatch_operation_scope()
 
 
 class _EventHandle(Protocol):
@@ -178,10 +372,26 @@ def _source_for_window(
     try:
         _, process_id = process.GetWindowThreadProcessId(window_handle)
     except OSError:
+        _invalidate_native_dispatch(window_handle)
         return None
     if process_id <= 0:
+        _invalidate_native_dispatch(window_handle)
         return None
-    document_id = _document_routes.get(window_handle)
+    document_id, _ = _route_state(window_handle)
+    return _source_for_route(
+        window_handle,
+        process_id,
+        document_id,
+        pythoncom,
+    )
+
+
+def _source_for_route(
+    window_handle: int,
+    process_id: int,
+    document_id: int | None,
+    pythoncom: _PythonCom,
+) -> _DispatchSource | None:
     document_name = (
         None
         if document_id is None
@@ -270,9 +480,12 @@ def activate_native_document(window_handle: int, document_id: int) -> bool:
             ValueError,
             com_error,
         ) as error:
-            raise HwpLiveError(
-                "한컴 네이티브 문서 탭 전환에 실패했습니다"
-            ) from error
+            _raise_native_call_error(
+                window_handle,
+                "한컴 네이티브 문서 탭 전환에 실패했습니다",
+                error,
+                NativeActivationCallError,
+            )
         finally:
             batch = None
 
@@ -284,26 +497,94 @@ def _batch_for_window(
     client: _Win32Client,
     process: _Win32Process,
 ) -> _BatchDispatch | None:
-    source = _source_for_window(window_handle, pythoncom, process)
-    if source is None:
-        return None
+    lookup_started = perf_counter_ns()
     try:
-        batch = client.Dispatch(source.QueryInterface(pythoncom.IID_IDispatch))
-        if int(batch.ProtocolVersion) < minimum_version:
-            raise HwpLiveError("한컴 네이티브 실시간 프로토콜 버전이 낮습니다")
-        document_id = _document_routes.get(window_handle)
-        target_document_id = int(batch.TargetDocumentID)
-        if (
-            document_id is not None
-            and target_document_id not in (0, document_id)
-        ):
-            raise HwpLiveError(
-                "한컴 네이티브 라우팅 문서 ID가 대상과 다릅니다"
+        _, process_id = process.GetWindowThreadProcessId(window_handle)
+    except OSError:
+        _invalidate_native_dispatch(window_handle)
+        return None
+    if process_id <= 0:
+        _invalidate_native_dispatch(window_handle)
+        return None
+    document_id, route_generation = _route_state(window_handle)
+    key = (process_id, window_handle, document_id, route_generation)
+    now = monotonic()
+    entries = _native_dispatch_state.entries
+    entries = {
+        cached_key: entry
+        for cached_key, entry in entries.items()
+        if entry.expires_at > now
+        and not (cached_key[1] == window_handle and cached_key[3] != route_generation)
+    }
+    _native_dispatch_state.entries = entries
+    entry = entries.get(key)
+    cached_batch = (
+        _native_dispatch_state.operation_entries.get(key)
+        if _native_dispatch_state.operation_depth > 0
+        else None
+    )
+    if cached_batch is None:
+        cached_batch = None if entry is None else entry.batch_ref()
+    if entry is not None and cached_batch is None:
+        _ = entries.pop(key, None)
+        entry = None
+    batch: _BatchDispatch
+    if cached_batch is None:
+        _record_native_dispatch_metrics(cache_hit=False, rot_scan=True)
+        source = _source_for_route(
+            window_handle,
+            process_id,
+            document_id,
+            pythoncom,
+        )
+        if source is None:
+            _record_native_dispatch_metrics(
+                lookup_nanoseconds=perf_counter_ns() - lookup_started
             )
+            return None
+        try:
+            batch = client.Dispatch(source.QueryInterface(pythoncom.IID_IDispatch))
+        except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
+            _invalidate_native_dispatch(window_handle)
+            raise HwpLiveError("한컴 네이티브 실시간 연결에 실패했습니다") from error
+        _record_native_dispatch_metrics(dispatch_creation=True)
+    else:
+        batch = cached_batch
+        _record_native_dispatch_metrics(cache_hit=True)
+    try:
+        if int(batch.ProtocolVersion) < minimum_version:
+            _invalidate_native_dispatch(window_handle)
+            raise HwpLiveError("한컴 네이티브 실시간 프로토콜 버전이 낮습니다")
+        target_document_id = int(batch.TargetDocumentID)
+        if document_id is not None and target_document_id not in (0, document_id):
+            _invalidate_native_dispatch(window_handle)
+            raise HwpLiveError("한컴 네이티브 라우팅 문서 ID가 대상과 다릅니다")
     except HwpLiveError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
+        _invalidate_native_dispatch(window_handle)
         raise HwpLiveError("한컴 네이티브 실시간 연결에 실패했습니다") from error
+    if cached_batch is None:
+        if len(entries) >= _NATIVE_DISPATCH_CACHE_MAX_ENTRIES:
+            oldest_key = min(
+                entries,
+                key=lambda cached_key: entries[cached_key].expires_at,
+            )
+            _ = entries.pop(oldest_key, None)
+        try:
+            batch_ref = ref(batch)
+        except TypeError:
+            batch_ref = None
+        if batch_ref is not None:
+            entries[key] = _NativeDispatchCacheEntry(
+                batch_ref=batch_ref,
+                expires_at=now + _NATIVE_DISPATCH_CACHE_TTL_SECONDS,
+            )
+    if _native_dispatch_state.operation_depth > 0:
+        _native_dispatch_state.operation_entries[key] = batch
+    _record_native_dispatch_metrics(
+        lookup_nanoseconds=perf_counter_ns() - lookup_started
+    )
     return batch
 
 
@@ -321,7 +602,11 @@ def execute_native_batch(
         except HwpLiveError:
             raise
         except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
-            raise HwpLiveError("한컴 네이티브 배치 실행에 실패했습니다") from error
+            _raise_native_call_error(
+                window_handle,
+                "한컴 네이티브 배치 실행에 실패했습니다",
+                error,
+            )
         finally:
             batch = None
         return decode_batch_result(str(response))
@@ -342,7 +627,11 @@ def execute_native_lifecycle(window_handle: int) -> NativeLifecycleResult | None
             ValueError,
             com_error,
         ) as error:
-            raise HwpLiveError("한컴 네이티브 저장·재개방 검증 실행에 실패했습니다") from error
+            _raise_native_call_error(
+                window_handle,
+                "한컴 네이티브 저장·재개방 검증 실행에 실패했습니다",
+                error,
+            )
         finally:
             batch = None
         return decode_lifecycle_result(str(response))
@@ -363,7 +652,11 @@ def execute_native_save(window_handle: int) -> NativeSaveResult | None:
             ValueError,
             com_error,
         ) as error:
-            raise HwpLiveError("한컴 네이티브 일반 저장 검증 실행에 실패했습니다") from error
+            _raise_native_call_error(
+                window_handle,
+                "한컴 네이티브 일반 저장 검증 실행에 실패했습니다",
+                error,
+            )
         finally:
             batch = None
         return decode_save_result(str(response))
@@ -377,7 +670,11 @@ def read_native_snapshot(window_handle: int) -> NativeSnapshot | None:
         try:
             response = batch.Snapshot()
         except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
-            raise HwpLiveError("한컴 네이티브 현재 상태 조회에 실패했습니다") from error
+            _raise_native_call_error(
+                window_handle,
+                "한컴 네이티브 현재 상태 조회에 실패했습니다",
+                error,
+            )
         finally:
             batch = None
         return decode_snapshot(str(response))
@@ -400,7 +697,11 @@ def inspect_native_page(
                 else batch.InspectPageSummary(page)
             )
         except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
-            raise HwpLiveError("한컴 네이티브 쪽 구조 조회에 실패했습니다") from error
+            _raise_native_call_error(
+                window_handle,
+                "한컴 네이티브 쪽 구조 조회에 실패했습니다",
+                error,
+            )
         finally:
             batch = None
         return decode_page_inspection(str(response))
@@ -434,7 +735,11 @@ def inspect_native_pages(
         except AttributeError:
             response = None
         except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
-            raise HwpLiveError("한컴 네이티브 다중 쪽 구조 조회에 실패했습니다") from error
+            _raise_native_call_error(
+                window_handle,
+                "한컴 네이티브 다중 쪽 구조 조회에 실패했습니다",
+                error,
+            )
         finally:
             batch = None
     if response is None:
@@ -460,9 +765,15 @@ def read_native_routing_context(
         if batch is None:
             return None
         try:
-            response = batch.InspectRoutingContext(0 if page_hint is None else page_hint)
+            response = batch.InspectRoutingContext(
+                0 if page_hint is None else page_hint
+            )
         except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
-            raise HwpLiveError("한컴 네이티브 빠른 구조 조회에 실패했습니다") from error
+            _raise_native_call_error(
+                window_handle,
+                "한컴 네이티브 빠른 구조 조회에 실패했습니다",
+                error,
+            )
         finally:
             batch = None
         return decode_page_inspection(str(response))
@@ -479,7 +790,11 @@ def inspect_native_structure(
         try:
             response = batch.InspectStructure(page)
         except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
-            raise HwpLiveError("한컴 네이티브 상세 구조 조회에 실패했습니다") from error
+            _raise_native_call_error(
+                window_handle,
+                "한컴 네이티브 상세 구조 조회에 실패했습니다",
+                error,
+            )
         finally:
             batch = None
         return decode_detailed_inspection(str(response))
@@ -498,7 +813,11 @@ def execute_native_actions(
         try:
             response = batch.ExecuteActions(encode_action_request(request))
         except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
-            raise HwpLiveError("한컴 네이티브 액션 배치 실행에 실패했습니다") from error
+            _raise_native_call_error(
+                window_handle,
+                "한컴 네이티브 액션 배치 실행에 실패했습니다",
+                error,
+            )
         finally:
             batch = None
         return decode_action_result(str(response))
@@ -513,9 +832,11 @@ def probe_official_api(window_handle: int, payload: str) -> str | None:
             response = str(batch.ProbeOfficialApi(payload))
         except (OSError, RuntimeError, TypeError, ValueError, com_error) as error:
             detail = f"{type(error).__name__}: {error}"
-            raise HwpLiveError(
-                f"한컴 공식 API 네이티브 검증 호출에 실패했습니다: {detail}"
-            ) from error
+            _raise_native_call_error(
+                window_handle,
+                f"한컴 공식 API 네이티브 검증 호출에 실패했습니다: {detail}",
+                error,
+            )
         finally:
             batch = None
         return response

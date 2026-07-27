@@ -71,19 +71,42 @@ class PixelCanvas:
     @classmethod
     def from_image(cls, image: Image.Image) -> PixelCanvas:
         rgb_image = image.convert("RGB")
-        gray = rgb_image.convert("L")
-        local_average = gray.filter(ImageFilter.BoxBlur(2))
-        difference = ImageChops.difference(gray, local_average)
-        contrast = difference.point(
-            tuple(255 if value >= 12 else 0 for value in range(256))
-        )
-        return cls(
-            image=rgb_image,
-            width=rgb_image.width,
-            height=rgb_image.height,
-            rgb=rgb_image.tobytes(),
-            contrast=contrast.tobytes(),
-        )
+        try:
+            gray = rgb_image.convert("L")
+            try:
+                local_average = gray.filter(ImageFilter.BoxBlur(2))
+                try:
+                    difference = ImageChops.difference(gray, local_average)
+                    try:
+                        contrast = difference.point(
+                            tuple(
+                                255 if value >= 12 else 0
+                                for value in range(256)
+                            )
+                        )
+                        try:
+                            contrast_bytes = contrast.tobytes()
+                        finally:
+                            contrast.close()
+                    finally:
+                        difference.close()
+                finally:
+                    local_average.close()
+            finally:
+                gray.close()
+            return cls(
+                image=rgb_image,
+                width=rgb_image.width,
+                height=rgb_image.height,
+                rgb=rgb_image.tobytes(),
+                contrast=contrast_bytes,
+            )
+        except BaseException:
+            rgb_image.close()
+            raise
+
+    def close(self) -> None:
+        self.image.close()
 
     def color(self, x: int, y: int) -> Rgb:
         offset = (y * self.width + x) * 3

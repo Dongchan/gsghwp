@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <iosfwd>
+#include <vector>
 
 namespace hancom::official_api {
 
@@ -17,6 +18,10 @@ struct DocumentState {
     std::uint64_t controlHash = 0;
 };
 
+struct DocumentSectionFingerprint {
+    std::uint64_t hash = 0;
+};
+
 struct DocumentFingerprint {
     DocumentState state;
     bool captured = false;
@@ -24,6 +29,7 @@ struct DocumentFingerprint {
     std::uint64_t documentHash = 0;
     std::uint64_t textLength = 0;
     std::uint64_t documentLength = 0;
+    std::vector<DocumentSectionFingerprint> documentSections;
 };
 
 DocumentState CaptureDocumentState(IDispatch* hwp) noexcept;

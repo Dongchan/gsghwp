@@ -5,12 +5,12 @@ from typing import cast
 
 from hwp_errors import HwpLiveError
 from hwp_live_contract import DocumentStyleList, LiveContext, PreviewResult
-from hwp_live_inspection import inspect_context, inspect_styles
-from hwp_live_native_batch import inspect_native_page
+from hwp_live_inspection import inspect_styles
+from hwp_live_native_batch import inspect_native_page, read_native_snapshot
 from hwp_live_preview import PreviewApplication, render_page
 from hwp_live_session_core import LiveHwpSessionCore
 from hwp_live_session_structure import (
-    connected_document,
+    inspect_candidate_context,
     inspect_candidate_state,
     inspect_candidate_structure,
 )
@@ -35,12 +35,24 @@ class LiveHwpInspectionSession(LiveHwpSessionCore):
 
     def context(self, session_id: str) -> LiveContext:
         candidate, hwp = self._validate(session_id)
-        guard = self._guard(candidate, hwp)
-        return inspect_context(hwp, connected_document(candidate, hwp, guard), guard)
+        return inspect_candidate_context(
+            hwp,
+            candidate,
+            self._guard(candidate, hwp),
+        )
 
     def styles(self, session_id: str) -> DocumentStyleList:
         candidate, hwp = self._validate(session_id)
-        return inspect_styles(hwp, self._guard(candidate, hwp))
+        guard = self._guard(candidate, hwp)
+        state_token = self.style_state_token(session_id)
+        if state_token is None:
+            return inspect_styles(hwp, guard)
+        return self._style_cache.resolve(
+            candidate.document_id,
+            candidate.full_name,
+            state_token,
+            lambda: inspect_styles(hwp, guard),
+        )
 
     def structure(self, session_id: str, page: int = 0) -> DocumentStructure:
         candidate, hwp = self._validate(session_id)
@@ -61,7 +73,22 @@ class LiveHwpInspectionSession(LiveHwpSessionCore):
     ) -> FastPageInspection:
         candidate, hwp = self._validate(session_id)
         guard = self._guard(candidate, hwp)
-        target_page = hwp.current_page if page == 0 else page
+        target_page = page
+        if page == 0:
+            snapshot = read_native_snapshot(candidate.window_handle)
+            guard()
+            if snapshot is None:
+                raise HwpLiveError("한컴 네이티브 현재 쪽을 읽을 수 없습니다")
+            expected_name = ntpath.normcase(ntpath.normpath(candidate.full_name))
+            actual_name = ntpath.normcase(ntpath.normpath(snapshot.full_name))
+            if (
+                snapshot.document_id != candidate.document_id
+                or actual_name != expected_name
+            ):
+                raise HwpLiveError(
+                    "한컴 네이티브 현재 쪽 문서가 현재 연결 문서와 다릅니다"
+                )
+            target_page = snapshot.current_page
         guard()
         inspected = inspect_native_page(
             candidate.window_handle,
@@ -69,14 +96,18 @@ class LiveHwpInspectionSession(LiveHwpSessionCore):
             include_cells=include_cells,
         )
         if inspected is None:
-            raise HwpLiveError("한컴 네이티브 인프로세스 구조 조회를 사용할 수 없습니다")
+            raise HwpLiveError(
+                "한컴 네이티브 인프로세스 구조 조회를 사용할 수 없습니다"
+            )
         expected_name = ntpath.normcase(ntpath.normpath(candidate.full_name))
         actual_name = ntpath.normcase(ntpath.normpath(inspected.full_name))
         if (
             inspected.document_id != candidate.document_id
             or actual_name != expected_name
         ):
-            raise HwpLiveError("한컴 네이티브 구조 조회 문서가 현재 연결 문서와 다릅니다")
+            raise HwpLiveError(
+                "한컴 네이티브 구조 조회 문서가 현재 연결 문서와 다릅니다"
+            )
         return FastPageInspection(
             document_id=inspected.document_id,
             full_name=inspected.full_name,

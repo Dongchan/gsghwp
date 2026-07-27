@@ -62,7 +62,7 @@ def _changed_result() -> OperationResult:
 
 
 def test_mutation_cancelled_before_com_start_changes_nothing() -> None:
-    dispatcher = McpThreadDispatcher(watch_workers=1)
+    dispatcher = McpThreadDispatcher(watch_workers=1, operation_workers=1)
     blocker_started = Event()
     release_blocker = Event()
     changes = 0

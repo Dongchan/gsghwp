@@ -2,9 +2,12 @@
 
 #include <Windows.h>
 #include <OleAuto.h>
+#include <atlbase.h>
+#include <atlcomcli.h>
 
 #include "FakeVirtualTypeInfo.h"
 
+#include <map>
 #include <string>
 
 namespace fake_parameter_array {
@@ -158,6 +161,46 @@ public:
     HRESULT STDMETHODCALLTYPE Slot7() override { return E_NOTIMPL; }
     HRESULT STDMETHODCALLTYPE Slot8() override { return E_NOTIMPL; }
 
+    void EnableGenericProperties(const bool enabled) noexcept {
+        genericProperties_ = enabled;
+        if (!enabled) {
+            genericValues_.clear();
+            genericValueReads_ = 0;
+        }
+    }
+
+    void ClearGenericValues() noexcept {
+        genericValues_.clear();
+    }
+
+    void SetGenericLong(const std::wstring& name, const LONG value) {
+        genericValues_[name] = CComVariant(value);
+    }
+
+    bool TryGetLong(const std::wstring& name, LONG* const value) const noexcept {
+        if (value == nullptr) {
+            return false;
+        }
+        const auto found = genericValues_.find(name);
+        if (found == genericValues_.end()) {
+            return false;
+        }
+        CComVariant converted(found->second);
+        if (FAILED(converted.ChangeType(VT_I4))) {
+            return false;
+        }
+        *value = converted.lVal;
+        return true;
+    }
+
+    size_t GenericValueReads() const noexcept {
+        return genericValueReads_;
+    }
+
+    void ResetGenericValueReads() noexcept {
+        genericValueReads_ = 0;
+    }
+
     HRESULT STDMETHODCALLTYPE CreateItemArray(
         BSTR const name,
         const LONG count) override {
@@ -187,6 +230,18 @@ public:
             members[0] = 2;
             return S_OK;
         }
+        if (genericProperties_) {
+            const auto found = genericMembers_.find(name);
+            if (found != genericMembers_.end()) {
+                members[0] = found->second;
+                return S_OK;
+            }
+            const DISPID member = nextGenericMember_++;
+            genericMembers_.emplace(name, member);
+            genericNames_.emplace(member, name);
+            members[0] = member;
+            return S_OK;
+        }
         return DISP_E_UNKNOWNNAME;
     }
 
@@ -195,10 +250,20 @@ public:
         REFIID,
         LCID,
         const WORD flags,
-        DISPPARAMS*,
+        DISPPARAMS* const parameters,
         VARIANT* const result,
         EXCEPINFO*,
         UINT*) override {
+        const auto genericName = genericNames_.find(member);
+        if ((flags & (DISPATCH_PROPERTYPUT | DISPATCH_PROPERTYPUTREF)) != 0 &&
+            genericName != genericNames_.end() && genericProperties_) {
+            if (parameters == nullptr || parameters->cArgs != 1) {
+                return DISP_E_BADPARAMCOUNT;
+            }
+            genericValues_[genericName->second] =
+                CComVariant(parameters->rgvarg[0]);
+            return S_OK;
+        }
         if ((flags & DISPATCH_PROPERTYGET) == 0 || result == nullptr) {
             return DISP_E_MEMBERNOTFOUND;
         }
@@ -214,6 +279,19 @@ public:
             static_cast<void>(array_->AddRef());
             return S_OK;
         }
+        if (genericName != genericNames_.end() && genericProperties_) {
+            const auto value = genericValues_.find(genericName->second);
+            if (value != genericValues_.end()) {
+                ++genericValueReads_;
+                return VariantCopy(
+                    result,
+                    const_cast<VARIANT*>(
+                        static_cast<const VARIANT*>(&value->second)));
+            }
+            result->pdispVal = this;
+            static_cast<void>(AddRef());
+            return S_OK;
+        }
         result->vt = VT_EMPTY;
         return DISP_E_MEMBERNOTFOUND;
     }
@@ -226,4 +304,10 @@ private:
     fake_parameter_array::ParameterArray* array_;
     std::wstring arrayName_;
     bool arrayCreated_ = false;
+    bool genericProperties_ = false;
+    DISPID nextGenericMember_ = 100;
+    std::map<std::wstring, DISPID> genericMembers_;
+    std::map<DISPID, std::wstring> genericNames_;
+    std::map<std::wstring, CComVariant> genericValues_;
+    size_t genericValueReads_ = 0;
 };

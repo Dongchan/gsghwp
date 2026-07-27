@@ -27,6 +27,7 @@ from hwp_reference_layout_contract import (
 
 ReferenceExecutionMode = Literal["ordinary_layout", "reference_layout_bulk"]
 ReferenceDetailSection = Literal[
+    "draft_reference_layout",
     "objects",
     "text_regions",
     "protected_gaps",
@@ -72,10 +73,16 @@ class ReferenceArtifact(ContractModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class ReferenceCompactOmission(ContractModel):
+    section: ReferenceDetailSection
+    omitted_count: int = Field(ge=1)
+    reason: Literal["utf8_byte_budget"] = "utf8_byte_budget"
+
+
 class CompactReferenceImageAnalysis(ContractModel):
     analysis_id: str = Field(pattern=r"^ria-[0-9a-f]{16}$")
     analyzer_version: str
-    source_image: Path
+    source_image: Path | None
     source_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     source_size_bytes: int = Field(ge=0)
     image_width: int = Field(ge=2)
@@ -90,8 +97,11 @@ class CompactReferenceImageAnalysis(ContractModel):
     column_breakpoints: tuple[float, ...] = Field(min_length=2, max_length=51)
     draft_reference_layout: ReferenceLayoutBlock | None = None
     detail_sections: tuple[ReferenceDetailSection, ...]
-    analysis_result_path: Path
+    analysis_result_path: Path | None
     artifacts: tuple[ReferenceArtifact, ...]
+    response_budget_bytes: int = Field(default=100_000, ge=1)
+    response_size_bytes: int = Field(default=0, ge=0)
+    omissions: tuple[ReferenceCompactOmission, ...] = ()
 
 
 class ReferenceAnalysisDetail(ContractModel):
@@ -102,6 +112,98 @@ class ReferenceAnalysisDetail(ContractModel):
     total: int = Field(ge=0)
     next_offset: int | None = Field(default=None, ge=0)
     items: tuple[JsonValue, ...]
+
+
+def _with_response_size(
+    result: CompactReferenceImageAnalysis,
+) -> CompactReferenceImageAnalysis:
+    sized = result
+    for _ in range(4):
+        encoded_size = len(sized.model_dump_json().encode("utf-8"))
+        if sized.response_size_bytes == encoded_size:
+            return sized
+        sized = sized.model_copy(update={"response_size_bytes": encoded_size})
+    return sized
+
+
+def enforce_compact_response_budget(
+    result: CompactReferenceImageAnalysis,
+) -> CompactReferenceImageAnalysis:
+    bounded = _with_response_size(result)
+    if bounded.response_size_bytes <= bounded.response_budget_bytes:
+        return bounded
+    omissions = list(bounded.omissions)
+    draft = bounded.draft_reference_layout
+    if draft is not None:
+        omissions.append(
+            ReferenceCompactOmission(
+                section="draft_reference_layout",
+                omitted_count=max(
+                    1,
+                    len(draft.visible_edges)
+                    + len(draft.styles)
+                    + len(draft.style_regions)
+                    + len(draft.text_anchors),
+                ),
+            )
+        )
+        bounded = _with_response_size(
+            bounded.model_copy(
+                update={
+                    "draft_reference_layout": None,
+                    "omissions": tuple(omissions),
+                }
+            )
+        )
+    if (
+        bounded.response_size_bytes > bounded.response_budget_bytes
+        and bounded.artifacts
+    ):
+        omissions.append(
+            ReferenceCompactOmission(
+                section="artifacts",
+                omitted_count=len(bounded.artifacts),
+            )
+        )
+        bounded = _with_response_size(
+            bounded.model_copy(
+                update={
+                    "artifacts": (),
+                    "omissions": tuple(omissions),
+                }
+            )
+        )
+    if (
+        bounded.response_size_bytes > bounded.response_budget_bytes
+        and (
+            bounded.source_image is not None
+            or bounded.analysis_result_path is not None
+        )
+    ):
+        omissions.append(
+            ReferenceCompactOmission(
+                section="artifacts",
+                omitted_count=sum(
+                    path is not None
+                    for path in (
+                        bounded.source_image,
+                        bounded.analysis_result_path,
+                    )
+                ),
+            )
+        )
+        bounded = _with_response_size(
+            bounded.model_copy(
+                update={
+                    "source_image": None,
+                    "analysis_result_path": None,
+                    "omissions": tuple(omissions),
+                }
+            )
+        )
+    if bounded.response_size_bytes > bounded.response_budget_bytes:
+        raise ValueError("compact reference image response exceeds UTF-8 byte budget")
+    return bounded
 
 
 @final
@@ -543,7 +645,7 @@ def _compact_artifacts(
     )
 
 
-def compact_reference_image_analysis(
+def _build_compact_reference_image_analysis(
     analysis: ReferenceImageAnalysis,
 ) -> CompactReferenceImageAnalysis:
     dominant, _, structure = _dominant_component(analysis)
@@ -618,6 +720,7 @@ def compact_reference_image_analysis(
         column_breakpoints=columns,
         draft_reference_layout=draft,
         detail_sections=(
+            "draft_reference_layout",
             "objects",
             "text_regions",
             "protected_gaps",
@@ -628,6 +731,14 @@ def compact_reference_image_analysis(
         ),
         analysis_result_path=result_path,
         artifacts=_compact_artifacts(analysis),
+    )
+
+
+def compact_reference_image_analysis(
+    analysis: ReferenceImageAnalysis,
+) -> CompactReferenceImageAnalysis:
+    return enforce_compact_response_budget(
+        _build_compact_reference_image_analysis(analysis)
     )
 
 
@@ -698,7 +809,16 @@ def reference_image_analysis_section(
     if limit < 1 or limit > 200:
         raise ValueError("limit must be between 1 and 200")
     analysis = _load_analysis_by_id(analysis_id, artifact_root)
-    if section == "artifacts":
+    if section == "draft_reference_layout":
+        draft = _build_compact_reference_image_analysis(
+            analysis
+        ).draft_reference_layout
+        values = (
+            ()
+            if draft is None
+            else (cast(JsonValue, draft.model_dump(mode="json")),)
+        )
+    elif section == "artifacts":
         values = tuple(
             cast(JsonValue, item.model_dump(mode="json"))
             for item in _all_artifacts(analysis)

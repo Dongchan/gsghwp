@@ -59,18 +59,33 @@ def operate_table_series_recipe(
         for block in plan.blocks
         for cell in (*block.text_cells, *block.images)
     ))
+    verification_error = repeated.verification_error
     if postconditions.preserve_page_count and repeated.page_count != before.page_count:
-        raise HwpLiveError("표 반복 후 페이지 수 보존 완료조건을 만족하지 못했습니다")
+        verification_error = "표 반복 후 페이지 수 보존 완료조건을 만족하지 못했습니다"
+    verified = repeated.verified and verification_error is None
+    changed = repeated.commands_executed > 0
+    status = (
+        "executed" if verified else "partial_change" if changed else "operation_failed"
+    )
+    message = (
+        "표 양식을 C++/ATL 네이티브로 반복하고 구조를 다시 읽어 검증했습니다"
+        if verified
+        else "표 반복 명령은 실행됐지만 사후 구조 검증이 일치하지 않았습니다"
+        + ("" if verification_error is None else f": {verification_error}")
+    )
     return priority_recipe_result(
         resolution,
-        "executed",
-        "표 양식을 C++/ATL 네이티브로 반복하고 내용을 적용했습니다",
+        status,
+        message,
     ).model_copy(
         update={
+            "changed": changed,
             "execution_mode": "native_in_process",
             "native_protocol": 9,
             "verification": "native_snapshot_before_after",
+            "verified": verified,
             "commands_executed": repeated.commands_executed,
+            "commands_completed": repeated.commands_executed,
             "native_elapsed_microseconds": repeated.native_elapsed_microseconds,
             "caption_profile_elapsed_microseconds": repeated.caption_profile_elapsed_microseconds,
             "clone_elapsed_microseconds": repeated.clone_elapsed_microseconds,
@@ -82,6 +97,12 @@ def operate_table_series_recipe(
             "current_page": repeated.current_page,
             "page_count": repeated.page_count,
             "modified": repeated.modified,
+            "partial_change": not verified and changed,
+            "partial_mutation": not verified and changed,
+            "retry_safe": verified or not changed,
+            "reconcile_required": not verified and changed,
+            "failed_step": None if verified else "native_structure_readback",
+            "blocks_applied": len(plan.blocks) if verified else None,
             "created_control_ids": repeated.created_control_ids,
             "updated_addresses": updated_addresses,
         }

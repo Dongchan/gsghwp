@@ -22,11 +22,13 @@ sys.path.insert(0, str(SCRIPTS))
 from hwp_live_api import (  # noqa: E402
     HwpComApplication,
     HwpComDocument,
-    LiveHwpApplication,
 )
-from hwp_live_contract import OpenDocument  # noqa: E402
+from hwp_live_contract import LiveContext, OpenDocument  # noqa: E402
 from hwp_errors import HwpLiveError  # noqa: E402
-from hwp_live_inspection import inspect_context  # noqa: E402
+from hwp_live_inspection import (  # noqa: E402
+    inspect_native_context,
+    with_selected_cell_addresses,
+)
 from hwp_live_native_action_contract import decode_snapshot  # noqa: E402
 from hwp_live_native_action_models import (  # noqa: E402
     CellCommand,
@@ -177,6 +179,49 @@ class _SelectedTableHwp(_SelectedCellsHwp):
         raise AssertionError("selected controls must not be queried as table cells")
 
 
+def _inspect_context(
+    hwp: _SelectedCellsHwp,
+    document: OpenDocument,
+) -> LiveContext:
+    raw = hwp.get_selected_pos()
+    control = (
+        hwp.CurSelectedCtrl
+        if (hwp.SelectionMode & 0x0F) == 4
+        else hwp.ParentCtrl
+    )
+    snapshot = NativeSnapshot(
+        document_id=document.document_id,
+        full_name=document.full_name,
+        current_page=hwp.current_page,
+        page_count=document.page_count,
+        modified=hwp.IsModified,
+        cursor=NativePosition(*hwp.get_pos()),
+        selection=NativeSelection(
+            selected=raw[0],
+            start=NativePosition(*(value or 0 for value in raw[1:4])),
+            end=NativePosition(*(value or 0 for value in raw[4:7])),
+            mode=hwp.SelectionMode,
+        ),
+        selected_text=(
+            hwp.get_text_file(format="UNICODE", option="saveblock:true")
+            if raw[0]
+            else ""
+        ),
+        control_type=control.CtrlID,
+        control_instance_id=control.GetCtrlInstID(),
+        cell_address="B2",
+        style_id=0,
+        character_format=NativeCharacterFormat("함초롬바탕", 1000, False, 0),
+        paragraph_format=NativeParagraphFormat(0, 160, 0, 0, 0, 0, 0),
+    )
+    return inspect_native_context(
+        snapshot,
+        document,
+        hwp.get_page_text(hwp.current_page - 1),
+        hwp.get_pagedef_as_dict("eng"),
+    )
+
+
 def _encoded(value: str) -> str:
     return b64encode(value.encode("utf-8")).decode("ascii")
 
@@ -219,8 +264,7 @@ def test_hwp_inspect_reports_selected_cells_as_the_active_last_hwp_target() -> N
         window_handle=100,
     )
 
-    hwp = cast(LiveHwpApplication, cast(object, _SelectedCellsHwp()))
-    context = inspect_context(hwp, document, lambda: None)
+    context = _inspect_context(_SelectedCellsHwp(), document)
 
     assert context.active_target.basis == "current_or_last_hwp_position"
     assert context.active_target.kind == "selected_cells"
@@ -230,6 +274,30 @@ def test_hwp_inspect_reports_selected_cells_as_the_active_last_hwp_target() -> N
     assert context.active_target.control_type == "tbl"
     assert context.active_target.control_instance_id == "table-selected"
     assert context.active_target.cell_address == "B2"
+
+
+def test_hwp_inspect_can_expose_native_selected_cell_addresses() -> None:
+    document = OpenDocument(
+        selector="active",
+        title="test.hwp",
+        full_name="C:/test.hwp",
+        document_id=7,
+        format="HWP",
+        edit_mode=1,
+        modified=False,
+        page_count=8,
+        active=True,
+        window_handle=100,
+    )
+    context = _inspect_context(_SelectedCellsHwp(), document)
+
+    enriched = with_selected_cell_addresses(
+        context,
+        ("A1", "B1", "A2", "B2"),
+    )
+
+    assert enriched.active_target.cell_addresses == ("A1", "B1", "A2", "B2")
+    assert enriched.active_target.cell_address_error is None
 
 
 def test_hwp_inspect_distinguishes_one_selected_cell_from_multiple_cells() -> None:
@@ -246,8 +314,7 @@ def test_hwp_inspect_distinguishes_one_selected_cell_from_multiple_cells() -> No
         window_handle=100,
     )
 
-    hwp = cast(LiveHwpApplication, cast(object, _SelectedSingleCellHwp()))
-    context = inspect_context(hwp, document, lambda: None)
+    context = _inspect_context(_SelectedSingleCellHwp(), document)
 
     assert context.active_target.kind == "selected_cells"
     assert context.active_target.multiple_cells is False
@@ -268,13 +335,8 @@ def test_hwp_inspect_recognizes_strict_cells_without_a_text_selection_range() ->
         active=True,
         window_handle=100,
     )
-    hwp = cast(
-        LiveHwpApplication,
-        cast(object, _StrictSelectedCellsWithoutTextRangeHwp()),
-    )
-
     # When: the active HWP target is inspected.
-    context = inspect_context(hwp, document, lambda: None)
+    context = _inspect_context(_StrictSelectedCellsWithoutTextRangeHwp(), document)
 
     # Then: selection mode 19 still identifies a multi-cell block.
     assert context.active_target.selection_mode_raw == 19
@@ -296,8 +358,7 @@ def test_hwp_inspect_reports_a_selected_table_without_probing_cell_state() -> No
         window_handle=100,
     )
 
-    hwp = cast(LiveHwpApplication, cast(object, _SelectedTableHwp()))
-    context = inspect_context(hwp, document, lambda: None)
+    context = _inspect_context(_SelectedTableHwp(), document)
 
     assert context.active_target.kind == "selected_table"
     assert context.active_target.selection_mode == "control"

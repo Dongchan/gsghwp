@@ -69,6 +69,18 @@ int Fail(const wchar_t* operation) {
     return 1;
 }
 
+int FailRuntimeExecutable(const wchar_t* executable) {
+    const DWORD error = GetLastError();
+    std::fwprintf(
+        stderr,
+        L"HancomMcpLauncher: Python executable was not found: %ls (Win32 %lu)\n"
+        L"Recovery: powershell -ExecutionPolicy Bypass -File "
+        L".\\runtime\\bootstrap_runtime.ps1\n",
+        executable,
+        error);
+    return 1;
+}
+
 bool GetTokenIntegrityRid(HANDLE token, DWORD* integrity_rid) {
     DWORD byte_count = 0;
     if (GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &byte_count) != FALSE) {
@@ -108,26 +120,38 @@ bool GetTokenIntegrityRid(HANDLE token, DWORD* integrity_rid) {
     return true;
 }
 
-bool FindDesktopToken(DWORD session_id, UniqueHandle* token, DWORD* integrity_rid) {
+bool FindDesktopProcess(
+    DWORD session_id,
+    UniqueHandle* process_handle,
+    DWORD* integrity_rid,
+    const wchar_t** failed_operation) {
+    *failed_operation = L"CreateToolhelp32Snapshot";
     UniqueHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
     if (!snapshot.IsValid()) {
         return false;
     }
 
+    *failed_operation = L"Process32FirstW";
     PROCESSENTRY32W entry{};
     entry.dwSize = static_cast<DWORD>(sizeof(entry));
     if (Process32FirstW(snapshot.Get(), &entry) == FALSE) {
         return false;
     }
 
+    *failed_operation = L"Find explorer.exe in the current session";
+    DWORD candidate_error = ERROR_NOT_FOUND;
     do {
         if (_wcsicmp(entry.szExeFile, L"explorer.exe") != 0) {
             continue;
         }
 
         DWORD candidate_session_id = 0;
-        if (ProcessIdToSessionId(entry.th32ProcessID, &candidate_session_id) == FALSE ||
-            candidate_session_id != session_id) {
+        if (ProcessIdToSessionId(entry.th32ProcessID, &candidate_session_id) == FALSE) {
+            *failed_operation = L"ProcessIdToSessionId(explorer.exe)";
+            candidate_error = GetLastError();
+            continue;
+        }
+        if (candidate_session_id != session_id) {
             continue;
         }
 
@@ -136,40 +160,35 @@ bool FindDesktopToken(DWORD session_id, UniqueHandle* token, DWORD* integrity_ri
             FALSE,
             entry.th32ProcessID));
         if (!process.IsValid()) {
+            *failed_operation = L"OpenProcess(explorer.exe)";
+            candidate_error = GetLastError();
             continue;
         }
 
         HANDLE raw_token = nullptr;
         if (OpenProcessToken(
                 process.Get(),
-                TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
+                TOKEN_QUERY,
                 &raw_token) == FALSE) {
+            *failed_operation = L"OpenProcessToken(explorer.exe)";
+            candidate_error = GetLastError();
             continue;
         }
         UniqueHandle candidate_token(raw_token);
 
         DWORD candidate_integrity_rid = 0;
         if (!GetTokenIntegrityRid(candidate_token.Get(), &candidate_integrity_rid)) {
+            *failed_operation = L"GetTokenInformation(explorer.exe)";
+            candidate_error = GetLastError();
             continue;
         }
 
-        HANDLE raw_primary_token = nullptr;
-        if (DuplicateTokenEx(
-                candidate_token.Get(),
-                MAXIMUM_ALLOWED,
-                nullptr,
-                SecurityImpersonation,
-                TokenPrimary,
-                &raw_primary_token) == FALSE) {
-            continue;
-        }
-
-        token->Reset(raw_primary_token);
+        process_handle->Reset(process.Release());
         *integrity_rid = candidate_integrity_rid;
         return true;
     } while (Process32NextW(snapshot.Get(), &entry) != FALSE);
 
-    SetLastError(ERROR_NOT_FOUND);
+    SetLastError(candidate_error);
     return false;
 }
 
@@ -285,6 +304,55 @@ bool ConfigureKillOnCloseJob(HANDLE job) {
                sizeof(information)) != FALSE;
 }
 
+int FailChildStartup(
+    const wchar_t* operation,
+    HANDLE child_process,
+    DWORD operation_error) {
+    constexpr DWORD termination_wait_milliseconds = 5'000;
+    if (TerminateProcess(child_process, operation_error) == FALSE) {
+        const DWORD termination_error = GetLastError();
+        std::fwprintf(
+            stderr,
+            L"HancomMcpLauncher: %ls failed (Win32 %lu); "
+            L"TerminateProcess cleanup also failed (Win32 %lu). "
+            L"The launcher is exiting without waiting.\n",
+            operation,
+            operation_error,
+            termination_error);
+        return 1;
+    }
+
+    const DWORD wait_result = WaitForSingleObject(
+        child_process,
+        termination_wait_milliseconds);
+    if (wait_result == WAIT_OBJECT_0) {
+        SetLastError(operation_error);
+        return Fail(operation);
+    }
+    if (wait_result == WAIT_TIMEOUT) {
+        std::fwprintf(
+            stderr,
+            L"HancomMcpLauncher: %ls failed (Win32 %lu); "
+            L"child termination did not complete within %lu ms. "
+            L"The launcher is exiting without further waiting.\n",
+            operation,
+            operation_error,
+            termination_wait_milliseconds);
+        return 1;
+    }
+
+    const DWORD wait_error = GetLastError();
+    std::fwprintf(
+        stderr,
+        L"HancomMcpLauncher: %ls failed (Win32 %lu); "
+        L"WaitForSingleObject cleanup failed (Win32 %lu). "
+        L"The launcher is exiting without further waiting.\n",
+        operation,
+        operation_error,
+        wait_error);
+    return 1;
+}
+
 }
 
 int wmain(int argc, wchar_t* argv[]) {
@@ -295,7 +363,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
     std::wstring executable;
     if (!ResolveExecutable(argv[1], &executable)) {
-        return Fail(L"SearchPathW");
+        return FailRuntimeExecutable(argv[1]);
     }
 
     DWORD session_id = 0;
@@ -314,10 +382,60 @@ int wmain(int argc, wchar_t* argv[]) {
         return Fail(L"GetTokenInformation(current)");
     }
 
-    UniqueHandle desktop_token;
+    UniqueHandle desktop_process;
     DWORD desktop_integrity_rid = 0;
-    if (!FindDesktopToken(session_id, &desktop_token, &desktop_integrity_rid)) {
-        return Fail(L"FindDesktopToken");
+    const wchar_t* desktop_token_operation = L"FindDesktopProcess";
+    if (!FindDesktopProcess(
+            session_id,
+            &desktop_process,
+            &desktop_integrity_rid,
+            &desktop_token_operation)) {
+        const DWORD error = GetLastError();
+        std::fwprintf(
+            stderr,
+            L"HancomMcpLauncher: desktop token acquisition failed at %ls "
+            L"(Win32 %lu). No child process was started.\n",
+            desktop_token_operation,
+            error);
+        return 1;
+    }
+
+    UniqueHandle desktop_primary_token;
+    if (current_integrity_rid != desktop_integrity_rid) {
+        HANDLE raw_process_token = nullptr;
+        if (OpenProcessToken(
+                desktop_process.Get(),
+                TOKEN_QUERY | TOKEN_DUPLICATE,
+                &raw_process_token) == FALSE) {
+            const DWORD error = GetLastError();
+            std::fwprintf(
+                stderr,
+                L"HancomMcpLauncher: desktop token acquisition failed at "
+                L"OpenProcessToken(explorer.exe, duplicate) (Win32 %lu). "
+                L"No child process was started.\n",
+                error);
+            return 1;
+        }
+        UniqueHandle desktop_process_token(raw_process_token);
+
+        HANDLE raw_primary_token = nullptr;
+        if (DuplicateTokenEx(
+                desktop_process_token.Get(),
+                MAXIMUM_ALLOWED,
+                nullptr,
+                SecurityImpersonation,
+                TokenPrimary,
+                &raw_primary_token) == FALSE) {
+            const DWORD error = GetLastError();
+            std::fwprintf(
+                stderr,
+                L"HancomMcpLauncher: desktop token acquisition failed at "
+                L"DuplicateTokenEx(explorer.exe) (Win32 %lu). "
+                L"No child process was started.\n",
+                error);
+            return 1;
+        }
+        desktop_primary_token.Reset(raw_primary_token);
     }
 
     UniqueHandle job(CreateJobObjectW(nullptr, nullptr));
@@ -346,35 +464,37 @@ int wmain(int argc, wchar_t* argv[]) {
         current_directory_buffer.data(),
         current_directory_written);
     PROCESS_INFORMATION process_information{};
-    const HANDLE launch_token = current_integrity_rid == desktop_integrity_rid
-        ? nullptr
-        : desktop_token.Get();
+    const HANDLE launch_token = desktop_primary_token.IsValid()
+        ? desktop_primary_token.Get()
+        : nullptr;
     if (!StartChild(
             executable,
             &command_line,
             current_directory,
             launch_token,
             &process_information)) {
-        return Fail(L"CreateProcess");
+        return Fail(
+            launch_token == nullptr
+                ? L"CreateProcessW(current token)"
+                : L"CreateProcessWithTokenW(desktop token)");
     }
 
     UniqueHandle child_process(process_information.hProcess);
     UniqueHandle child_thread(process_information.hThread);
     if (AssignProcessToJobObject(job.Get(), child_process.Get()) == FALSE) {
         const DWORD error = GetLastError();
-        TerminateProcess(child_process.Get(), error);
-        WaitForSingleObject(child_process.Get(), INFINITE);
-        SetLastError(error);
-        return Fail(L"AssignProcessToJobObject");
+        return FailChildStartup(
+            L"AssignProcessToJobObject",
+            child_process.Get(),
+            error);
     }
     if (ResumeThread(child_thread.Get()) == static_cast<DWORD>(-1)) {
         const DWORD error = GetLastError();
-        TerminateProcess(child_process.Get(), error);
-        WaitForSingleObject(child_process.Get(), INFINITE);
-        SetLastError(error);
-        return Fail(L"ResumeThread");
+        return FailChildStartup(L"ResumeThread", child_process.Get(), error);
     }
 
+    // A successfully started stdio MCP server is expected to live until its host
+    // closes the inherited streams or the server exits.
     if (WaitForSingleObject(child_process.Get(), INFINITE) != WAIT_OBJECT_0) {
         return Fail(L"WaitForSingleObject");
     }

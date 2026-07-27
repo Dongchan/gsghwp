@@ -97,6 +97,14 @@ class ReferenceImageAnalysis(ContractModel):
     source_image: Path
     image_width: int = Field(ge=2)
     image_height: int = Field(ge=2)
+    source_bytes: int = Field(default=0, ge=0)
+    analysis_width: int = Field(default=2, ge=2)
+    analysis_height: int = Field(default=2, ge=2)
+    analysis_downsampled: bool = False
+    resource_fingerprint: str = Field(
+        default="0000000000000000",
+        pattern=r"^[0-9a-f]{16}$",
+    )
     analysis_time_ms: float = Field(ge=0)
     cache_hit: bool
     objects: tuple[ReferenceImageObject, ...]

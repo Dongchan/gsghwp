@@ -53,6 +53,6 @@ private:
     HANDLE activationFailureEvent_ = nullptr;
     HANDLE activationSuccessEvent_ = nullptr;
     std::wstring activationToken_;
-    CComPtr<IDispatch> hwp_;
+    IDispatch* hwp_ = nullptr;
     LONG targetDocumentId_ = 0;
 };

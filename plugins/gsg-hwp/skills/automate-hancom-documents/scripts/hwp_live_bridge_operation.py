@@ -33,8 +33,8 @@ class HancomBridgeOperationMixin(HancomBridgeSessionRuntime):
         session_id: str,
         plan: LayoutPlan,
     ) -> LayoutPreflightResult:
-        return self._call(
-            lambda: self._bridge_controller().preflight_layout(session_id, plan),
+        return self._call_style_read(
+            lambda controller: controller.preflight_layout(session_id, plan),
             session_id=session_id,
         )
 
@@ -76,6 +76,10 @@ class HancomBridgeOperationMixin(HancomBridgeSessionRuntime):
     ) -> OperationResult:
         def invoke() -> OperationResult:
             controller = self._bridge_controller()
+            controller.set_style_state_token(
+                session_id,
+                self._style_state_token(session_id),
+            )
             result = controller.operate(
                 session_id,
                 intent_or_operation_id,
@@ -101,7 +105,15 @@ class HancomBridgeOperationMixin(HancomBridgeSessionRuntime):
                 }
             )
 
-        return self._call_mutation(invoke, session_id=session_id)
+        return self._call_mutation(
+            invoke,
+            session_id=session_id,
+            save_operation=(
+                workflow in {"document.save", "document.save_reopen_verify"}
+                and not resolve_only
+                and allow_document_change
+            ),
+        )
 
     def probe_official_api_batch(
         self,

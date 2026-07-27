@@ -44,16 +44,19 @@ def save_tiles(
         start=1,
     ):
         bbox = PixelBox(left, top, left + tile_width, top + tile_height)
-        image = canvas.image.crop((bbox.left, bbox.top, bbox.right, bbox.bottom))
         tile_path = directory / f"tile-{index:04d}.png"
-        image.save(tile_path, format="PNG", optimize=False)
+        with canvas.image.crop(
+            (bbox.left, bbox.top, bbox.right, bbox.bottom)
+        ) as image:
+            image.save(tile_path, format="PNG", optimize=False)
+            image_hash = hashlib.sha256(image.tobytes()).hexdigest()
         tiles.append(
             ReferenceImageTile(
                 tile_id=f"tile-{index:04d}",
                 bbox=_normalized(bbox, canvas),
                 pixel_width=bbox.width,
                 pixel_height=bbox.height,
-                image_hash=hashlib.sha256(image.tobytes()).hexdigest(),
+                image_hash=image_hash,
                 path=tile_path,
             )
         )
@@ -76,23 +79,33 @@ def save_contact_sheets(
         cell_width = max(item.pixel_width for item in group)
         cell_height = max(item.pixel_height for item in group) + label_height
         rows = (len(group) + columns - 1) // columns
-        sheet = Image.new("RGB", (cell_width * columns, cell_height * rows), "white")
-        draw = ImageDraw.Draw(sheet)
-        for index, tile in enumerate(group):
-            image = Image.open(tile.path).convert("RGB")
-            column = index % columns
-            row = index // columns
-            x_position = column * cell_width
-            y_position = row * cell_height
-            sheet.paste(image, (x_position, y_position + label_height))
-            label = (
-                f"{tile.tile_id} "
-                f"[{tile.bbox.left:.4f},{tile.bbox.top:.4f},"
-                f"{tile.bbox.right:.4f},{tile.bbox.bottom:.4f}]"
-            )
-            draw.text((x_position + 4, y_position + 7), label, fill="black", font=font)
-        path = directory / f"contact-sheet-{sheet_index:02d}.png"
-        sheet.save(path, format="PNG", optimize=False)
+        with Image.new(
+            "RGB",
+            (cell_width * columns, cell_height * rows),
+            "white",
+        ) as sheet:
+            draw = ImageDraw.Draw(sheet)
+            for index, tile in enumerate(group):
+                with Image.open(tile.path) as opened:
+                    with opened.convert("RGB") as image:
+                        column = index % columns
+                        row = index // columns
+                        x_position = column * cell_width
+                        y_position = row * cell_height
+                        sheet.paste(image, (x_position, y_position + label_height))
+                label = (
+                    f"{tile.tile_id} "
+                    f"[{tile.bbox.left:.4f},{tile.bbox.top:.4f},"
+                    f"{tile.bbox.right:.4f},{tile.bbox.bottom:.4f}]"
+                )
+                draw.text(
+                    (x_position + 4, y_position + 7),
+                    label,
+                    fill="black",
+                    font=font,
+                )
+            path = directory / f"contact-sheet-{sheet_index:02d}.png"
+            sheet.save(path, format="PNG", optimize=False)
         sheets.append(path)
     return tuple(sheets)
 
@@ -103,14 +116,16 @@ def save_text_crop(
     bbox: PixelBox,
     path: Path,
 ) -> str:
-    crop = canvas.image.crop((bbox.left, bbox.top, bbox.right, bbox.bottom))
-    scale = 3 if crop.height < 32 else 2
-    enlarged = crop.resize(
-        (crop.width * scale, crop.height * scale),
-        resample=Image.Resampling.NEAREST,
-    )
-    enlarged.save(path, format="PNG", optimize=False)
-    return hashlib.sha256(crop.tobytes()).hexdigest()
+    with canvas.image.crop(
+        (bbox.left, bbox.top, bbox.right, bbox.bottom)
+    ) as crop:
+        scale = 3 if crop.height < 32 else 2
+        with crop.resize(
+            (crop.width * scale, crop.height * scale),
+            resample=Image.Resampling.NEAREST,
+        ) as enlarged:
+            enlarged.save(path, format="PNG", optimize=False)
+        return hashlib.sha256(crop.tobytes()).hexdigest()
 
 
 def save_overlay(
@@ -123,43 +138,49 @@ def save_overlay(
     path: Path,
 ) -> None:
     overlay = canvas.image.convert("RGBA")
-    tint = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
-    tint_draw = ImageDraw.Draw(tint)
-    for gap in gaps:
-        tint_draw.rectangle(
-            (gap.bbox.left, gap.bbox.top, gap.bbox.right, gap.bbox.bottom),
-            fill=(0, 210, 80, 70),
-            outline=(0, 150, 55, 230),
-            width=2,
-        )
-    overlay = Image.alpha_composite(overlay, tint)
-    draw = ImageDraw.Draw(overlay)
-    for item in objects:
-        draw.rectangle(
-            (item.bbox.left, item.bbox.top, item.bbox.right, item.bbox.bottom),
-            outline=(0, 100, 255, 230),
-            width=2,
-        )
-    for bbox in text_regions:
-        draw.rectangle(
-            (bbox.left, bbox.top, bbox.right, bbox.bottom),
-            outline=(225, 0, 225, 210),
-            width=1,
-        )
-    for segment in segments:
-        if segment.orientation == "horizontal":
-            points = (
-                segment.start,
-                segment.position,
-                segment.end,
-                segment.position,
+    try:
+        with Image.new("RGBA", overlay.size, (0, 0, 0, 0)) as tint:
+            tint_draw = ImageDraw.Draw(tint)
+            for gap in gaps:
+                tint_draw.rectangle(
+                    (gap.bbox.left, gap.bbox.top, gap.bbox.right, gap.bbox.bottom),
+                    fill=(0, 210, 80, 70),
+                    outline=(0, 150, 55, 230),
+                    width=2,
+                )
+            composed = Image.alpha_composite(overlay, tint)
+        overlay.close()
+        overlay = composed
+        draw = ImageDraw.Draw(overlay)
+        for item in objects:
+            draw.rectangle(
+                (item.bbox.left, item.bbox.top, item.bbox.right, item.bbox.bottom),
+                outline=(0, 100, 255, 230),
+                width=2,
             )
-        else:
-            points = (
-                segment.position,
-                segment.start,
-                segment.position,
-                segment.end,
+        for bbox in text_regions:
+            draw.rectangle(
+                (bbox.left, bbox.top, bbox.right, bbox.bottom),
+                outline=(225, 0, 225, 210),
+                width=1,
             )
-        draw.line(points, fill=(255, 25, 25, 255), width=max(2, segment.width))
-    overlay.convert("RGB").save(path, format="PNG", optimize=False)
+        for segment in segments:
+            if segment.orientation == "horizontal":
+                points = (
+                    segment.start,
+                    segment.position,
+                    segment.end,
+                    segment.position,
+                )
+            else:
+                points = (
+                    segment.position,
+                    segment.start,
+                    segment.position,
+                    segment.end,
+                )
+            draw.line(points, fill=(255, 25, 25, 255), width=max(2, segment.width))
+        with overlay.convert("RGB") as flattened:
+            flattened.save(path, format="PNG", optimize=False)
+    finally:
+        overlay.close()

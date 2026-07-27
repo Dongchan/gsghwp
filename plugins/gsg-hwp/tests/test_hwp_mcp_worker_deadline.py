@@ -16,6 +16,7 @@ SCRIPTS = (
 sys.path.insert(0, str(SCRIPTS))
 
 from hwp_mcp_worker_deadline import call_worker_before_deadline  # noqa: E402
+from hwp_mcp_registry import ToolEffect  # noqa: E402
 from hwp_mcp_worker_protocol import (  # noqa: E402
     HwpWorkerCallTimeout,
     WorkerRequest,
@@ -31,7 +32,7 @@ async def _time_out_while_waiting_to_enter_queue() -> None:
                 "hwp_inspect",
                 {},
                 0.01,
-                mutation=False,
+                effect="read",
             )
     assert timeout.value.dispatched is False
     assert timeout.value.started is False
@@ -42,3 +43,30 @@ async def _time_out_while_waiting_to_enter_queue() -> None:
 
 def test_total_deadline_includes_request_queue_wait() -> None:
     anyio.run(_time_out_while_waiting_to_enter_queue)
+
+
+@pytest.mark.parametrize(
+    ("effect", "reconcile_required", "retry_safe"),
+    (
+        ("read", False, True),
+        ("artifact", False, True),
+        ("session", False, False),
+        ("document", True, False),
+        ("file", True, False),
+    ),
+)
+def test_started_timeout_recovery_depends_on_tool_effect(
+    effect: ToolEffect,
+    reconcile_required: bool,
+    retry_safe: bool,
+) -> None:
+    timeout = HwpWorkerCallTimeout(
+        "hwp_test",
+        1,
+        dispatched=True,
+        started=True,
+        effect=effect,
+    )
+
+    assert timeout.reconcile_required is reconcile_required
+    assert timeout.retry_safe is retry_safe

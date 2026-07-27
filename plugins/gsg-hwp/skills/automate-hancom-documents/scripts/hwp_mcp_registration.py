@@ -1,16 +1,31 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
+from functools import wraps
+from types import MappingProxyType
+from typing import cast
 
+from mcp.types import AnyFunction
 from pydantic import JsonValue
 
-from hwp_mcp_catalog import register_catalog_tools
+from hwp_mcp_catalog import (
+    call_production_catalog_gateway_tool,
+    catalog_tool_handlers,
+    production_catalog_gateway_tool_names,
+)
 from hwp_mcp_document_wrappers import McpDocumentRecipeWrappers
 from hwp_mcp_forward import ForwardingFastMCP, HwpExecuteArguments
-from hwp_mcp_metadata import register_public_tools
 from hwp_mcp_operation import McpOperationHandler
+from hwp_mcp_operation_executor import HwpOperationExecutor
 from hwp_mcp_qa_handlers import McpQaHandlers
-from hwp_mcp_registry import McpProfile, tool_names, tool_spec
+from hwp_mcp_registry import (
+    McpProfile,
+    McpToolSpec,
+    ToolHandlerSource,
+    tool_names,
+    tool_specs,
+)
 from hwp_public_document_tools import HwpPublicDocumentTools
 from hwp_public_inspection_tools import HwpPublicInspectionTools
 from hwp_public_live_edit_tools import HwpPublicLiveEditTools
@@ -25,6 +40,7 @@ from hwp_reference_image_tools import HwpReferenceImageTools
 
 @dataclass(frozen=True, slots=True)
 class McpToolBindings:
+    operation_executor: HwpOperationExecutor
     operation: McpOperationHandler
     document_wrappers: McpDocumentRecipeWrappers
     qa: McpQaHandlers
@@ -40,17 +56,84 @@ class McpToolBindings:
     reference_image_tools: HwpReferenceImageTools
 
 
+class McpToolBindingError(RuntimeError):
+    tool_name: str
+    handler_source: ToolHandlerSource
+    match_count: int
+
+    def __init__(
+        self,
+        tool_name: str,
+        handler_source: ToolHandlerSource,
+        match_count: int,
+    ) -> None:
+        super().__init__(
+            f"{tool_name} requires exactly one {handler_source} handler; found {match_count}"
+        )
+        self.tool_name = tool_name
+        self.handler_source = handler_source
+        self.match_count = match_count
+
+
+def _binding_handlers(
+    bindings: McpToolBindings,
+    specs: tuple[McpToolSpec, ...],
+) -> Mapping[str, AnyFunction]:
+    handlers: dict[str, AnyFunction] = {}
+    binding_owners = tuple(binding_field.name for binding_field in fields(bindings))
+    for spec in specs:
+        if spec.handler_source != "bindings":
+            continue
+        matches: list[AnyFunction] = []
+        owners = (
+            (spec.binding_owner,) if spec.binding_owner is not None else binding_owners
+        )
+        for owner in owners:
+            provider = cast(object, getattr(bindings, owner))
+            candidate = cast(object, getattr(provider, spec.name, None))
+            if callable(candidate):
+                matches.append(cast(AnyFunction, candidate))
+        if len(matches) != 1:
+            raise McpToolBindingError(spec.name, spec.handler_source, len(matches))
+        handlers[spec.name] = matches[0]
+    return MappingProxyType(handlers)
+
+
+def _public_tool_handler(
+    executor: HwpOperationExecutor,
+    tool_name: str,
+    handler: AnyFunction,
+) -> AnyFunction:
+    @wraps(handler)
+    async def scoped_handler(*args: object, **kwargs: object) -> object:
+        async with executor.public_tool_session_scope(tool_name):
+            return cast(object, await handler(*args, **kwargs))
+
+    return scoped_handler
+
+
 def register_mcp_tools(
     server: ForwardingFastMCP,
     bindings: McpToolBindings,
     profile: McpProfile,
 ) -> None:
+    specs = tool_specs(profile)
     forwardable_tools = tool_names(profile) - {"hwp_execute"}
+    catalog_gateway_tools: frozenset[str] = (
+        production_catalog_gateway_tool_names()
+        if profile == "production"
+        else frozenset()
+    )
 
     async def hwp_execute(
         tool_name: str,
         arguments: HwpExecuteArguments,
     ) -> JsonValue:
+        if tool_name in catalog_gateway_tools:
+            return await call_production_catalog_gateway_tool(
+                tool_name,
+                arguments.root,
+            )
         if tool_name not in forwardable_tools:
             available_tools: list[JsonValue] = [
                 name for name in sorted(forwardable_tools)
@@ -64,112 +147,36 @@ def register_mcp_tools(
             return failure
         return await server.call_unconverted_tool(tool_name, arguments)
 
-    qa_operate_tool = {
-        "production": None,
-        "qa": bindings.operation.hwp_operate,
-    }[profile]
-    if qa_operate_tool is not None:
-        server.add_tool(
-            qa_operate_tool,
-            name="hwp_operate",
-            description=tool_spec("hwp_operate").description,
+    handlers: dict[str, tuple[ToolHandlerSource, AnyFunction]] = {
+        name: (
+            "bindings",
+            _public_tool_handler(bindings.operation_executor, name, handler),
         )
+        for name, handler in _binding_handlers(bindings, specs).items()
+    }
+    expected_catalog = frozenset(
+        spec.name for spec in specs if spec.handler_source == "catalog"
+    )
+    handlers.update(
+        {
+            name: ("catalog", handler)
+            for name, handler in catalog_tool_handlers(profile).items()
+            if name in expected_catalog
+        }
+    )
+    handlers["hwp_runtime_info"] = ("server", server.hwp_runtime_info)
+    handlers["hwp_execute"] = ("gateway", hwp_execute)
 
-    public_action_tools = (
-        (bindings.public_tools.hwp_fill_table, "hwp_fill_table"),
-        (
-            bindings.public_table_tools.hwp_expand_and_fill_table,
-            "hwp_expand_and_fill_table",
-        ),
-        (
-            bindings.public_table_tools.hwp_repeat_table_template,
-            "hwp_repeat_table_template",
-        ),
-        (bindings.public_table_tools.hwp_build_table_series, "hwp_build_table_series"),
-        (
-            bindings.public_visibility_tools.hwp_sync_visibility_analysis_tables,
-            "hwp_sync_visibility_analysis_tables",
-        ),
-        (bindings.public_table_tools.hwp_fill_table_images, "hwp_fill_table_images"),
-        (bindings.public_table_edit_tools.hwp_format_table, "hwp_format_table"),
-        (
-            bindings.public_table_edit_tools.hwp_merge_table_cells,
-            "hwp_merge_table_cells",
-        ),
-        (bindings.public_table_edit_tools.hwp_split_table_cell, "hwp_split_table_cell"),
-        (bindings.public_object_tools.hwp_insert_image, "hwp_insert_image"),
-        (bindings.public_object_tools.hwp_replace_image, "hwp_replace_image"),
-        (bindings.public_object_tools.hwp_add_caption, "hwp_add_caption"),
-        (bindings.public_selection_tools.hwp_apply_style, "hwp_apply_style"),
-        (bindings.public_selection_tools.hwp_format_text, "hwp_format_text"),
-        (bindings.public_selection_tools.hwp_patch_text, "hwp_patch_text"),
-        (
-            bindings.public_selection_tools.hwp_replace_selected_text,
-            "hwp_replace_selected_text",
-        ),
-        (bindings.public_live_edit_tools.hwp_delete_page, "hwp_delete_page"),
-        (bindings.public_live_edit_tools.hwp_delete_control, "hwp_delete_control"),
-        (bindings.public_live_edit_tools.hwp_undo, "hwp_undo"),
-        (bindings.public_live_edit_tools.hwp_redo, "hwp_redo"),
-        (bindings.public_document_tools.hwp_insert_layout, "hwp_insert_layout"),
-        (bindings.public_document_tools.hwp_append_layout, "hwp_append_layout"),
-        (bindings.public_document_tools.hwp_append_report, "hwp_append_report"),
-        (
-            bindings.public_document_tools.hwp_append_excel_table,
-            "hwp_append_excel_table",
-        ),
-        (bindings.public_document_tools.hwp_save, "hwp_save"),
-        (
-            bindings.public_document_tools.hwp_save_reopen_verify,
-            "hwp_save_reopen_verify",
-        ),
-    )
-    for public_tool, name in public_action_tools:
-        server.add_tool(public_tool, name=name, description=tool_spec(name).description)
-
-    register_public_tools(
-        server,
-        (
-            bindings.document_wrappers.hwp_copy_style,
-            bindings.qa.hwp_list_open_documents,
-            bindings.qa.hwp_open_document,
-            bindings.operation.hwp_connect,
-            bindings.public_inspection_tools.hwp_inspect,
-            bindings.public_inspection_tools.hwp_inspect_page_fast,
-            bindings.public_inspection_tools.hwp_inspect_structure,
-            bindings.public_inspection_tools.hwp_render_page,
-            bindings.public_inspection_tools.hwp_list_styles,
-            bindings.reference_image_tools.hwp_analyze_reference_image,
-            bindings.reference_image_tools.hwp_get_reference_image_analysis_section,
-            bindings.public_document_tools.hwp_preflight_layout,
-            bindings.qa.hwp_watch_state,
-            bindings.qa.hwp_list_window_states,
-            bindings.qa.hwp_inspect_window_state,
-            bindings.qa.hwp_dismiss_dialogs,
-            bindings.qa.hwp_run_official_api_batch,
-            bindings.qa.hwp_probe_official_api_batch,
-            bindings.qa.hwp_probe_official_api_payload,
-            bindings.qa.hwp_replace_selection,
-            bindings.qa.hwp_apply_layout,
-            bindings.qa.hwp_update_table_cells,
-            bindings.qa.hwp_insert_table_images,
-            bindings.qa.hwp_import_office_table,
-            bindings.qa.hwp_propagate_table_cells,
-            bindings.qa.hwp_insert_folder_images,
-            bindings.qa.hwp_rebuild_document,
-            bindings.operation.hwp_get_operation_status,
-            bindings.operation.hwp_disconnect,
-        ),
-        profile,
-    )
-    register_catalog_tools(server, profile)
-    server.add_tool(
-        server.hwp_runtime_info,
-        name="hwp_runtime_info",
-        description=tool_spec("hwp_runtime_info").description,
-    )
-    server.add_tool(
-        hwp_execute,
-        name="hwp_execute",
-        description=tool_spec("hwp_execute").description,
-    )
+    for spec in specs:
+        resolved = handlers.get(spec.name)
+        if resolved is None or resolved[0] != spec.handler_source:
+            raise McpToolBindingError(
+                spec.name,
+                spec.handler_source,
+                0 if resolved is None else 1,
+            )
+        server.add_tool(
+            resolved[1],
+            name=spec.name,
+            description=spec.description,
+        )
