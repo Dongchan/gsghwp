@@ -2,16 +2,35 @@
 
 GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서 현재 열려 있는 HWP 문서를 빠르게 조회하고 네이티브 방식으로 편집·검수하도록 연결하는 로컬 MCP**입니다.
 
-- 배포 버전: **v1.1.0**
-- 원본 소스 버전: `0.5.73-dev.1`
-- MCP 런타임: `0.3.89`
-- C++ 네이티브 브리지: `0.5.121`
+- 배포 버전: **v1.2.0**
+- 원본 소스 버전: `0.5.73-dev.3`
+- MCP 런타임: `0.3.91`
+- C++ 네이티브 브리지: `0.5.124`
 - 네이티브 프로토콜: `12`
 - 개발자: **inodesign**
 - 공개 도구: 업무 도구 44개 + 런타임 재로드 1개 = 총 45개
 - 공식 API 카탈로그: 1,452개 중 네이티브 라우팅 1,448개
 
 버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록합니다.
+
+### v1.2.0 주요 변경
+
+- 큰 표를 다룰 때 한/글이 응답하지 않던 문제를 해결했습니다. 1,000칸 채우기가 180초 제한을 넘겨
+  16분 넘게 멈추던 것에서 약 60초에 완료되고, 직후 저장·문서 닫기·다음 작업이 모두 동작합니다.
+- 원인은 칸마다 표 구조를 다시 읽던 것이었습니다. 같은 표를 다루는 동안 한 번만 읽어 재사용하고,
+  큰 요청은 여러 번의 제한된 호출로 나눕니다.
+- 표를 바꿀 수 있는 명령 뒤에는 캐시된 표 구조를 버립니다. 종전에는 두 명령만 그렇게 해서 행·열을
+  지우거나 넣은 뒤 엉뚱한 칸에 쓸 수 있었습니다.
+- 식별자로 지목한 표를 문서 전체에서 찾습니다. 종전에는 커서가 있는 쪽에서만 찾아, 다른 쪽의 표를
+  지목하면 "일치하는 표가 없습니다"로 실패했습니다.
+- 참조 레이아웃이 셀 소유자를 전체 순회로 찾던 것을 색인 조회로 바꿨습니다.
+- 아무것도 바꾸지 않은 실패를 부분 변경으로 보고하지 않고, 파일이 쓰이고 검증된 저장을 실패로
+  보고하지 않습니다. 저장을 확정하는 조건 자체는 바꾸지 않았습니다.
+- 공식 API 제외 목록이 다시 어긋나 있던 것을 v1.0.4와 같은 4개로 되돌렸습니다.
+- `hwp_format_table`에 셀 여백 인자 4개를 optional로 추가했습니다.
+- `repeat_header`는 받되 적용하지 않습니다. 적용했을 때 표의 둘째 쪽이 비는 문제가 확인되어
+  되돌렸습니다. v1.1.0과 같은 동작입니다.
+- GitHub 이슈 #4·#5·#6은 이번 빌드에서 각각 3회 재현 검증으로 해결을 확인했습니다.
 
 ### v1.1.0 주요 변경
 
@@ -170,7 +189,7 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 - `uv` 패키지 관리자
 - `uv`가 내려받고 관리하는 Python 3.12를 버전별 `.venv`에 격리하여 사용
 
-배포 ZIP에는 개발자의 `.venv`나 일반 Python 설치본을 넣지 않습니다. `install.ps1`이 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\1.1.0\.venv`를 새로 만들며, 시작 스크립트는 그 안의 `Scripts\python.exe`만 실행합니다. PC에 별도로 설치된 시스템 Python 3.12는 선택하거나 수정하지 않습니다.
+배포 ZIP에는 개발자의 `.venv`나 일반 Python 설치본을 넣지 않습니다. `install.ps1`이 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.0\.venv`를 새로 만들며, 시작 스크립트는 그 안의 `Scripts\python.exe`만 실행합니다. PC에 별도로 설치된 시스템 Python 3.12는 선택하거나 수정하지 않습니다.
 
 네이티브 UserAction DLL, 파일 경로 보안 모듈과 Event Bridge는 `Win32`, 런처는 `x64` Release 빌드입니다. 다른 한/글 주버전·비트 조합은 별도 검증 전까지 지원 대상으로 간주하지 않습니다.
 
@@ -202,14 +221,14 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 
 | 항목 | 변경 내용 |
 |---|---|
-| 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.121\HancomLiveBridge.dll` 복사 또는 교체 |
+| 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.124\HancomLiveBridge.dll` 복사 또는 교체 |
 | 파일 경로 보안 DLL | `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll` 복사 또는 교체 |
 | 레지스트리 1 | `HKCU\Software\HNC\HwpUserAction\Modules`의 `한컴브릿지` 값 |
 | 레지스트리 2 | `HKCU\Software\HNC\HwpUserAction\Modules\Uses`의 `한컴브릿지` 값 |
 | 레지스트리 3 | `HKCU\Software\HNC\HwpAutomation\Modules`의 `FilePathCheckerModule` 값 |
 | 원본 백업 | `%LOCALAPPDATA%\GSG_HWP\backups\<시각-식별자>` |
 | 활성 설치 기록 | `%LOCALAPPDATA%\GSG_HWP\state\active-install.json` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.1.0\.venv` |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.0\.venv` |
 | 자동 업데이트 상태 | `%LOCALAPPDATA%\GSG_HWP\updater` |
 | 내려받은 버전 | `%LOCALAPPDATA%\GSG_HWP\packages\<버전>\gsg-hwp` |
 
