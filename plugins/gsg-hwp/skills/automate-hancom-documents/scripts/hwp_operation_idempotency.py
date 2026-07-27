@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from threading import Event, Thread
-from typing import Literal, final
+from typing import Final, Literal, final
 
 from anyio import CancelScope, get_cancelled_exc_class, to_thread
 
@@ -34,6 +34,20 @@ from hwp_save_fingerprint import (
     reconcile_save_fingerprint,
     save_baseline_diagnostic_reason,
 )
+
+
+_SAVE_WORKFLOWS: Final[frozenset[str]] = frozenset(
+    {"document.save", "document.save_reopen_verify"}
+)
+_MISSING_VERIFICATION_MARKER: Final = "[verification=evidence_unavailable]"
+_MISSING_VERIFICATION_NOTICE: Final = (
+    f"{_MISSING_VERIFICATION_MARKER} 네이티브 명령은 실행됐고 문서는 변경됐지만, "
+    "이 선택 범위·인자 조합에서는 결과를 되읽어 증명할 방법이 없어 검증을 "
+    "생략했습니다. 검증이 불일치한 것이 아니므로 되돌리거나 다시 적용하지 "
+    "마세요. 확인이 필요하면 hwp_inspect로 결과를 직접 읽으세요"
+)
+# OperationResult.message is capped at 4_000 characters by the contract.
+_MESSAGE_LIMIT: Final = 4_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +207,20 @@ class OperationIdempotency:
             verified=False,
             retry_safe=False,
             reconcile_required=True,
+        )
+
+    @staticmethod
+    def _disclose_missing_verification(result: OperationResult) -> OperationResult:
+        # `verified` stays None so the response never claims a proof it does not
+        # have. The public schema projects `verified` down to a strict bool, so
+        # the message is the only channel that can tell the caller the
+        # difference between "readback disagreed" and "no readback existed".
+        if _MISSING_VERIFICATION_MARKER in result.message:
+            return result
+        budget = _MESSAGE_LIMIT - len(_MISSING_VERIFICATION_NOTICE) - 1
+        head = result.message[:budget]
+        return result.model_copy(
+            update={"message": f"{head} {_MISSING_VERIFICATION_NOTICE}"}
         )
 
     @staticmethod
@@ -556,14 +584,36 @@ class OperationIdempotency:
                     }
                 )
             return result
+        # `verified` is tri-state. False means the operation read the result
+        # back and it disagreed — a real defect. None only means the operation
+        # had no way to prove what it did (a selection spanning paragraphs,
+        # cells or controls; an image.replace without a size). The native
+        # command still ran and the document still changed, so demoting None to
+        # operation_failed reported a success as a failure and pushed callers
+        # into undo. Save workflows keep the stricter `is not True` rule: their
+        # verdict comes from the file fingerprint, and the save_reopen_verify
+        # branch of _attach_successful_save_fingerprint can carry a None here.
+        save_workflow = ticket.operation in _SAVE_WORKFLOWS
         unverified_execution = (
             result.status == "executed" and result.verified is not True
+        )
+        # Narrow entry gate: missing evidence alone no longer opens the failure
+        # branch. Everything that does enter is handled exactly as before, so a
+        # result that already carried reconcile_required, partial_mutation or a
+        # failure status keeps its original verdict.
+        verification_failed = result.status == "executed" and (
+            result.verified is False or (save_workflow and result.verified is None)
+        )
+        missing_verification_evidence = (
+            result.status == "executed"
+            and result.verified is None
+            and not save_workflow
         )
         if (
             result.status in {"operation_failed", "partial_change", "transport_error"}
             or result.reconcile_required
             or result.partial_mutation is True
-            or unverified_execution
+            or verification_failed
         ):
             reconcile_required = (
                 result.reconcile_required
@@ -614,6 +664,13 @@ class OperationIdempotency:
                     "journal_failure_code": snapshot.failure_code,
                 }
             )
+        if missing_verification_evidence:
+            # retry_safe is deliberately left as the operation reported it.
+            # Forcing False emits the same signal as a reconcile-required
+            # failure and invites undo; forcing True invites re-applying an
+            # edit that already landed. Successful results leave it None, which
+            # correctly reads as "no retry recommendation".
+            result = self._disclose_missing_verification(result)
         committed = result.model_copy(
             update={
                 "request_id": ticket.request_id,

@@ -462,6 +462,7 @@ def test_production_envelope_marks_unresolved_dialog_non_retryable() -> None:
 
     assert operation.failure_stage == "dialog"
     assert operation.changed is False
+    assert operation.partial_mutation is False
     assert operation.retry_safe is False
     assert public.status == "failed"
     assert public.retry_safe is False
@@ -492,6 +493,7 @@ def test_unstructured_error_text_cannot_inject_transport_state() -> None:
     assert operation.failure_stage == "transport"
     assert operation.changed is True
     assert operation.partial_change is True
+    assert operation.partial_mutation is True
     assert operation.retry_safe is False
 
 

@@ -94,6 +94,7 @@ class LiveHwpSessionCore:
         "_style_state_tokens",
         "_structure_snapshot",
         "_unsafe_selectors",
+        "_validated_candidate",
         "_wrapper",
         "_connected_candidate",
     )
@@ -117,6 +118,7 @@ class LiveHwpSessionCore:
     _style_state_tokens: dict[str, str]
     _structure_snapshot: DocumentStructure | None
     _unsafe_selectors: set[str]
+    _validated_candidate: HwpDocumentCandidate | None
     _wrapper: LiveHwpApplication | None
     _connected_candidate: HwpDocumentIdentity | None
 
@@ -149,6 +151,7 @@ class LiveHwpSessionCore:
         self._style_state_tokens = {}
         self._structure_snapshot = None
         self._unsafe_selectors = set()
+        self._validated_candidate = None
         self._wrapper = None
 
     def _scan_candidates(
@@ -647,6 +650,45 @@ class LiveHwpSessionCore:
             limit,
         )
 
+    def _reusable_validation(
+        self,
+        session_id: str,
+        entry: _LiveDocumentSession,
+    ) -> tuple[HwpDocumentCandidate, LiveHwpApplication] | None:
+        """Return the identity already confirmed in this activation window.
+
+        One tool call enters ``_validate`` many times (``propagate_table_cells``
+        re-enters once per target). Re-resolving the moniker every time costs a
+        full round of cross-process COM reads while proving nothing new: the
+        window is only open between one ``_validate`` and the matching
+        ``restore_activation``. The reused candidate is still re-confirmed
+        against the live active document below, and the native executor
+        re-validates the identity in-process immediately before it runs.
+        Anything that fails the re-confirmation drops the reuse and falls back
+        to the full resolve path, so no check is skipped, only repeated less
+        often.
+        """
+        candidate = self._validated_candidate
+        wrapper = entry.wrapper
+        if candidate is None or wrapper is None or self._session_id != session_id:
+            return None
+        identity = entry.candidate
+        if (
+            candidate.document_id != identity.document_id
+            or candidate.window_handle != identity.window_handle
+            or candidate.moniker_name != identity.moniker_name
+            or ntpath.normcase(ntpath.normpath(candidate.full_name))
+            != ntpath.normcase(ntpath.normpath(identity.full_name))
+        ):
+            self._validated_candidate = None
+            return None
+        try:
+            require_active_candidate(candidate, candidate.application)
+        except (HwpLiveError, com_error):
+            self._validated_candidate = None
+            return None
+        return candidate, wrapper
+
     def _validate(
         self,
         session_id: str,
@@ -658,6 +700,24 @@ class LiveHwpSessionCore:
             raise HwpLiveError(
                 "한 작업 안에서 서로 다른 한컴 문서 세션을 전환할 수 없습니다"
             )
+        reused = self._reusable_validation(session_id, entry)
+        if reused is not None:
+            confirmed, wrapper = reused
+            page_count = int(wrapper.PageCount)
+            if page_count < 1:
+                raise HwpLiveError("한컴 문서의 본문 쪽 수를 정확히 읽지 못했습니다")
+            identity = HwpDocumentIdentity.from_candidate(
+                confirmed,
+                page_count=page_count,
+                selector=entry.selector,
+                active=True,
+            )
+            entry.candidate = identity
+            entry.moniker_name = identity.moniker_name
+            entry.page_count = identity.page_count
+            self._identities[entry.selector] = identity
+            self._set_current_entry(entry)
+            return confirmed, wrapper
         candidate = (
             self._catalog.resolve_identity(self._entry_identity(entry))
             if isinstance(self._catalog, IdentityDocumentCatalog)
@@ -709,6 +769,7 @@ class LiveHwpSessionCore:
                 if created_wrapper and hwp is not None:
                     self._releaser(hwp)
             finally:
+                self._validated_candidate = None
                 self.restore_activation()
             raise
         entry.candidate = identity
@@ -716,10 +777,14 @@ class LiveHwpSessionCore:
         entry.page_count = identity.page_count
         entry.wrapper = hwp
         self._identities[entry.selector] = identity
+        self._validated_candidate = candidate
         self._set_current_entry(entry)
         return candidate, hwp
 
     def restore_activation(self) -> None:
+        # End of the activation window: the confirmed identity must not be
+        # reused by the next tool call.
+        self._validated_candidate = None
         restore, self._activation_restore = self._activation_restore, None
         wrapper = self._wrapper
         current = (
@@ -797,6 +862,7 @@ class LiveHwpSessionCore:
             current_page = wrapper.current_page
             modified = wrapper.IsModified
         finally:
+            self._validated_candidate = None
             _ = self._sessions.pop(session_id, None)
             _ = self._selector_sessions.pop(entry.selector, None)
             _ = self._identities.pop(entry.selector, None)
@@ -836,6 +902,7 @@ class LiveHwpSessionCore:
             if self._activation_restore is not None:
                 self.restore_activation()
         finally:
+            self._validated_candidate = None
             _ = self._sessions.pop(session_id, None)
             _ = self._selector_sessions.pop(entry.selector, None)
             _ = self._style_state_tokens.pop(session_id, None)
@@ -871,6 +938,7 @@ class LiveHwpSessionCore:
     def release_idle_references(self) -> None:
         if self._sessions:
             return
+        self._validated_candidate = None
         self._activation_restore = None
         self._listed_candidates = ()
         self._moniker_name = None
@@ -888,6 +956,7 @@ class LiveHwpSessionCore:
         self._identities.clear()
         self._style_state_tokens.clear()
         self._style_cache.clear()
+        self._validated_candidate = None
         self._activation_restore = None
         self._moniker_name = None
         self._connected_candidate = None
@@ -920,6 +989,7 @@ class LiveHwpSessionCore:
         self._identities.clear()
         self._style_state_tokens.clear()
         self._style_cache.clear()
+        self._validated_candidate = None
         self._moniker_name = None
         self._connected_candidate = None
         self._listed_candidates = ()

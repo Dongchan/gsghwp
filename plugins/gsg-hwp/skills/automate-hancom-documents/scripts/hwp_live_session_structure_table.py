@@ -43,8 +43,8 @@ def update_validated_table_cells(
     prepared = prepare_table_update(
         hwp,
         selector=candidate.selector,
-        document_id=candidate.document.DocumentID,
-        full_name=candidate.document.FullName,
+        document_id=candidate.document_id,
+        full_name=candidate.full_name,
         window_handle=candidate.window_handle,
         requested_ref=table_ref,
         state_token=state_token,
@@ -58,8 +58,8 @@ def update_validated_table_cells(
         box.result = apply_table_update(
             hwp,
             selector=candidate.selector,
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             window_handle=candidate.window_handle,
             prepared=prepared,
             guard=guard,
@@ -87,8 +87,8 @@ def insert_validated_table_images(
     prepared = prepare_table_images(
         hwp,
         selector=candidate.selector,
-        document_id=candidate.document.DocumentID,
-        full_name=candidate.document.FullName,
+        document_id=candidate.document_id,
+        full_name=candidate.full_name,
         window_handle=candidate.window_handle,
         requested_ref=table_ref,
         state_token=state_token,
@@ -102,8 +102,8 @@ def insert_validated_table_images(
         box.result = apply_table_images(
             hwp,
             selector=candidate.selector,
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             window_handle=candidate.window_handle,
             prepared=prepared,
             guard=guard,

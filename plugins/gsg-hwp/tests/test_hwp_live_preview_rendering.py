@@ -140,7 +140,9 @@ class _FakeHwpApplication:
         self._current_page = int(page_index)
         if self._track_text_cursor:
             self._cursor = (0, self._current_page, 0)
-        return (0, 0)
+        # pyhwpx returns (current_printpage, current_page); the second element is
+        # exactly what hwp.current_page would report right after the move.
+        return (self._current_page, self._current_page)
 
     def set_pos(self, List: int, para: int, pos: int) -> bool:  # noqa: N803
         _ = (List, para, pos)

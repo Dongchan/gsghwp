@@ -8,7 +8,7 @@ from hwp_live_native_action_models import (
     NativePosition,
     NativeSnapshot,
 )
-from hwp_operation_contract import HwpOperateAssets, HwpOperateTarget
+from hwp_operation_contract import HwpOperateAssets, HwpOperateTarget, OperationStatus
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs, RecipePosition
 
 
@@ -28,6 +28,13 @@ class ResolvedObjectControl:
 
 
 @dataclass(frozen=True, slots=True)
+class ControlTargetFailure:
+    status: OperationStatus
+    message: str
+    required_inputs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedStylePosition:
     position: RecipePosition
     basis: str
@@ -43,29 +50,84 @@ def single_image(assets: HwpOperateAssets | None) -> Path | None:
     return next(iter(assets.images.values()))
 
 
+# Object kinds that name a concrete control type. "document", "page",
+# "selection" and "control" describe where to look rather than what to edit, so
+# they leave the workflow's own candidate types untouched.
+_KIND_CONTROL_TYPES: dict[str, frozenset[str]] = {
+    "table": frozenset(("tbl",)),
+    "picture": frozenset(("gso", "pic", "picture")),
+}
+
+_KIND_LABELS: dict[str, str] = {"table": "표", "picture": "그림"}
+
+
+def _candidate_control_types(
+    target: HwpOperateTarget | None,
+    control_types: frozenset[str],
+) -> frozenset[str] | None:
+    """Narrow the workflow's candidate types with ``target.kind``.
+
+    Returns ``None`` when the requested kind names an object type that this
+    workflow never edits, which is a contradiction rather than a miss.
+    """
+    if target is None:
+        return control_types
+    restriction = _KIND_CONTROL_TYPES.get(target.kind)
+    if restriction is None:
+        return control_types
+    narrowed = control_types & restriction
+    return narrowed if narrowed else None
+
+
+def _candidate_label(target: HwpOperateTarget | None) -> str:
+    if target is None:
+        return "개체"
+    return _KIND_LABELS.get(target.kind, "개체")
+
+
 def resolve_control_target(
     request: ControlTargetRequest,
-) -> ResolvedObjectControl | None:
+) -> ResolvedObjectControl | ControlTargetFailure | None:
     target = request.target
-    if target is not None and target.control_instance_id is not None:
-        control_type = next(
-            (
-                control.control_type
-                for control in request.routing_page.controls
-                if control.instance_id == target.control_instance_id
-            ),
-            "",
+    page = request.routing_page
+    control_types = _candidate_control_types(target, request.control_types)
+    if control_types is None:
+        # _candidate_control_types only narrows to nothing for a concrete kind.
+        kind = "" if target is None else target.kind
+        return ControlTargetFailure(
+            "schema_conflict",
+            f"이 작업은 {_candidate_label(target)} 종류의 개체를 편집하지 않습니다 "
+            f"(target.kind={kind})",
         )
+    if target is not None and target.control_instance_id is not None:
+        instance_id = target.control_instance_id
+        present = tuple(
+            control for control in page.controls if control.instance_id == instance_id
+        )
+        if not present:
+            return ControlTargetFailure(
+                "not_found",
+                f"{page.page}쪽에 개체 ID {instance_id}가 없습니다",
+            )
+        matching = tuple(
+            control for control in present if control.control_type in control_types
+        )
+        if not matching:
+            return ControlTargetFailure(
+                "schema_conflict",
+                f"개체 ID {instance_id}의 종류는 {present[0].control_type}이며 "
+                f"{_candidate_label(target)} 대상이 아닙니다",
+            )
         return ResolvedObjectControl(
-            target.control_instance_id,
+            instance_id,
             "explicit_control_instance_id",
-            control_type,
+            matching[0].control_type,
         )
     if target is not None and target.binding == "selection":
         snapshot = request.snapshot
         if (
             snapshot is not None
-            and snapshot.control_type in request.control_types
+            and snapshot.control_type in control_types
             and snapshot.control_instance_id
         ):
             return ResolvedObjectControl(
@@ -76,8 +138,8 @@ def resolve_control_target(
         return None
     matches = tuple(
         control
-        for control in request.routing_page.controls
-        if control.control_type in request.control_types and control.instance_id
+        for control in page.controls
+        if control.control_type in control_types and control.instance_id
     )
     if target is not None and target.table_index is not None:
         index = target.table_index - 1
@@ -88,7 +150,12 @@ def resolve_control_target(
                 "explicit_table_index",
                 selected.control_type,
             )
-        return None
+        label = _candidate_label(target)
+        return ControlTargetFailure(
+            "not_found",
+            f"{page.page}쪽의 {label}은 {len(matches)}개이며 "
+            f"{target.table_index}번째 {label}이 없습니다",
+        )
     if len(matches) != 1:
         return None
     selected = matches[0]

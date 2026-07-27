@@ -138,8 +138,18 @@ class LayoutPlan(ContractModel):
             if isinstance(block, TableBlock)
             for row in block.rows
         )
-        if cells > 1_000:
-            raise ValueError("layout contains more than 1000 expanded table cells")
+        # 2,500 = 50 x 50. 네이티브가 지원하는 최대 표 하나만큼이다.
+        # ReferenceLayoutValidation.cpp:27 이 참조 레이아웃 행·열을 각각 1..50 으로
+        # 두고, TableBlock 도 같은 50 을 쓴다(rows max_length=50 / columns 검사).
+        # 이전 1,000 은 그 최대 표(2,500 셀)를 제출조차 못 하게 막고 있었다.
+        #
+        # 명령 예산은 따로 지켜진다. 최악(모든 서식 + 글·그림 + 병합 100)의 50x50
+        # 은 약 40,705 개 명령이지만, hwp_live_native_layout.py 의 실행 계획이
+        # ActionProtocol.cpp:21 kMaximumCommands(20,000)와
+        # LAYOUT_TOPOLOGY_WORK_BUDGET 에 맞춰 71 회로 쪼갠다(최대 배치 2,164).
+        # 공개 레이아웃 도구는 atomic=False 라서 이 분할 경로를 탄다.
+        if cells > 2_500:
+            raise ValueError("layout contains more than 2500 expanded table cells")
         return self
 
     def expand_image_frames(

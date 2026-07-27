@@ -26,12 +26,16 @@ from hwp_live_native_action_models import (  # noqa: E402
     IntegerValue,
     MillimeterValue,
     NativeActionCommand,
+    NativeCharacterFormat,
     NativeDetailedControl,
     NativeDetailedInspection,
     NativePageControl,
     NativePageInspection,
+    NativeParagraphFormat,
     NativePosition,
+    NativeSelection,
     NativeSetter,
+    NativeSnapshot,
     ParameterActionCommand,
     SelectControlCommand,
 )
@@ -212,13 +216,29 @@ def test_sized_replace_resizes_picture_before_change(
     monkeypatch.setattr(object_recipes, "inspect_native_structure", inspect)
     monkeypatch.setattr(object_recipes, "fit_image_in_box", fit)
     captured: list[NativeActionCommand] = []
+    after_snapshot = NativeSnapshot(
+        document_id=17,
+        full_name="C:/documents/sample.hwp",
+        current_page=3,
+        page_count=3,
+        modified=True,
+        cursor=before.anchor,
+        selection=NativeSelection(False, before.anchor, before.anchor),
+        selected_text="",
+        control_type="gso",
+        control_instance_id="picture-7",
+        cell_address="",
+        style_id=0,
+        character_format=NativeCharacterFormat("", 0, False, 0),
+        paragraph_format=NativeParagraphFormat(0, 0, 0, 0, 0, 0, 0),
+    )
 
     def execute(
         _candidate: HwpDocumentCandidate,
         commands: tuple[NativeActionCommand, ...],
-    ) -> tuple[int, int, int, int, bool]:
+    ) -> tuple[int, int, int, int, bool, NativeSnapshot]:
         captured.extend(commands)
-        return len(commands), 100, 3, 3, True
+        return len(commands), 100, 3, 3, True, after_snapshot
 
     monkeypatch.setattr(object_recipes, "_execute", execute)
 
@@ -266,6 +286,7 @@ def test_sized_replace_resizes_picture_before_change(
     )
 
     assert result is not None
+    assert result.verified is True
 
     def is_picture_change(command: NativeActionCommand) -> bool:
         return (

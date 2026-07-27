@@ -7,7 +7,6 @@ from typing import Final, Literal
 from hwp_errors import HwpLiveError
 from hwp_live_native_action_models import (
     CaptureTableCommand,
-    CellCommand,
     NativeActionCommand,
     NativeActionRequest,
     SelectControlCommand,
@@ -33,14 +32,21 @@ from hwp_table_format_inference import infer_table_cell_edits
 
 
 _ADDRESS = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
+
+# 네이티브 파서의 절대 한계다. ActionProtocol.cpp:21 이 kMaximumCommands 를
+# 20'000 으로 두고 ActionProtocol.cpp:536-538 이 초과 요청을 BAD_REQUEST 로
+# 거절한다. 어떤 표 채움 요청도 이 값을 넘겨서는 안 된다.
+NATIVE_REQUEST_COMMAND_LIMIT: Final = 20_000
+# 표 채움 요청은 언제나 SELECT_CONTROL, CAPTURE_TABLE 로 시작한다.
+_TABLE_FILL_PREFIX_COMMANDS: Final = 2
+
 _NATIVE_CALL_DEADLINE_MICROSECONDS: Final = 180_000_000
 _NATIVE_CALL_SAFETY_FACTOR: Final = 6
 _OBSERVED_SAFE_EDIT_COUNT: Final = 100
 _OBSERVED_SAFE_TABLE_CELL_COUNT: Final = 100
 _OBSERVED_SAFE_WORST_MICROSECONDS: Final = 24_155_000
-# The live-safe sample includes one execution topology plus one preflight
-# topology per edited cell. Keep both command count and topology work within
-# that measured envelope; neither dimension alone is a safe chunk-size proxy.
+# 위 실측 표본은 topology 를 셀마다 다시 만들던 시절의 것이다. 그때 100셀 채움의
+# topology 작업량은 실행 1회 + 편집 셀마다 준비 1회로 100 * (100 + 1) 이었다.
 _OBSERVED_SAFE_TOPOLOGY_WORK: Final = _OBSERVED_SAFE_TABLE_CELL_COUNT * (
     _OBSERVED_SAFE_EDIT_COUNT + 1
 )
@@ -52,6 +58,7 @@ _NATIVE_CALL_EDIT_BUDGET: Final = min(
     _NATIVE_CALL_TARGET_MICROSECONDS
     * _OBSERVED_SAFE_EDIT_COUNT
     // _OBSERVED_SAFE_WORST_MICROSECONDS,
+    NATIVE_REQUEST_COMMAND_LIMIT - _TABLE_FILL_PREFIX_COMMANDS,
 )
 _NATIVE_CALL_TOPOLOGY_WORK_BUDGET: Final = min(
     _OBSERVED_SAFE_TOPOLOGY_WORK,
@@ -328,16 +335,18 @@ def _table_fill_chunk(
     replacements: tuple[tuple[str, str], ...],
     command_groups: tuple[tuple[NativeActionCommand, ...], ...],
 ) -> PreparedWorkflowTableFill:
-    first_address = replacements[0][0]
-    prefix = prepared.request.commands[:2]
+    prefix = prepared.request.commands[:_TABLE_FILL_PREFIX_COMMANDS]
     request = replace(
         prepared.request,
         commands=(
+            # SELECT_CONTROL, CAPTURE_TABLE 다음에 편집 명령만 오는 형태를
+            # 유지한다. 네이티브는 이 형태만 고수준 표 채움으로 인식하고
+            # (ActionTextPatch.cpp IsTableTextFillBatch), 인식된 요청만
+            # 모든 셀을 shadow 로 검증한 뒤 mutation 을 시작하며
+            # (PreflightTableTextCommands) topology 를 요청당 한 번만 만든다
+            # (SelectTableForCellPatch 의 reusableTableTextFillRequest).
+            # 여기에 CELL 같은 다른 명령을 끼우면 두 보호가 함께 사라진다.
             *prefix,
-            # A CELL command makes the native request ineligible for the
-            # quadratic all-cell preflight. SET_CELL_TEXT retains its stale
-            # guard/readback and TEXT_PATCH retains match/readback validation.
-            CellCommand(first_address),
             *(command for group in command_groups for command in group),
         ),
     )
@@ -364,6 +373,10 @@ def table_fill_chunks(
     original_topology_work = table_cell_count * (
         replacement_count + original_text_patch_count + 1
     )
+    # 진입 조건은 1e6358f 당시 그대로 둔다. 이 조건을 좁히면 실패했을 때
+    # 호출별 readback 확인 보고 경로(_failed_chunk_result)를 타지 않게 되어
+    # 큰 채움의 부분 적용 증거가 사라진다. 실제 분할 여부는 아래 루프의
+    # 명령 수 예산만 정한다.
     if (
         len(request_edit_commands) <= _NATIVE_CALL_EDIT_BUDGET
         and original_topology_work <= _NATIVE_CALL_TOPOLOGY_WORK_BUDGET
@@ -380,16 +393,23 @@ def table_fill_chunks(
     ):
         raise HwpLiveError("대량 표 채움 요청의 표 선택 명령 순서가 올바르지 않습니다")
 
+    # 분할 기준은 요청당 명령 수 하나뿐이다. 네이티브가 고수준 표 채움으로
+    # 인식하는 형태에서는 topology 를 준비 1회·실행 1회, 즉 요청당 두 번만
+    # 만든다. 그 비용은 표 크기에만 비례하고 한 요청에 담은 편집 수와는
+    # 무관하므로 더 잘게 쪼개도 줄지 않는다. 오히려 호출 수만큼 곱해진다.
     chunks: list[PreparedWorkflowTableFill] = []
     start = 0
     edit_count = 0
-    topology_work = table_cell_count
     for index, group in enumerate(prepared.command_groups):
         group_edit_count = len(group)
         group_topology_work = _table_fill_group_topology_work(
             group,
             table_cell_count=table_cell_count,
         )
+        # 한 셀 몫을 더는 나눌 수 없을 때의 거절 조건은 종전 그대로 둔다.
+        # 명령 수 한계는 네이티브 ValidateCellTextPatchLimit(한 셀 100개)과
+        # 같은 자리를 지키고, topology 한계는 실측 범위를 벗어난 큰 표를
+        # 보수적으로 계속 막는다.
         if (
             group_edit_count > _NATIVE_CALL_EDIT_BUDGET
             or table_cell_count + group_topology_work
@@ -400,10 +420,7 @@ def table_fill_chunks(
                 f"{address} 셀의 서식 보존 명령은 안전한 네이티브 호출 예산을 "
                 + "한 셀 단위로 초과하여 분할할 수 없습니다"
             )
-        if index > start and (
-            edit_count + group_edit_count > _NATIVE_CALL_EDIT_BUDGET
-            or topology_work + group_topology_work > _NATIVE_CALL_TOPOLOGY_WORK_BUDGET
-        ):
+        if index > start and edit_count + group_edit_count > _NATIVE_CALL_EDIT_BUDGET:
             chunks.append(
                 _table_fill_chunk(
                     prepared,
@@ -413,9 +430,7 @@ def table_fill_chunks(
             )
             start = index
             edit_count = 0
-            topology_work = table_cell_count
         edit_count += group_edit_count
-        topology_work += group_topology_work
     chunks.append(
         _table_fill_chunk(
             prepared,

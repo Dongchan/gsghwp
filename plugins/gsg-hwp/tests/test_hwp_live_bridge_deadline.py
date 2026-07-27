@@ -594,6 +594,7 @@ def test_rpc_server_unavailable_invalidates_session_without_retry() -> None:
         assert "worker_isolation_required=true" in lost.value.reason
         assert "reconcile_required=true" in lost.value.reason
         assert "retry_safe=false" in lost.value.reason
+        assert lost.value.mutation_started is True
         assert session_processes == {}
         assert process_sessions == {}
         assert events == {}
@@ -724,6 +725,7 @@ def test_blocked_call_reports_target_modal_without_dismissing_it() -> None:
         assert dialog.title in modal.value.reason
         assert "reconcile_required=true" in modal.value.reason
         assert "retry_safe=false" in modal.value.reason
+        assert modal.value.mutation_started is True
         assert windows.dismiss_calls == 0
     finally:
         release.set()
@@ -971,6 +973,7 @@ def test_process_queue_wait_is_bounded_by_total_deadline() -> None:
         assert "queue_busy=true" in timeout.value.reason
         assert "worker_isolation_required=false" in timeout.value.reason
         assert "retry_safe=true" in timeout.value.reason
+        assert timeout.value.mutation_started is False
     finally:
         held.release()
         bridge.close()
@@ -1001,6 +1004,7 @@ def test_running_mutation_timeout_is_not_retried_and_requires_reconcile() -> Non
         assert "process_lane_isolation_required=true" in timeout.value.reason
         assert "reconcile_required=true" in timeout.value.reason
         assert "retry_safe=false" in timeout.value.reason
+        assert timeout.value.mutation_started is True
     finally:
         release.set()
         assert finished.wait(1)
@@ -1906,5 +1910,35 @@ def test_structured_native_failure_survives_popup_diagnostic() -> None:
         ):
             _ = _call(bridge, ambiguous_patch, process_id=41, mutation=True)
         assert raised.value is failure
+    finally:
+        bridge.close()
+
+
+def test_popup_wrapper_preserves_structured_mutation_evidence() -> None:
+    controller = _Controller()
+    bridge = _bridge(controller)
+    original = HwpLiveError(
+        "native inspection failed",
+        mutation_started=False,
+    )
+
+    def fail_before_mutation() -> None:
+        raise original
+
+    try:
+        with (
+            patch("hwp_live_bridge.popup_diagnostic", return_value="test.hwp"),
+            pytest.raises(HwpLiveError) as wrapped,
+        ):
+            _ = _call(
+                bridge,
+                fail_before_mutation,
+                process_id=42,
+                mutation=True,
+            )
+        assert wrapped.value is not original
+        assert wrapped.value.__cause__ is original
+        assert wrapped.value.mutation_started is False
+        assert "감지된 한컴 오류 창: test.hwp" in wrapped.value.reason
     finally:
         bridge.close()

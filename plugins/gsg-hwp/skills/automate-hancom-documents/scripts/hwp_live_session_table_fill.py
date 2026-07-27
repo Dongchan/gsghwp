@@ -288,6 +288,17 @@ def _has_explicit_table_selector(target: HwpOperateTarget) -> bool:
     )
 
 
+def _selected_cells_failure(
+    error: HwpLiveError,
+    cell_address_error: str,
+) -> HwpLiveError:
+    reason = error.reason.partition(" 표 서식은 ")[0].rstrip()
+    native_reason = cell_address_error.strip()
+    if native_reason and native_reason not in reason:
+        reason = f"{reason}. 네이티브 셀 주소 검사 오류: {native_reason}"
+    return HwpLiveError(reason, mutation_started=error.mutation_started)
+
+
 def _bind_live_table_selection(
     candidate: HwpDocumentCandidate,
     target: HwpOperateTarget,
@@ -326,35 +337,41 @@ def _bind_live_table_selection(
     base_mode = selection_mode & 0x0F
     strict_selection = bool(selection_mode & 0x10)
     if base_mode == 3:
-        if not before.selection.cell_addresses and before.selection.cell_address_error:
-            raise HwpLiveError(before.selection.cell_address_error)
-        detail = inspect_native_structure(candidate.window_handle, before.current_page)
-        if detail is None:
-            raise HwpLiveError("선택 셀 범위를 위한 실제 표 구조를 읽지 못했습니다")
-        topology = table_topology(
-            detail,
-            before.control_instance_id,
-        )
-        if before.selection.cell_addresses:
-            selected_addresses = topology.selection_region_by_addresses(
-                before.selection.cell_addresses
+        try:
+            detail = inspect_native_structure(
+                candidate.window_handle,
+                before.current_page,
             )
-        elif before.selection.selected:
-            selected_addresses = topology.selection_region_by_list_ids(
-                before.selection.start.list_id,
-                before.selection.end.list_id,
+            if detail is None:
+                raise HwpLiveError("선택 셀 범위를 위한 실제 표 구조를 읽지 못했습니다")
+            topology = table_topology(
+                detail,
+                before.control_instance_id,
             )
-        elif strict_selection:
-            selected_addresses = table_formula_selection_region(
-                candidate.application,
-                topology,
-            )
-        else:
-            selected_addresses = topology.selection_region_by_list_ids(
-                before.selection.start.list_id,
-                before.selection.end.list_id,
-            )
-        start_cell = selected_addresses[0]
+            if before.selection.cell_addresses:
+                selected_addresses = topology.selection_region_by_addresses(
+                    before.selection.cell_addresses
+                )
+            elif before.selection.selected:
+                selected_addresses = topology.selection_region_by_list_ids(
+                    before.selection.start.list_id,
+                    before.selection.end.list_id,
+                )
+            elif before.selection.cell_address_error:
+                raise HwpLiveError(before.selection.cell_address_error)
+            elif strict_selection:
+                selected_addresses = table_formula_selection_region(
+                    candidate.application,
+                    topology,
+                )
+            else:
+                raise HwpLiveError("현재 선택한 표 셀 범위를 확인하지 못했습니다")
+            start_cell = selected_addresses[0]
+        except HwpLiveError as error:
+            raise _selected_cells_failure(
+                error,
+                before.selection.cell_address_error,
+            ) from error
     elif base_mode == 4:
         start_cell = "A1"
     else:
@@ -453,7 +470,7 @@ def operate_table_fill(
             workflow_result(
                 resolution,
                 "needs_input",
-                "행렬 표 채움은 start_cell을 지정하거나 한컴 표 셀에 커서를 두거나 셀을 선택해야 합니다",
+                "행렬 표 채움 대상으로 사용할 현재 표 셀 위치나 선택 범위를 확인하지 못했습니다",
                 required_inputs=("inputs.data.start_cell",),
             ),
             None,

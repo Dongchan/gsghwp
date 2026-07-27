@@ -33,6 +33,29 @@ from hwp_live_native_format_target import (
 type PreparationFailure = InputFailure | TargetFailure
 
 
+def has_explicit_table_locator(request: NativeFormatRecipeRequest) -> bool:
+    target = request.target
+    return (
+        target is not None
+        and target.binding != "selection"
+        and (
+            target.control_instance_id is not None
+            or target.table_index is not None
+            or target.caption_contains is not None
+            or bool(target.header_signature)
+            or target.page_hint is not None
+        )
+    )
+
+
+def _missing_table_format_target(message: str) -> InputFailure:
+    return InputFailure(
+        "needs_input",
+        f"{message}. target으로 대상 표를 지정하거나 cell로 적용할 셀을 지정하세요",
+        ("inputs.target", "inputs.parameters.cell"),
+    )
+
+
 def _selection_id(selection: NativeSelection) -> str:
     start, end = selection.start, selection.end
     return (
@@ -96,25 +119,22 @@ def _prepare_table_format(
     cells: tuple[str, ...]
     if parsed.cell is not None:
         cells = (parsed.cell,)
+    elif has_explicit_table_locator(request):
+        cells = ()
     elif before.selection.base_mode in {3, 4}:
         if before.control_type != "tbl" or not before.control_instance_id:
-            return InputFailure(
-                "needs_input",
-                "현재 선택이 표 또는 표 셀 선택이 아닙니다",
-                ("inputs.parameters.cell",),
+            return _missing_table_format_target(
+                "현재 선택이 표 또는 표 셀 선택이 아닙니다"
             )
         cells = ()
     elif before.control_type == "tbl" and before.cell_address:
         cells = (before.cell_address,)
     else:
-        return InputFailure(
-            "needs_input",
-            "현재 커서가 표 셀 안에 있지 않고 선택한 표나 셀도 없습니다",
-            ("inputs.parameters.cell",),
+        return _missing_table_format_target(
+            "현재 커서가 표 셀 안에 있지 않고 선택한 표나 셀도 없습니다"
         )
-    if (
-        parsed.cell is not None
-        and (parsed.row_height_mm is not None or parsed.column_width_mm is not None)
+    if parsed.cell is not None and (
+        parsed.row_height_mm is not None or parsed.column_width_mm is not None
     ):
         row, column = table_cell_coordinate(parsed.cell)
         if resolved.rows is None or resolved.columns is None:

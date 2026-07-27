@@ -35,7 +35,11 @@ def _coordinate(value: str) -> tuple[int, int]:
 
 
 def _range(value: str) -> tuple[int, int, int, int]:
-    parts = value.split(":")
+    # `$A$1:$F$37` and `A1:F37` are the same Excel range. hwp_office_excel_com
+    # ._range already drops the "$" for .xls, so rejecting it here made a valid
+    # range depend on the workbook format. Only "$" is removed: a sheet-qualified
+    # or malformed address still fails in _coordinate below.
+    parts = value.replace("$", "").split(":")
     if len(parts) not in {1, 2}:
         raise HwpLiveError("엑셀 범위는 A1 또는 A1:D20 형식이어야 합니다")
     start = _coordinate(parts[0])

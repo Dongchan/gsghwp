@@ -184,19 +184,26 @@ class HwpPublicTableEditTools:
         *,
         operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
-        start_cell: PublicCellReference,
-        end_cell: PublicCellReference,
+        start_cell: PublicCellReference | None = None,
+        end_cell: PublicCellReference | None = None,
     ) -> PublicActionResult:
+        # Both omitted means "the cells the user already selected". Requiring
+        # the addresses made models invent them and merge the wrong cells.
+        named = tuple(
+            (parameter, NamedPublicCellReference(input_name, reference))
+            for parameter, input_name, reference in (
+                ("start", "start_cell", start_cell),
+                ("end", "end_cell", end_cell),
+            )
+            if reference is not None
+        )
         request = PublicTableEditResolutionRequest(
             resolution=PublicTableResolutionRequest(
                 target=target,
                 request_id=operation_id,
                 query=metadata.MERGE_TABLE_CELLS_INTENT,
             ),
-            cells=(
-                NamedPublicCellReference("start_cell", start_cell),
-                NamedPublicCellReference("end_cell", end_cell),
-            ),
+            cells=tuple(cell for _, cell in named),
             unique_cells_required=True,
         )
         resolved = await self._resolved(request)
@@ -206,10 +213,22 @@ class HwpPublicTableEditTools:
             case _ as unreachable if not _is_resolved_edit(unreachable):
                 assert_never(unreachable)
             case _:
-                requested = PublicMergeTableCellsInput(
-                    start_cell=resolved.addresses[0],
-                    end_cell=resolved.addresses[1],
-                )
+                addresses = resolved.addresses
+                if len(addresses) == 2:
+                    requested = PublicMergeTableCellsInput(
+                        start_cell=addresses[0],
+                        end_cell=addresses[1],
+                    )
+                    parameters = dict(requested.to_parameters())
+                else:
+                    # No address, or only one: the live layer resolves what is
+                    # missing from the selection, or reports it missing.
+                    parameters = {
+                        parameter: address.upper()
+                        for (parameter, _), address in zip(
+                            named, addresses, strict=True
+                        )
+                    }
                 return await self._execute(
                     request.resolution.query,
                     HwpOperateInputs(
@@ -217,7 +236,7 @@ class HwpPublicTableEditTools:
                         document=resolved.target.document_path,
                         operation="table.merge_cells",
                         target=resolved.target.target,
-                        parameters=dict(requested.to_parameters()),
+                        parameters=parameters,
                         policy=HwpOperatePolicy(ambiguity="return_candidates"),
                         postconditions=HwpOperatePostconditions(verify_structure=True),
                     ),
@@ -228,19 +247,20 @@ class HwpPublicTableEditTools:
         *,
         operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
-        cell: PublicCellReference,
+        cell: PublicCellReference | None = None,
         columns: Annotated[int, Field(ge=1, le=65_535)],
         rows: Annotated[int, Field(ge=1, le=65_535)],
         distribute_height: bool = False,
         split_mode: PublicTableSplitMode = "equal",
     ) -> PublicActionResult:
+        # Omitted means "the cell the caret is already in".
         request = PublicTableEditResolutionRequest(
             resolution=PublicTableResolutionRequest(
                 target=target,
                 request_id=operation_id,
                 query=metadata.SPLIT_TABLE_CELL_INTENT,
             ),
-            cells=(NamedPublicCellReference("cell", cell),),
+            cells=() if cell is None else (NamedPublicCellReference("cell", cell),),
         )
         resolved = await self._resolved(request)
         match resolved:
@@ -249,13 +269,25 @@ class HwpPublicTableEditTools:
             case _ as unreachable if not _is_resolved_edit(unreachable):
                 assert_never(unreachable)
             case _:
-                requested = PublicSplitTableCellInput(
-                    cell=resolved.addresses[0],
-                    columns=columns,
-                    rows=rows,
-                    distribute_height=distribute_height,
-                    split_mode=split_mode,
-                )
+                if resolved.addresses:
+                    requested = PublicSplitTableCellInput(
+                        cell=resolved.addresses[0],
+                        columns=columns,
+                        rows=rows,
+                        distribute_height=distribute_height,
+                        split_mode=split_mode,
+                    )
+                    parameters = dict(requested.to_parameters())
+                else:
+                    # PublicSplitTableCellInput.to_parameters() without "cell".
+                    # parse_split still rejects a 1x1 split.
+                    parameters = {
+                        "columns": columns,
+                        "rows": rows,
+                        "distribute_height": distribute_height,
+                        "merge": False,
+                        "split_mode": split_mode,
+                    }
                 return await self._execute(
                     request.resolution.query,
                     HwpOperateInputs(
@@ -263,7 +295,7 @@ class HwpPublicTableEditTools:
                         document=resolved.target.document_path,
                         operation="table.split_cells",
                         target=resolved.target.target,
-                        parameters=dict(requested.to_parameters()),
+                        parameters=parameters,
                         policy=HwpOperatePolicy(ambiguity="return_candidates"),
                         postconditions=HwpOperatePostconditions(verify_structure=True),
                     ),

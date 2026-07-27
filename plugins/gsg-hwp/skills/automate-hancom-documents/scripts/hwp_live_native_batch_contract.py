@@ -3,8 +3,15 @@ from __future__ import annotations
 from base64 import b64decode, b64encode
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from hwp_errors import HwpLiveError
+
+
+# Native source: LiveInspection.cpp::ParseRequestedPages hard-codes this page limit.
+NATIVE_INSPECT_PAGES_MAX: Final = 256
+# Native source: BatchProtocol.cpp::kMaximumOperations defines this operation limit.
+NATIVE_BATCH_MAX_OPERATIONS: Final = 5_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +145,13 @@ def _absolute_path(path: Path) -> str:
 def encode_batch_request(request: NativeBatchRequest) -> str:
     if request.document_id < 0 or not request.tables:
         raise HwpLiveError("네이티브 배치 문서 식별값이 올바르지 않습니다")
+    operation_count = sum(len(table.operations) for table in request.tables)
+    if operation_count > NATIVE_BATCH_MAX_OPERATIONS:
+        limit_message = f"네이티브 배치 요청이 {NATIVE_BATCH_MAX_OPERATIONS}개 작업 제한을 초과했습니다."
+        atomicity_message = (
+            "부분 변경을 막고 원자성을 보존하기 위해 요청을 분할하지 않습니다"
+        )
+        raise HwpLiveError(f"{limit_message} {atomicity_message}")
     lines = ["HCB1", f"DOC\t{request.document_id}\t{_encode(request.full_name)}"]
     for table in request.tables:
         if not table.operations:

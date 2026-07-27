@@ -47,7 +47,11 @@ from hwp_public_action_contract import (  # noqa: E402
     PublicTextFormattingInput,
 )
 from hwp_public_contract import to_public_action_result  # noqa: E402
-from hwp_live_text_patch_contract import TextPatchRequest, TextPatchTarget  # noqa: E402
+from hwp_live_text_patch_contract import (  # noqa: E402
+    TextPatchRequest,
+    TextPatchResult,
+    TextPatchTarget,
+)
 
 
 class _InputSchema(BaseModel):
@@ -110,6 +114,51 @@ def _candidate() -> HwpDocumentCandidate:
         window_handle=100,
         active=True,
     )
+
+
+def _patch_with_readback(
+    *,
+    replacement: str,
+    selected_text: str,
+    selected: bool = True,
+) -> TextPatchResult:
+    start = NativePosition(0, 3, 2)
+    before = _snapshot(
+        selected=False,
+        selected_text="",
+        start=start,
+        end=start,
+        text_color=0,
+    )
+    after = _snapshot(
+        selected=selected,
+        selected_text=selected_text,
+        start=start,
+        end=NativePosition(0, 3, 2 + len(selected_text)) if selected else start,
+        text_color=0,
+    )
+    request = TextPatchRequest(
+        target=TextPatchTarget(kind="current"),
+        expected_text=None,
+        replacement=replacement,
+    )
+    with (
+        patch(
+            "hwp_live_session_structure_mutation.read_native_snapshot",
+            side_effect=(before, after),
+        ),
+        patch(
+            "hwp_live_session_structure_mutation.execute_native_actions",
+            return_value=NativeActionResult(1, 0, 1, 0, 50, ()),
+        ),
+    ):
+        return patch_validated_text(
+            cast(LiveHwpApplication, object()),
+            _candidate(),
+            request,
+            set(),
+            lambda: None,
+        )
 
 
 def test_patch_current_command_encodes_selection_free_insert() -> None:
@@ -341,4 +390,56 @@ def test_patch_rejects_false_success_when_reselected_text_differs() -> None:
             request,
             set(),
             lambda: None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("replacement", "selected_text"),
+    (
+        ("첫 줄\r\n둘째 줄", "첫 줄\n둘째 줄"),
+        ("첫 줄\r둘째 줄", "첫 줄\n둘째 줄"),
+    ),
+    ids=("crlf", "standalone-cr"),
+)
+def test_patch_accepts_native_paragraph_separator_normalization(
+    replacement: str,
+    selected_text: str,
+) -> None:
+    result = _patch_with_readback(
+        replacement=replacement,
+        selected_text=selected_text,
+    )
+
+    assert result.after.selected_text == selected_text
+
+
+def test_patch_rejects_text_difference_after_paragraph_normalization() -> None:
+    with pytest.raises(HwpLiveError, match="변경한 본문 범위"):
+        _ = _patch_with_readback(
+            replacement="첫 줄\r\n둘째 줄",
+            selected_text="첫 줄\n다른 줄",
+        )
+
+
+def test_patch_rejects_space_and_tab_difference() -> None:
+    with pytest.raises(HwpLiveError, match="변경한 본문 범위"):
+        _ = _patch_with_readback(
+            replacement="첫 줄 둘째 줄",
+            selected_text="첫 줄\t둘째 줄",
+        )
+
+
+def test_patch_deletion_still_requires_collapsed_selection() -> None:
+    result = _patch_with_readback(
+        replacement="",
+        selected_text="",
+        selected=False,
+    )
+
+    assert result.after.selection.selected is False
+
+    with pytest.raises(HwpLiveError, match="삭제 후 선택 영역"):
+        _ = _patch_with_readback(
+            replacement="",
+            selected_text="남은 선택",
         )

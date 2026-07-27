@@ -237,7 +237,8 @@ def _deadline_error(
                     )
                 ),
             )
-        )
+        ),
+        mutation_started=mutation_started,
     )
 
 
@@ -348,7 +349,10 @@ def _process_lost_error(
     )
     if diagnostic is not None:
         reason = f"{reason}; {diagnostic}"
-    return HwpTargetProcessLostError(reason)
+    return HwpTargetProcessLostError(
+        reason,
+        mutation_started=mutation_started,
+    )
 
 
 def _modal_dialog_error(
@@ -403,7 +407,8 @@ def _modal_dialog_error(
                 ),
                 "; 대화상자를 직접 확인한 뒤 한컴 문서에 재연결해야 합니다",
             )
-        )
+        ),
+        mutation_started=mutation_started,
     )
 
 
@@ -1424,7 +1429,8 @@ class HancomBridge(
                     diagnostic=diagnostic,
                 )
                 raise HwpTargetProcessLostError(
-                    f"{lost_error.reason}; 원래 COM 오류: {error}"
+                    f"{lost_error.reason}; 원래 COM 오류: {error}",
+                    mutation_started=lost_error.mutation_started,
                 ) from error
             if not isinstance(error, HwpLiveError):
                 raise
@@ -1441,7 +1447,8 @@ class HancomBridge(
             if popup is None:
                 raise
             raise HwpLiveError(
-                f"{error.reason}; 감지된 한컴 오류 창: {popup}"
+                f"{error.reason}; 감지된 한컴 오류 창: {popup}",
+                mutation_started=error.mutation_started,
             ) from error
         finally:
             if acquired:

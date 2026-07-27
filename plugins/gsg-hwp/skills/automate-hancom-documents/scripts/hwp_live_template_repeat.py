@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 from pathlib import Path
-from typing import Final, Self
+from typing import Final, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
@@ -14,7 +14,6 @@ from hwp_live_native_action_models import (
     NativeActionCommand,
     NativeActionRequest,
     NativeActionResult,
-    NativeDetailedCaption,
     NativePageCell,
     NativePageControl,
     NativePageInspection,
@@ -24,6 +23,7 @@ from hwp_live_native_action_models import (
     RunCommand,
     SelectControlCommand,
 )
+from hwp_live_native_action_results import NativeDetailedInspection
 from hwp_live_native_batch import (
     execute_native_actions,
     inspect_native_page,
@@ -39,6 +39,7 @@ from hwp_live_native_template_repeat import (
     caption_display_number,
     clone_table_after_source_commands,
     copy_caption_title,
+    replace_table_caption_commands,
     table_copy_content_commands,
 )
 from hwp_live_values import ContractModel
@@ -146,9 +147,19 @@ class TableTemplateRepeatResult(ContractModel):
     native_elapsed_microseconds: int = Field(ge=0)
     current_page: int = Field(ge=1)
     page_count: int = Field(ge=1)
+    # 복제·채우기 대상 표가 실제로 관측된 쪽. 커서 쪽이 아니라 진짜 변경 범위다.
+    affected_pages: tuple[int, ...] = Field(default=(), max_length=20_000)
     modified: bool
     verified: bool = False
     verification_error: str | None = Field(default=None, max_length=4_000)
+    caption_number_verification: (
+        Literal["verified", "unavailable", "mismatch"] | None
+    ) = None
+    caption_number_verification_message: str | None = Field(
+        default=None,
+        max_length=4_000,
+    )
+    source_caption_automatic_number: bool | None = None
     caption_profile_elapsed_microseconds: int = Field(default=0, ge=0)
     clone_elapsed_microseconds: int = Field(default=0, ge=0)
     caption_elapsed_microseconds: int = Field(default=0, ge=0)
@@ -236,63 +247,45 @@ def _caption_title_format_source(
     )
 
 
-def _required_table_caption(
-    window_handle: int,
-    page: int,
-    table_id: str,
-) -> NativeDetailedCaption:
-    inspected = inspect_native_structure(window_handle, page)
-    if inspected is None:
-        raise HwpLiveError(
-            f"{table_id} 표에 연결된 캡션 확인 불가: 네이티브 상세 구조 결과가 없습니다"
-        )
-    errors = tuple(
-        error
-        for error in inspected.inspection_errors
-        if error.control_instance_id == table_id
-    )
-    if errors:
-        raise HwpLiveError(
-            f"{table_id} 표에 연결된 캡션 확인 불가: {errors[0].message}"
-        )
-    captions = tuple(
-        caption
-        for caption in inspected.captions
-        if caption.table_instance_id == table_id
-    )
-    if len(captions) != 1:
-        message = (
-            f"{table_id} 표에 연결된 캡션을 정확히 하나 확인하지 못했습니다: "
-            + f"{len(captions)}개"
-        )
-        raise HwpLiveError(message)
-    return captions[0]
-
-
 def _attached_caption_display_number(
-    caption: NativeDetailedCaption,
-    table_id: str,
+    page_text: str,
     expected_title: str,
-) -> int:
-    if not caption.automatic_number:
-        raise HwpLiveError(
-            f"{table_id} 표에 연결된 캡션의 자동 번호를 확인하지 못했습니다"
-        )
-    display_number = caption_display_number(caption.text, expected_title)
-    if display_number is None:
-        raise HwpLiveError(
-            f"{table_id} 표에 연결된 캡션의 표시 번호 또는 제목 확인 불가"
-        )
-    return display_number
+) -> int | None:
+    return caption_display_number(page_text, expected_title)
 
 
+def _caption_number_unavailable_message() -> str:
+    return (
+        "표 복제와 내용 적용은 완료됐지만 화면 캡션 번호를 읽지 못해 "
+        "번호 검증은 미완료입니다. 같은 요청을 다시 실행하지 말고 "
+        "한/글 화면에서 복제 표의 캡션 번호를 확인하세요."
+    )
+
+
+# 캡션이 다른 표에 붙은 경우를 잡는 검사는 유지하되, 비용만 없앤다.
+# 이전에는 복제 표 하나마다 inspect_native_structure 를 불러 표 N 개에 상세 조회가 N 번 나갔다.
+# 상세 조회는 "쪽" 단위 결과라 같은 쪽에 있는 표들에는 같은 결과가 쓰인다. 쪽 기준으로 한 번만 부른다.
+# 그래서 비용이 O(표 수) 에서 O(쪽 수) 로 내려간다. 검사는 그대로다.
 def _verify_repeated_caption_numbers(
     window_handle: int,
     pages: tuple[NativePageInspection, ...],
     created_control_ids: tuple[str, ...],
     caption_title: str,
-    source_display_number: int,
-) -> None:
+    source_display_number: int | None,
+) -> tuple[Literal["verified", "unavailable", "mismatch"], str | None]:
+    structure_by_page: dict[int, NativeDetailedInspection] = {}
+
+    def captions_on(page: int) -> NativeDetailedInspection:
+        cached = structure_by_page.get(page)
+        if cached is None:
+            cached = inspect_native_structure(window_handle, page)
+            if cached is None:
+                raise HwpLiveError(
+                    f"{page}쪽 캡션 확인 불가: 네이티브 상세 구조 결과가 없습니다"
+                )
+            structure_by_page[page] = cached
+        return cached
+
     page_by_control = {
         control.instance_id: page
         for page in pages
@@ -306,25 +299,52 @@ def _verify_repeated_caption_numbers(
     )
     if missing:
         raise HwpLiveError("복제 표의 실제 쪽을 찾아 캡션을 검증하지 못했습니다")
+    number_unavailable = False
     for offset, control_id in enumerate(created_control_ids, start=1):
         expected_title = copy_caption_title(caption_title, offset)
-        expected_number = source_display_number + offset
-        caption = _required_table_caption(
-            window_handle,
-            page_by_control[control_id].page,
-            control_id,
+        page = page_by_control[control_id].page
+        inspected = captions_on(page)
+        errors = tuple(
+            error
+            for error in inspected.inspection_errors
+            if error.control_instance_id == control_id
         )
+        if errors:
+            raise HwpLiveError(
+                f"{control_id} 표에 연결된 캡션 확인 불가: {errors[0].message}"
+            )
+        captions = tuple(
+            caption
+            for caption in inspected.captions
+            if caption.table_instance_id == control_id
+        )
+        if len(captions) != 1:
+            raise HwpLiveError(
+                f"{control_id} 표에 연결된 캡션을 정확히 하나 확인하지 못했습니다: "
+                + f"{len(captions)}개"
+            )
+        if not captions[0].text.rstrip().endswith(expected_title):
+            raise HwpLiveError(
+                f"{control_id} 표 캡션 제목이 요청과 다릅니다: "
+                + f"expected={expected_title!r}, actual={captions[0].text!r}"
+            )
         actual_number = _attached_caption_display_number(
-            caption,
-            control_id,
+            page_by_control[control_id].text,
             expected_title,
         )
+        if actual_number is None or source_display_number is None:
+            number_unavailable = True
+            continue
+        expected_number = source_display_number + offset
         if actual_number != expected_number:
             message = "복제 표 캡션의 표시 번호 또는 제목이 요청과 다릅니다: expected={}, actual={}".format(
                 expected_number,
                 actual_number,
             )
-            raise HwpLiveError(message)
+            return "mismatch", message
+    if number_unavailable:
+        return "unavailable", _caption_number_unavailable_message()
+    return "verified", None
 
 
 def _matches_picture_dimension(actual: int | None, expected_mm: float) -> bool:
@@ -425,6 +445,28 @@ def _verify_repeated_table(
             raise HwpLiveError(message)
 
 
+def repeated_table_pages(
+    pages: tuple[NativePageInspection, ...],
+    table_ids: tuple[str, ...],
+) -> tuple[int, ...]:
+    """이 작업이 만들거나 채운 표가 실제로 관측된 쪽.
+
+    사후 검증이 이미 읽어 둔 쪽별 조회 결과만 쓴다. 네이티브 왕복은 늘지 않는다.
+    표가 보이지 않은 쪽은 근거가 없으므로 넣지 않는다.
+    """
+    wanted = set(table_ids)
+    return tuple(
+        sorted(
+            {
+                page.page
+                for page in pages
+                for control in page.controls
+                if control.instance_id in wanted
+            }
+        )
+    )
+
+
 def _repeat_verification_error(
     window_handle: int,
     plan: TableTemplateRepeatPlan,
@@ -432,7 +474,17 @@ def _repeat_verification_error(
     source_rows: int | None,
     after: NativeSnapshot,
     caption_profile: NativeCaptionProfile | None,
-) -> str | None:
+) -> tuple[
+    str | None,
+    Literal["verified", "unavailable", "mismatch"] | None,
+    str | None,
+    tuple[int, ...],
+]:
+    caption_number_verification: (
+        Literal["verified", "unavailable", "mismatch"] | None
+    ) = None
+    caption_number_verification_message: str | None = None
+    affected_pages: tuple[int, ...] = ()
     try:
         last_page = max(plan.source_page, after.current_page)
         pages = inspect_native_pages(
@@ -442,23 +494,35 @@ def _repeat_verification_error(
         )
         if not pages:
             raise HwpLiveError("반복 표의 네이티브 사후 구조를 읽지 못했습니다")
+        affected_pages = repeated_table_pages(pages, table_ids)
         for table_id, block in zip(table_ids, plan.blocks, strict=True):
             _verify_repeated_table(pages, table_id, block, source_rows)
         if plan.caption_title is not None and len(table_ids) > 1:
-            if caption_profile is None or caption_profile.display_number is None:
-                raise HwpLiveError(
-                    "복제 표 캡션의 표시 번호 기준을 네이티브 결과에서 확인하지 못했습니다"
-                )
-            _verify_repeated_caption_numbers(
+            (
+                caption_number_verification,
+                caption_number_verification_message,
+            ) = _verify_repeated_caption_numbers(
                 window_handle,
                 pages,
                 table_ids[1:],
                 plan.caption_title,
-                caption_profile.display_number,
+                None if caption_profile is None else caption_profile.display_number,
             )
     except HwpLiveError as error:
-        return str(error)[:4_000]
-    return None
+        # 검증이 중간에 실패해도 그 전에 관측한 쪽은 사실이다. 부분 변경을 보고할 때
+        # 어디를 봐야 하는지 알려 주는 편이 커서 쪽 하나보다 낫다.
+        return str(error)[:4_000], None, None, affected_pages
+    verification_error = (
+        caption_number_verification_message
+        if caption_number_verification in {"unavailable", "mismatch"}
+        else None
+    )
+    return (
+        verification_error,
+        caption_number_verification,
+        caption_number_verification_message,
+        affected_pages,
+    )
 
 
 def _read_source_caption_profile(
@@ -581,15 +645,11 @@ def repeat_table_template(
     inspected = _required_page(window_handle, plan.source_page)
     source_control = _source_control(inspected, plan.source_control_id)
     source = _source_cells(inspected, plan.source_control_id)
-    source_caption = (
-        _required_table_caption(
-            window_handle,
-            plan.source_page,
-            plan.source_control_id,
-        )
-        if plan.caption_title is not None
-        else None
-    )
+    # 복제를 시작하기 전에 캡션을 상세 조회해서 막지 않는다.
+    # 이 조회의 쓰임은 (1) 없으면 예외를 던지는 것 (2) 진단 필드 하나를 채우는 것뿐인데,
+    # 대가로 본 작업 전에 상세 구조 조회가 한 번 더 나가고, 조회가 흔들리면 복제 자체가 막힌다.
+    # 실제로 화면에 번호가 보이는 문서에서 automatic_number=false 로 읽혀 작업이 통째로 막혔다.
+    # v1.1.0 은 이 사전 조회가 아예 없었고 캡션 번호도 정상이었다.
     blocks = _native_blocks(plan, source, inspected)
     before = read_native_snapshot(window_handle)
     if before is None:
@@ -601,8 +661,6 @@ def repeat_table_template(
     caption_elapsed_microseconds = 0
     caption_profile: NativeCaptionProfile | None = None
     if plan.caption_title is not None:
-        if source_caption is None:
-            raise HwpLiveError("원본 표에 연결된 캡션 확인 불가")
         caption_profile, caption_results = _read_source_caption_profile(
             window_handle,
             before,
@@ -610,13 +668,12 @@ def repeat_table_template(
             plan.caption_title,
         )
         display_number = _attached_caption_display_number(
-            source_caption,
-            plan.source_control_id,
+            inspected.text,
             plan.caption_title,
         )
         caption_profile = replace(
             caption_profile,
-            automatic_number=source_caption.automatic_number,
+            automatic_number=display_number is not None,
             display_number=display_number,
         )
         stage_results.extend(caption_results)
@@ -624,14 +681,22 @@ def repeat_table_template(
             result.elapsed_microseconds for result in caption_results
         )
     if len(blocks) > 1:
+        numbered_caption_profile = (
+            caption_profile
+            if caption_profile is not None
+            and caption_profile.display_number is not None
+            else None
+        )
         clone_request = NativeActionRequest(
             document_id=before.document_id,
             full_name=before.full_name,
             commands=clone_table_after_source_commands(
                 plan.source_control_id,
                 len(blocks) - 1,
-                caption_title=plan.caption_title,
-                caption_profile=caption_profile,
+                caption_title=(
+                    plan.caption_title if numbered_caption_profile is not None else None
+                ),
+                caption_profile=numbered_caption_profile,
             ),
         )
         cloned = _required_action(window_handle, clone_request)
@@ -640,6 +705,33 @@ def repeat_table_template(
             raise HwpLiveError("복제된 표 개체 수가 요청한 반복 수와 다릅니다")
         stage_results.append(cloned)
         clone_elapsed_microseconds = cloned.elapsed_microseconds
+        if (
+            plan.caption_title is not None
+            and caption_profile is not None
+            and caption_profile.display_number is None
+        ):
+            caption_commands = tuple(
+                command
+                for offset, table_id in enumerate(created, start=1)
+                for desired_title in (copy_caption_title(plan.caption_title, offset),)
+                if desired_title != plan.caption_title
+                for command in replace_table_caption_commands(
+                    table_id,
+                    plan.caption_title,
+                    desired_title,
+                )
+            )
+            if caption_commands:
+                captions_updated = _required_action(
+                    window_handle,
+                    NativeActionRequest(
+                        document_id=before.document_id,
+                        full_name=before.full_name,
+                        commands=caption_commands,
+                    ),
+                )
+                stage_results.append(captions_updated)
+                caption_elapsed_microseconds = captions_updated.elapsed_microseconds
     table_ids = (plan.source_control_id, *created)
     fill_commands: list[NativeActionCommand] = []
     for table_id, block in zip(table_ids, blocks, strict=True):
@@ -668,7 +760,12 @@ def repeat_table_template(
     after = read_native_snapshot(window_handle)
     if after is None:
         raise HwpLiveError("반복 표 배치 후 한컴 문서 상태를 읽지 못했습니다")
-    verification_error = _repeat_verification_error(
+    (
+        verification_error,
+        caption_number_verification,
+        caption_number_verification_message,
+        affected_pages,
+    ) = _repeat_verification_error(
         window_handle,
         plan,
         table_ids,
@@ -688,9 +785,14 @@ def repeat_table_template(
         ),
         current_page=after.current_page,
         page_count=after.page_count,
+        affected_pages=affected_pages,
         modified=after.modified,
         verified=verification_error is None,
         verification_error=verification_error,
+        caption_number_verification=caption_number_verification,
+        caption_number_verification_message=caption_number_verification_message,
+        # 사전 상세 조회를 없앴으므로 이 진단 필드는 "조회하지 않음"을 뜻하는 None 이다.
+        source_caption_automatic_number=None,
         caption_profile_elapsed_microseconds=caption_profile_elapsed_microseconds,
         clone_elapsed_microseconds=clone_elapsed_microseconds,
         caption_elapsed_microseconds=caption_elapsed_microseconds,

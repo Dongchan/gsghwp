@@ -193,7 +193,7 @@ def operate_table_recipe(
             )
         commands_executed, elapsed = _execute(
             candidate,
-            NativeActionRequest(candidate.document.DocumentID, candidate.document.FullName, commands),
+            NativeActionRequest(candidate.document_id, candidate.full_name, commands),
         )
     after = inspect_candidate_structure(hwp, candidate, before.page, lambda: None)
     if workflow == "table.expand_and_fill":

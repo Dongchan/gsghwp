@@ -57,6 +57,16 @@ from hwp_public_table_edit_contract import PublicTableFormattingInput  # noqa: E
 from hwp_public_table_target import PublicTableDataInput  # noqa: E402
 
 
+_CELL_ADDRESS_INSPECTION_ERROR = (
+    "TableFormula Command property could not be read for a table over 81 cells"
+)
+_ADDRESS_GUESSING_GUIDANCE = (
+    "cell로 대상 셀",
+    "start_cell을 지정",
+    "다시 요청",
+)
+
+
 class _Control:
     CtrlID: ClassVar[str] = "tbl"
 
@@ -184,11 +194,7 @@ def _inspect_context(
     document: OpenDocument,
 ) -> LiveContext:
     raw = hwp.get_selected_pos()
-    control = (
-        hwp.CurSelectedCtrl
-        if (hwp.SelectionMode & 0x0F) == 4
-        else hwp.ParentCtrl
-    )
+    control = hwp.CurSelectedCtrl if (hwp.SelectionMode & 0x0F) == 4 else hwp.ParentCtrl
     snapshot = NativeSnapshot(
         document_id=document.document_id,
         full_name=document.full_name,
@@ -501,6 +507,93 @@ def _selected_table_detail() -> NativeDetailedInspection:
     )
 
 
+def _large_selected_table_detail() -> NativeDetailedInspection:
+    cells = tuple(
+        _cell(
+            f"{chr(ord('A') + column)}{row}",
+            1_000 + (row - 1) * 10 + column + 1,
+        )
+        for row in range(1, 11)
+        for column in range(10)
+    )
+    return NativeDetailedInspection(
+        7,
+        "C:/test.hwp",
+        4,
+        8,
+        "",
+        (
+            NativeDetailedControl(
+                "tbl",
+                "table-selected",
+                "",
+                NativePosition(1, 0, 0),
+                4,
+                4,
+                True,
+                10,
+                10,
+                10_000,
+                5_000,
+            ),
+        ),
+        cells,
+        (),
+    )
+
+
+def _prepared_table_format(
+    *,
+    rows: int = 10,
+    columns: int = 10,
+) -> PreparedFormatOperation:
+    parsed = parse_table_format(
+        PublicTableFormattingInput(
+            cell=None, fill_color=(221, 238, 255)
+        ).to_parameters()
+    )
+    assert not isinstance(parsed, InputFailure)
+    return PreparedFormatOperation(
+        TableFormatCommandPlan(
+            parsed,
+            ResolvedTable(
+                "table-selected",
+                "native.selection",
+                4,
+                rows,
+                columns,
+            ),
+        ),
+        "table-selected",
+        "native.selection",
+        (),
+    )
+
+
+def _table_fill_candidate(
+    application: object | None = None,
+) -> HwpDocumentCandidate:
+    return HwpDocumentCandidate(
+        selector="active",
+        moniker_name="fixture",
+        application=cast(
+            HwpComApplication,
+            application if application is not None else object(),
+        ),
+        document=cast(HwpComDocument, object()),
+        document_id=7,
+        full_name="C:/test.hwp",
+        document_format="HWP",
+        edit_mode=1,
+        window_handle=100,
+        active=True,
+    )
+
+
+def _assert_no_address_guessing_guidance(message: str) -> None:
+    assert all(fragment not in message for fragment in _ADDRESS_GUESSING_GUIDANCE)
+
+
 def test_table_format_without_cell_expands_a_selected_table_to_all_cells() -> None:
     parsed = parse_table_format(
         PublicTableFormattingInput(cell=None, fill_color="#DDEEFF").to_parameters()
@@ -520,6 +613,26 @@ def test_table_format_without_cell_expands_a_selected_table_to_all_cells() -> No
         prepared,
         _snapshot(4),
         _selected_table_detail(),
+    )
+
+    assert not isinstance(resolved, InputFailure)
+    assert isinstance(resolved.plan, TableFormatCommandPlan)
+    assert resolved.plan.cells == ("A1", "B1", "A2", "B2")
+
+
+def test_table_format_large_table_address_error_uses_list_ids() -> None:
+    detail = _large_selected_table_detail()
+    assert len(detail.cells) > 81
+
+    resolved = _resolve_selected_table_cells(
+        _prepared_table_format(),
+        _snapshot(
+            19,
+            start_list=1_001,
+            end_list=1_012,
+            cell_address_error=_CELL_ADDRESS_INSPECTION_ERROR,
+        ),
+        detail,
     )
 
     assert not isinstance(resolved, InputFailure)
@@ -583,7 +696,7 @@ def test_table_format_reports_strict_cell_address_inspection_failure() -> None:
         selected=False,
         start_list=0,
         end_list=0,
-        cell_address_error="TableFormula Command property could not be read",
+        cell_address_error=_CELL_ADDRESS_INSPECTION_ERROR,
     )
 
     # When: formatting resolves the selected physical cells.
@@ -597,6 +710,60 @@ def test_table_format_reports_strict_cell_address_inspection_failure() -> None:
     assert isinstance(resolved, InputFailure)
     assert resolved.status == "schema_conflict"
     assert "TableFormula Command property" in resolved.message
+    _assert_no_address_guessing_guidance(resolved.message)
+
+
+def test_table_format_rejects_valid_list_ids_without_selection_evidence() -> None:
+    resolved = _resolve_selected_table_cells(
+        _prepared_table_format(rows=2, columns=2),
+        _snapshot(
+            3,
+            selected=False,
+            start_list=101,
+            end_list=104,
+        ),
+        _selected_table_detail(),
+    )
+
+    assert isinstance(resolved, InputFailure)
+    assert resolved.status == "schema_conflict"
+    assert resolved.message == "현재 선택한 표 셀 범위를 확인하지 못했습니다"
+    _assert_no_address_guessing_guidance(resolved.message)
+
+
+def test_table_format_rejects_selection_outside_large_target_table() -> None:
+    resolved = _resolve_selected_table_cells(
+        _prepared_table_format(),
+        _snapshot(
+            19,
+            start_list=9_999,
+            end_list=1_012,
+            cell_address_error=_CELL_ADDRESS_INSPECTION_ERROR,
+        ),
+        _large_selected_table_detail(),
+    )
+
+    assert isinstance(resolved, InputFailure)
+    assert resolved.status == "schema_conflict"
+    assert "선택 시작·끝 위치가 대상 표의 실제 셀에 없습니다" in resolved.message
+    assert _CELL_ADDRESS_INSPECTION_ERROR in resolved.message
+    _assert_no_address_guessing_guidance(resolved.message)
+
+
+def test_table_format_oversized_formula_failure_omits_address_guidance() -> None:
+    application = _FormulaApplication()
+
+    resolved = _resolve_selected_table_cells(
+        _prepared_table_format(),
+        _snapshot(19, selected=False, start_list=0, end_list=0),
+        _large_selected_table_detail(),
+        cast(HwpComApplication, cast(object, application)),
+    )
+
+    assert isinstance(resolved, InputFailure)
+    assert resolved.status == "schema_conflict"
+    assert "81셀" in resolved.message
+    _assert_no_address_guessing_guidance(resolved.message)
 
 
 def test_table_format_falls_back_to_safe_table_formula_addresses() -> None:
@@ -675,6 +842,36 @@ def test_table_rows_bind_to_the_selected_cell_block_and_preserve_its_bounds() ->
     assert selected == frozenset(("A1", "B1", "A2", "B2"))
 
 
+def test_table_rows_large_table_address_error_uses_list_ids() -> None:
+    detail = _large_selected_table_detail()
+    assert len(detail.cells) > 81
+
+    with (
+        patch(
+            "hwp_live_session_table_fill.read_native_snapshot",
+            return_value=_snapshot(
+                19,
+                start_list=1_001,
+                end_list=1_012,
+                cell_address_error=_CELL_ADDRESS_INSPECTION_ERROR,
+            ),
+        ),
+        patch(
+            "hwp_live_session_table_fill.inspect_native_structure",
+            return_value=detail,
+        ),
+    ):
+        bound_target, bound_data, selected = _bind_live_table_selection(
+            _table_fill_candidate(),
+            HwpOperateTarget(kind="table"),
+            HwpOperateData(rows=(("첫째", "둘째"), ("셋째", "넷째"))),
+        )
+
+    assert bound_target.control_instance_id == "table-selected"
+    assert bound_data.start_cell == "A1"
+    assert selected == frozenset(("A1", "B1", "A2", "B2"))
+
+
 def test_table_rows_use_strict_cell_addresses_when_text_positions_are_zero() -> None:
     # Given: HWP reports a B2:C3-style block only through its physical cell addresses.
     candidate = HwpDocumentCandidate(
@@ -741,22 +938,107 @@ def test_table_rows_report_strict_cell_address_inspection_failure() -> None:
         selected=False,
         start_list=0,
         end_list=0,
-        cell_address_error="TableFormula Command property could not be read",
+        cell_address_error=_CELL_ADDRESS_INSPECTION_ERROR,
     )
 
-    # When/Then: table fill stops with that exact native reason before guessing C4.
+    # When/Then: table fill stops with that exact native reason.
     with (
         patch(
             "hwp_live_session_table_fill.read_native_snapshot",
             return_value=snapshot,
         ),
-        pytest.raises(HwpLiveError, match="TableFormula Command property"),
+        patch(
+            "hwp_live_session_table_fill.inspect_native_structure",
+            return_value=_large_selected_table_detail(),
+        ),
+        pytest.raises(HwpLiveError) as exc_info,
     ):
-        _bind_live_table_selection(
+        _ = _bind_live_table_selection(
             candidate,
             HwpOperateTarget(kind="table"),
             HwpOperateData(rows=(("첫째", "둘째"), ("셋째", "넷째"))),
         )
+
+    assert "TableFormula Command property" in exc_info.value.reason
+    _assert_no_address_guessing_guidance(exc_info.value.reason)
+
+
+def test_table_rows_reject_valid_list_ids_without_selection_evidence() -> None:
+    with (
+        patch(
+            "hwp_live_session_table_fill.read_native_snapshot",
+            return_value=_snapshot(
+                3,
+                selected=False,
+                start_list=101,
+                end_list=104,
+            ),
+        ),
+        patch(
+            "hwp_live_session_table_fill.inspect_native_structure",
+            return_value=_selected_table_detail(),
+        ),
+        pytest.raises(HwpLiveError) as exc_info,
+    ):
+        _ = _bind_live_table_selection(
+            _table_fill_candidate(),
+            HwpOperateTarget(kind="table"),
+            HwpOperateData(rows=(("첫째", "둘째"), ("셋째", "넷째"))),
+        )
+
+    assert exc_info.value.reason == "현재 선택한 표 셀 범위를 확인하지 못했습니다"
+    _assert_no_address_guessing_guidance(exc_info.value.reason)
+
+
+def test_table_rows_reject_selection_outside_large_target_table() -> None:
+    with (
+        patch(
+            "hwp_live_session_table_fill.read_native_snapshot",
+            return_value=_snapshot(
+                19,
+                start_list=9_999,
+                end_list=1_012,
+                cell_address_error=_CELL_ADDRESS_INSPECTION_ERROR,
+            ),
+        ),
+        patch(
+            "hwp_live_session_table_fill.inspect_native_structure",
+            return_value=_large_selected_table_detail(),
+        ),
+        pytest.raises(HwpLiveError) as exc_info,
+    ):
+        _ = _bind_live_table_selection(
+            _table_fill_candidate(),
+            HwpOperateTarget(kind="table"),
+            HwpOperateData(rows=(("첫째", "둘째"), ("셋째", "넷째"))),
+        )
+
+    assert "선택 시작·끝 위치가 대상 표의 실제 셀에 없습니다" in exc_info.value.reason
+    assert _CELL_ADDRESS_INSPECTION_ERROR in exc_info.value.reason
+    _assert_no_address_guessing_guidance(exc_info.value.reason)
+
+
+def test_table_rows_oversized_formula_failure_omits_address_guidance() -> None:
+    application = _FormulaApplication()
+    with (
+        patch(
+            "hwp_live_session_table_fill.read_native_snapshot",
+            return_value=_snapshot(19, selected=False, start_list=0, end_list=0),
+        ),
+        patch(
+            "hwp_live_session_table_fill.inspect_native_structure",
+            return_value=_large_selected_table_detail(),
+        ),
+        pytest.raises(HwpLiveError) as exc_info,
+    ):
+        _ = _bind_live_table_selection(
+            _table_fill_candidate(application),
+            HwpOperateTarget(kind="table"),
+            HwpOperateData(rows=(("첫째", "둘째"), ("셋째", "넷째"))),
+        )
+
+    assert "81셀" in exc_info.value.reason
+    _assert_no_address_guessing_guidance(exc_info.value.reason)
 
 
 def test_table_rows_fall_back_to_safe_table_formula_addresses() -> None:

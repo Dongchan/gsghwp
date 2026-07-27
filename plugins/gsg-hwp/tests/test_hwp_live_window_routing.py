@@ -25,11 +25,14 @@ sys.path.insert(0, str(SCRIPTS))
 from hwp_live_native_batch import (  # noqa: E402
     NativeActivationCallError,
     _batch_for_window,
+    _invalidate_native_dispatch,
     _native_dispatch_state,
     _source_for_window,
     _Win32Client,
     activate_native_document,
     clear_native_document_route,
+    execute_native_actions,
+    inspect_native_pages,
     native_dispatch_cache_metrics,
     native_dispatch_operation_scope,
     read_native_snapshot,
@@ -46,6 +49,7 @@ from hwp_live_rot import (  # noqa: E402
 )
 from hwp_live_api import HwpComApplication, HwpComDocument  # noqa: E402
 from hwp_errors import HwpLiveError  # noqa: E402
+from hwp_live_native_action_models import NativeActionRequest  # noqa: E402
 
 
 @final
@@ -125,13 +129,43 @@ class _MutableProcess:
 
 
 @final
-class _DynamicBatch:
-    ProtocolVersion = 12
-    TargetDocumentID = 0
-
+class _UnexpectedProcess:
     def __init__(self) -> None:
+        self.fail = False
+
+    def GetWindowThreadProcessId(self, window_handle: int) -> tuple[int, int]:
+        _ = window_handle
+        if self.fail:
+            raise LookupError("unexpected PID lookup failure")
+        return 7, 1234
+
+
+@final
+class _DynamicBatch:
+    def __init__(
+        self,
+        *,
+        protocol_version: int = 12,
+        target_document_id: int = 0,
+    ) -> None:
+        self._protocol_version = protocol_version
+        self._target_document_id = target_document_id
+        self.protocol_version_reads = 0
+        self.target_document_id_reads = 0
         self.activated_document_id = 0
         self.fail_snapshot = False
+        self.missing_inspect_pages = False
+        self.snapshot_calls = 0
+
+    @property
+    def ProtocolVersion(self) -> int:
+        self.protocol_version_reads += 1
+        return self._protocol_version
+
+    @property
+    def TargetDocumentID(self) -> int:
+        self.target_document_id_reads += 1
+        return self._target_document_id
 
     def ActivateDocument(self, document_id: int) -> str:
         self.activated_document_id = document_id
@@ -149,6 +183,7 @@ class _DynamicBatch:
         return "{}"
 
     def Snapshot(self) -> str:
+        self.snapshot_calls += 1
         if self.fail_snapshot:
             raise RuntimeError("disconnected native batch")
         return "{}"
@@ -167,6 +202,8 @@ class _DynamicBatch:
 
     def InspectPagesV3(self, pages: str) -> str:
         _ = pages
+        if self.missing_inspect_pages:
+            raise AttributeError("InspectPagesV3")
         return "{}"
 
     def InspectRoutingContext(self, page_hint: int) -> str:
@@ -392,6 +429,8 @@ def test_native_batch_reuses_dispatch_for_the_same_short_lived_route() -> None:
     assert metrics.rot_scans == 1
     assert metrics.dispatch_creations == 1
     assert metrics.lookup_nanoseconds > 0
+    assert batch.protocol_version_reads == 1
+    assert batch.target_document_id_reads == 2
 
 
 def test_native_batch_cache_does_not_strongly_own_the_dispatch() -> None:
@@ -445,6 +484,116 @@ def test_native_batch_operation_scope_keeps_dispatch_after_first_call() -> None:
     assert first_ref() is None
 
 
+def test_native_batch_operation_scope_caches_dispatch_properties() -> None:
+    clear_native_document_route(5678)
+    rot = _Rot(("!HancomLiveBatch.1234.5678",))
+    batch = _DynamicBatch()
+    client = _BatchClient(batch)
+    pythoncom = _PythonCom(rot)
+    process = _Process()
+
+    with native_dispatch_operation_scope():
+        for _ in range(5):
+            selected = _batch_for_window(5678, 12, pythoncom, client, process)
+            assert selected is batch
+            assert batch.Snapshot() == "{}"
+
+    assert batch.snapshot_calls == 5
+    assert batch.protocol_version_reads == 1
+    assert batch.target_document_id_reads == 1
+
+
+def test_native_batch_target_document_mismatch_is_still_blocked() -> None:
+    rot = _Rot(("!HancomLiveBatch.1234.5678.42",))
+    batch = _DynamicBatch(target_document_id=43)
+    client = _BatchClient(batch)
+    select_native_document_route(5678, 42)
+    try:
+        with (
+            native_dispatch_operation_scope(),
+            pytest.raises(HwpLiveError, match="문서 ID가 대상과 다릅니다"),
+        ):
+            _ = _batch_for_window(
+                5678,
+                12,
+                _PythonCom(rot),
+                client,
+                _Process(),
+            )
+    finally:
+        clear_native_document_route(5678)
+
+    assert client.dispatch_calls == 1
+    assert batch.protocol_version_reads == 1
+    assert batch.target_document_id_reads == 1
+
+
+def test_native_batch_invalidation_rereads_dispatch_properties() -> None:
+    clear_native_document_route(5678)
+    rot = _Rot(("!HancomLiveBatch.1234.5678",))
+    batch = _DynamicBatch()
+    client = _BatchClient(batch)
+    pythoncom = _PythonCom(rot)
+    process = _Process()
+
+    with native_dispatch_operation_scope():
+        first = _batch_for_window(5678, 12, pythoncom, client, process)
+        _invalidate_native_dispatch(5678)
+        second = _batch_for_window(5678, 12, pythoncom, client, process)
+
+    assert first is batch
+    assert second is batch
+    assert client.dispatch_calls == 2
+    assert batch.protocol_version_reads == 2
+    assert batch.target_document_id_reads == 2
+
+
+def test_native_batch_target_cache_ends_with_operation_scope() -> None:
+    clear_native_document_route(5678)
+    rot = _Rot(("!HancomLiveBatch.1234.5678",))
+    batch = _DynamicBatch()
+    client = _BatchClient(batch)
+    pythoncom = _PythonCom(rot)
+    process = _Process()
+
+    with native_dispatch_operation_scope():
+        _ = _batch_for_window(5678, 12, pythoncom, client, process)
+        _ = _batch_for_window(5678, 12, pythoncom, client, process)
+
+    assert not any(key[1] == 5678 for key in _native_dispatch_state.operation_entries)
+
+    with native_dispatch_operation_scope():
+        _ = _batch_for_window(5678, 12, pythoncom, client, process)
+
+    assert batch.protocol_version_reads == 1
+    assert batch.target_document_id_reads == 2
+
+
+def test_nested_native_batch_scope_keeps_outer_target_cache() -> None:
+    clear_native_document_route(5678)
+    rot = _Rot(("!HancomLiveBatch.1234.5678",))
+    batch = _DynamicBatch()
+    client = _BatchClient(batch)
+    pythoncom = _PythonCom(rot)
+    process = _Process()
+
+    with native_dispatch_operation_scope():
+        first = _batch_for_window(5678, 12, pythoncom, client, process)
+        with native_dispatch_operation_scope():
+            second = _batch_for_window(5678, 12, pythoncom, client, process)
+        third = _batch_for_window(5678, 12, pythoncom, client, process)
+
+        assert any(key[1] == 5678 for key in _native_dispatch_state.operation_entries)
+
+    assert first is batch
+    assert second is batch
+    assert third is batch
+    assert client.dispatch_calls == 1
+    assert batch.protocol_version_reads == 1
+    assert batch.target_document_id_reads == 1
+    assert not any(key[1] == 5678 for key in _native_dispatch_state.operation_entries)
+
+
 def test_native_batch_route_change_invalidates_cached_dispatch() -> None:
     rot = _Rot(
         (
@@ -459,9 +608,18 @@ def test_native_batch_route_change_invalidates_cached_dispatch() -> None:
 
     select_native_document_route(5678, 41)
     try:
-        first = _batch_for_window(5678, 12, pythoncom, client, process)
-        select_native_document_route(5678, 42)
-        second = _batch_for_window(5678, 12, pythoncom, client, process)
+        with native_dispatch_operation_scope():
+            first = _batch_for_window(5678, 12, pythoncom, client, process)
+            assert any(
+                key[1] == 5678 for key in _native_dispatch_state.operation_entries
+            )
+
+            select_native_document_route(5678, 42)
+
+            assert not any(
+                key[1] == 5678 for key in _native_dispatch_state.operation_entries
+            )
+            second = _batch_for_window(5678, 12, pythoncom, client, process)
     finally:
         clear_native_document_route(5678)
 
@@ -472,6 +630,8 @@ def test_native_batch_route_change_invalidates_cached_dispatch() -> None:
         rot.sources["!HancomLiveBatch.1234.5678.41"],
         rot.sources["!HancomLiveBatch.1234.5678.42"],
     ]
+    assert batch.protocol_version_reads == 2
+    assert batch.target_document_id_reads == 2
 
 
 def test_native_batch_cache_is_scoped_to_the_sta_thread() -> None:
@@ -541,29 +701,27 @@ def test_native_batch_dispatch_expires_after_the_short_ttl() -> None:
     assert client.dispatch_calls == 2
 
 
-def test_native_batch_protocol_mismatch_invalidates_cached_dispatch() -> None:
+def test_native_batch_protocol_mismatch_invalidates_new_dispatch() -> None:
     clear_native_document_route(5678)
     rot = _Rot(("!HancomLiveBatch.1234.5678",))
-    batch = _DynamicBatch()
-    client = _BatchClient(batch)
+    low_batch = _DynamicBatch(protocol_version=11)
+    high_batch = _DynamicBatch(protocol_version=12)
+    client = _BatchClient(low_batch)
     pythoncom = _PythonCom(rot)
     process = _Process()
-    first = _batch_for_window(5678, 12, pythoncom, client, process)
-    batch.ProtocolVersion = 11
 
-    try:
+    with pytest.raises(HwpLiveError, match="프로토콜 버전"):
         _ = _batch_for_window(5678, 12, pythoncom, client, process)
-    except Exception as error:
-        assert "프로토콜 버전" in str(error)
-    else:
-        raise AssertionError("a stale protocol must invalidate the native cache")
 
-    batch.ProtocolVersion = 12
-    third = _batch_for_window(5678, 12, pythoncom, client, process)
+    client.batch = high_batch
+    second = _batch_for_window(5678, 12, pythoncom, client, process)
 
-    assert first is batch
-    assert third is batch
+    assert second is high_batch
     assert client.dispatch_calls == 2
+    assert low_batch.protocol_version_reads == 1
+    assert low_batch.target_document_id_reads == 0
+    assert high_batch.protocol_version_reads == 1
+    assert high_batch.target_document_id_reads == 1
 
 
 def test_native_call_failure_invalidates_cached_dispatch() -> None:
@@ -576,24 +734,175 @@ def test_native_call_failure_invalidates_cached_dispatch() -> None:
     pythoncom = _PythonCom(rot)
     process = _Process()
 
-    with patch(
-        "hwp_live_native_batch._modules",
-        return_value=(pythoncom, client, process),
+    with (
+        patch(
+            "hwp_live_native_batch._modules",
+            return_value=(pythoncom, client, process),
+        ),
+        native_dispatch_operation_scope(),
     ):
-        try:
+        with pytest.raises(HwpLiveError, match="현재 상태 조회"):
             _ = read_native_snapshot(5678)
-        except Exception as error:
-            assert "현재 상태 조회" in str(error)
-        else:
-            raise AssertionError("a disconnected batch must fail the snapshot")
 
-    batch.fail_snapshot = False
-    reconnected = _batch_for_window(5678, 12, pythoncom, client, process)
+        assert not any(
+            key[1] == 5678 for key in _native_dispatch_state.operation_entries
+        )
+
+        batch.fail_snapshot = False
+        reconnected = _batch_for_window(5678, 12, pythoncom, client, process)
+        assert any(key[1] == 5678 for key in _native_dispatch_state.operation_entries)
+
     metrics = native_dispatch_cache_metrics()
 
     assert reconnected is batch
     assert client.dispatch_calls == 2
-    assert metrics.invalidations >= 1
+    assert batch.protocol_version_reads == 2
+    assert batch.target_document_id_reads == 2
+    assert metrics.invalidations == 1
+
+
+def test_snapshot_decode_failure_invalidates_operation_cache() -> None:
+    clear_native_document_route(5678)
+    reset_native_dispatch_cache_metrics()
+    rot = _Rot(("!HancomLiveBatch.1234.5678",))
+    batch = _DynamicBatch()
+    client = _BatchClient(batch)
+    pythoncom = _PythonCom(rot)
+    process = _Process()
+
+    with (
+        patch(
+            "hwp_live_native_batch._modules",
+            return_value=(pythoncom, client, process),
+        ),
+        native_dispatch_operation_scope(),
+    ):
+        with pytest.raises(HwpLiveError, match="현재 상태 응답 형식"):
+            _ = read_native_snapshot(5678)
+
+        assert not any(
+            key[1] == 5678 for key in _native_dispatch_state.operation_entries
+        )
+        reconnected = _batch_for_window(5678, 12, pythoncom, client, process)
+
+    metrics = native_dispatch_cache_metrics()
+    assert reconnected is batch
+    assert batch.snapshot_calls == 1
+    assert client.dispatch_calls == 2
+    assert batch.protocol_version_reads == 2
+    assert batch.target_document_id_reads == 2
+    assert metrics.invalidations == 1
+
+
+def test_action_decode_failure_invalidates_operation_cache() -> None:
+    clear_native_document_route(5678)
+    reset_native_dispatch_cache_metrics()
+    rot = _Rot(("!HancomLiveBatch.1234.5678",))
+    batch = _DynamicBatch()
+    client = _BatchClient(batch)
+    pythoncom = _PythonCom(rot)
+    process = _Process()
+    request = cast(NativeActionRequest, object())
+
+    with (
+        patch(
+            "hwp_live_native_batch._modules",
+            return_value=(pythoncom, client, process),
+        ),
+        patch(
+            "hwp_live_native_batch.encode_action_request",
+            return_value="encoded action",
+        ),
+        patch(
+            "hwp_live_native_batch.decode_action_result",
+            side_effect=HwpLiveError("action decode failure"),
+        ),
+        native_dispatch_operation_scope(),
+    ):
+        with pytest.raises(HwpLiveError, match="action decode failure"):
+            _ = execute_native_actions(5678, request)
+
+        assert not any(
+            key[1] == 5678 for key in _native_dispatch_state.operation_entries
+        )
+        reconnected = _batch_for_window(5678, 12, pythoncom, client, process)
+
+    metrics = native_dispatch_cache_metrics()
+    assert reconnected is batch
+    assert client.dispatch_calls == 2
+    assert batch.protocol_version_reads == 2
+    assert batch.target_document_id_reads == 2
+    assert metrics.invalidations == 1
+
+
+def test_inspect_pages_attribute_fallback_invalidates_operation_cache() -> None:
+    clear_native_document_route(5678)
+    reset_native_dispatch_cache_metrics()
+    rot = _Rot(("!HancomLiveBatch.1234.5678",))
+    batch = _DynamicBatch()
+    batch.missing_inspect_pages = True
+    client = _BatchClient(batch)
+    pythoncom = _PythonCom(rot)
+    process = _Process()
+    fallback_page = object()
+
+    with (
+        patch(
+            "hwp_live_native_batch._modules",
+            return_value=(pythoncom, client, process),
+        ),
+        patch(
+            "hwp_live_native_batch.inspect_native_page",
+            return_value=fallback_page,
+        ) as fallback,
+        native_dispatch_operation_scope(),
+    ):
+        inspected = inspect_native_pages(5678, (1, 2))
+
+        assert inspected == (fallback_page, fallback_page)
+        assert fallback.call_count == 2
+        assert not any(
+            key[1] == 5678 for key in _native_dispatch_state.operation_entries
+        )
+        batch.missing_inspect_pages = False
+        reconnected = _batch_for_window(5678, 12, pythoncom, client, process)
+
+    metrics = native_dispatch_cache_metrics()
+    assert reconnected is batch
+    assert client.dispatch_calls == 2
+    assert batch.protocol_version_reads == 2
+    assert batch.target_document_id_reads == 2
+    assert metrics.invalidations == 1
+
+
+def test_unexpected_pid_error_invalidates_operation_cache() -> None:
+    clear_native_document_route(5678)
+    reset_native_dispatch_cache_metrics()
+    rot = _Rot(("!HancomLiveBatch.1234.5678",))
+    batch = _DynamicBatch()
+    client = _BatchClient(batch)
+    pythoncom = _PythonCom(rot)
+    process = _UnexpectedProcess()
+
+    with native_dispatch_operation_scope():
+        first = _batch_for_window(5678, 12, pythoncom, client, process)
+        process.fail = True
+        with pytest.raises(LookupError, match="unexpected PID lookup failure"):
+            _ = _batch_for_window(5678, 12, pythoncom, client, process)
+
+        assert not any(
+            key[1] == 5678 for key in _native_dispatch_state.operation_entries
+        )
+        process.fail = False
+        reconnected = _batch_for_window(5678, 12, pythoncom, client, process)
+
+    metrics = native_dispatch_cache_metrics()
+    assert first is batch
+    assert reconnected is batch
+    assert client.dispatch_calls == 2
+    assert batch.protocol_version_reads == 2
+    assert batch.target_document_id_reads == 2
+    assert metrics.invalidations == 1
 
 
 def test_rot_catalog_keeps_fallback_documents_missing_scoped_monikers() -> None:

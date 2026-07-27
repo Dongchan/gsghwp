@@ -242,9 +242,10 @@ def test_public_padding_reaches_recipe_range_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parameters = anyio.run(_public_padding_parameters)
+    # alignment/vertical_alignment are omitted while they are "inherit": a
+    # neutral key is not a formatting request. parse_table_format defaults both
+    # back to "inherit", so the parsed spec below is unchanged.
     assert parameters == {
-        "alignment": "inherit",
-        "vertical_alignment": "inherit",
         "padding_left_mm": 1.1,
         "padding_right_mm": 1.2,
         "padding_top_mm": 0.3,
@@ -316,11 +317,7 @@ def test_public_padding_reaches_recipe_range_command(
 
 def test_omitted_public_padding_preserves_the_previous_command_sequence() -> None:
     parameters = anyio.run(_public_no_padding_parameters)
-    assert parameters == {
-        "alignment": "inherit",
-        "vertical_alignment": "inherit",
-        "font_size_pt": 9.0,
-    }
+    assert parameters == {"font_size_pt": 9.0}
     parsed = parse_table_format(parameters)
     assert isinstance(parsed, TableFormatSpec)
     assert parsed.formatting.padding is None

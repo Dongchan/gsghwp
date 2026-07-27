@@ -215,7 +215,7 @@ def transport_error_result(
     error: HwpLiveError,
     *,
     intent: str | None = None,
-    mutation_started: bool = True,
+    mutation_started: bool | None = None,
 ) -> OperationResult:
     workflow = canonical_workflow(inputs)
     reason_tokens = _reason_tokens(error.reason)
@@ -238,13 +238,21 @@ def transport_error_result(
     pre_mutation_marker = _is_internal_pre_mutation_wrapper(error) or (
         structured_transport and "mutation_started=false" in reason_tokens
     )
-    effective_mutation_started = mutation_started and not pre_mutation_marker
+    if mutation_started is False:
+        mutation_evidence = False
+    elif error.mutation_started is not None:
+        mutation_evidence = error.mutation_started
+    elif pre_mutation_marker:
+        mutation_evidence = False
+    else:
+        mutation_evidence = mutation_started
+    conservative_change = mutation_evidence is not False
     return OperationResult(
         status="transport_error",
-        changed=effective_mutation_started,
+        changed=conservative_change,
         verified=False,
         retry_safe=(
-            not effective_mutation_started
+            not conservative_change
             and not reconcile_required
             and not dialog_user_action_required
         ),
@@ -260,10 +268,11 @@ def transport_error_result(
             else "process_lost"
             if target_process_lost
             else "transport"
-            if effective_mutation_started
+            if conservative_change
             else "connection"
         ),
-        partial_change=effective_mutation_started,
+        partial_change=conservative_change,
+        partial_mutation=mutation_evidence,
         missing_fields=(),
         target_candidates=(),
         next_tool=None,

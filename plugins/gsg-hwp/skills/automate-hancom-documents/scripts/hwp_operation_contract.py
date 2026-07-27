@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, JsonValue, RootModel
+from pydantic.json_schema import SkipJsonSchema
 
 from hwp_live_contract import LayoutPlan
 from hwp_live_native_action_models import NativeActionCommand
@@ -422,6 +423,42 @@ class OperationResult(OperationRouteMetadata):
     blocks_applied: int | None = Field(default=None, ge=0)
     created_control_ids: tuple[str, ...] = Field(default=(), max_length=500)
     updated_addresses: tuple[str, ...] = Field(default=(), max_length=20_000)
+    # 실제로 바뀐 쪽의 근거. 작업이 "이 쪽이 바뀌었다"를 관측했을 때만 채운다.
+    # 비어 있으면 범위를 모른다는 뜻이고, 공개 응답은 종전대로 커서 쪽만 보고한다.
+    # 공개 상한(500)보다 넉넉하게 받아 두고 잘라내는 판단은 공개 계약에서 한다.
+    # OperationResult 는 hwp_get_operation_status 의 outputSchema 이고 그 스키마는
+    # additionalProperties=false 다. 이 필드는 PublicActionResult.affected_pages 를
+    # 채우기 위한 내부 근거일 뿐이므로 스키마(SkipJsonSchema)에서도 직렬화
+    # (exclude)에서도 빼 둔다. 둘 중 하나만 빼면 응답이 제 스키마를 위반한다.
+    changed_pages: SkipJsonSchema[tuple[int, ...]] = Field(
+        default=(),
+        exclude=True,
+        max_length=20_000,
+    )
+
+
+def page_growth_evidence(
+    *,
+    before_page_count: int | None,
+    after_page_count: int | None,
+    current_page: int | None,
+) -> tuple[int, ...]:
+    """쪽 수가 늘어난 작업의 근거 있는 변경 쪽.
+
+    전에 없던 쪽은 지금 있으면 반드시 이 작업이 만든 것이다. 반대로 기존 쪽이
+    바뀌었는지는 쪽 수만으로 알 수 없으므로 넣지 않는다. 넓게 부르지 않는다.
+    커서 쪽은 이미 지금도 보고하고 있으므로 합쳐도 새 주장이 늘지 않는다.
+    """
+    pages: set[int] = set()
+    if current_page is not None:
+        pages.add(current_page)
+    if (
+        before_page_count is not None
+        and after_page_count is not None
+        and after_page_count > before_page_count
+    ):
+        pages.update(range(before_page_count + 1, after_page_count + 1))
+    return tuple(sorted(pages))
 
 
 @dataclass(frozen=True, slots=True)

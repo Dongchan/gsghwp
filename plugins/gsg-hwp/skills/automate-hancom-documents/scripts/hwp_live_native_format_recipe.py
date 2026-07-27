@@ -2,6 +2,8 @@ from __future__ import annotations
 
 # noqa: E501  # noqa: SIZE_OK — native format state machine; splitting obscures mutation ordering
 
+from dataclasses import replace
+
 from hwp_errors import HwpLiveError
 from hwp_live_api import HwpComApplication
 from hwp_live_native_action_contract import NativeActionFailure
@@ -29,13 +31,19 @@ from hwp_live_native_format_commands import (
 )
 from hwp_live_native_format_contract import (
     NativeFormatRecipeRequest as NativeFormatRecipeRequest,
+    NativeFormatWorkflow,
     PreparedFormatOperation,
     is_native_format_workflow,
 )
-from hwp_live_native_format_inputs import InputFailure, table_cell_coordinate
+from hwp_live_native_format_inputs import (
+    InputFailure,
+    MergeSpec,
+    table_cell_coordinate,
+)
 from hwp_live_native_history import execute_native_history
 from hwp_live_native_format_prepare import (
     PreparationFailure,
+    has_explicit_table_locator,
     prepare_native_format_operation,
 )
 from hwp_live_native_table_topology import (
@@ -45,7 +53,11 @@ from hwp_live_native_table_topology import (
     verify_split_preflight,
     verify_split_transition,
 )
-from hwp_live_native_format_target import TargetFailure
+from hwp_live_native_format_target import (
+    NativeTableTargetRequest,
+    TargetFailure,
+    resolve_native_table_target,
+)
 from hwp_live_text_format_verification import verify_text_format
 from hwp_operation_certification import certified_recipe
 from hwp_operation_contract import OperationResult, OperationStatus
@@ -149,6 +161,10 @@ def _verify_structural_plan(
         if before_detail is None:
             raise HwpLiveError("표 구조 변경 전 대상 표의 실제 셀 구조가 없습니다")
         before_topology = table_topology(before_detail, table.instance_id)
+        # Only a CellTopology we actually read back proves this call mutated the
+        # table. Without that proof the Undo below may have reverted an earlier,
+        # unrelated edit instead, so no "unchanged" claim may be made.
+        observed_mutation = False
         try:
             detail = inspect_native_structure(window_handle, after_page)
             if detail is None or not any(
@@ -158,6 +174,7 @@ def _verify_structural_plan(
                     "표 구조 변경 후 대상 표를 네이티브 구조에서 확인하지 못했습니다"
                 )
             after_topology = table_topology(detail, table.instance_id)
+            observed_mutation = after_topology != before_topology
             if isinstance(plan, MergeCommandPlan):
                 verify_merge_transition(
                     before_topology,
@@ -182,11 +199,141 @@ def _verify_structural_plan(
                 raise HwpLiveError(
                     f"{verification_error}. 자동 Undo 복구 검증에도 실패했습니다: {rollback_error}"
                 ) from rollback_error
+            if not observed_mutation:
+                raise HwpLiveError(
+                    f"{verification_error}. 자동 Undo를 실행했지만 이 호출이 표를"
+                    " 바꿨다는 네이티브 증거가 없어 변경 여부를 확정하지 못했습니다"
+                ) from verification_error
             raise HwpLiveError(
                 f"{verification_error}. 자동 Undo로 작업 전 표 구조를 복구했습니다"
+                "; mutation_started=false; 문서는 작업 전 상태입니다",
+                mutation_started=False,
             ) from verification_error
         return
     return
+
+
+def _selected_structure_addresses(
+    request: NativeFormatRecipeRequest,
+    before: NativeSnapshot,
+) -> tuple[str, ...] | InputFailure:
+    """Cell addresses the live selection covers inside the target table.
+
+    This resolves, it does not validate. The only judgement is made by
+    ``TableTopology.selection_region_by_list_ids``, the same function an
+    explicit address pair reaches through ``topology_preflight``: it already
+    refuses a selection whose endpoints are not cells of this table (selection
+    outside the table, or spanning two tables) and a region that is not a
+    gap-free rectangle. Adding a second copy of those rules here would let the
+    selection path drift away from the address path, so there is none.
+
+    An empty result means the selection cannot supply what the caller omitted.
+    Nothing is rejected for that; the request is left exactly as it arrived so
+    the ordinary missing-input failure reports it.
+    """
+    resolved = resolve_native_table_target(
+        NativeTableTargetRequest(
+            candidate=request.candidate,
+            routing_page=request.routing_page,
+            target=request.target,
+            snapshot_control_type=before.control_type,
+            snapshot_control_id=before.control_instance_id,
+        )
+    )
+    if isinstance(resolved, TargetFailure):
+        # prepare_native_format_operation resolves the same target and reports
+        # this failure itself, so it is not duplicated here.
+        return ()
+    detail = inspect_native_structure(request.candidate.window_handle, resolved.page)
+    if detail is None:
+        return ()
+    selection = before.selection
+    try:
+        return table_topology(
+            detail,
+            resolved.instance_id,
+        ).selection_region_by_list_ids(
+            selection.start.list_id,
+            selection.end.list_id,
+        )
+    except HwpLiveError as error:
+        return InputFailure("schema_conflict", str(error))
+
+
+def _request_with_selected_cells(
+    workflow: NativeFormatWorkflow,
+    request: NativeFormatRecipeRequest,
+    before: NativeSnapshot,
+) -> NativeFormatRecipeRequest | InputFailure:
+    """Fill omitted merge/split cell addresses from the live cell selection.
+
+    Addresses the caller supplied are never touched, so a request that carries
+    them takes byte-identical parameters into
+    ``prepare_native_format_operation``.
+    """
+    if workflow == "table.merge_cells":
+        if "start" in request.parameters or "end" in request.parameters:
+            return request
+    elif workflow == "table.split_cells":
+        if "cell" in request.parameters:
+            return request
+    else:
+        return request
+    region = _selected_structure_addresses(request, before)
+    if isinstance(region, InputFailure):
+        return region
+    if not region:
+        return request
+    if workflow == "table.merge_cells":
+        # A caret with no cell block resolves to one cell, so start equals end
+        # and parse_merge rejects it exactly as it rejects a caller that sent
+        # the same address twice.
+        added = {"start": region[0], "end": region[-1]}
+    elif len(region) == 1:
+        added = {"cell": region[0]}
+    else:
+        # A multi-cell selection does not name the one cell a split applies to.
+        # Nothing is injected, so parse_split reports the missing input.
+        return request
+    return replace(request, parameters={**request.parameters, **added})
+
+
+def _normalized_merge_plan(
+    prepared: PreparedFormatOperation,
+    before_detail: NativeDetailedInspection,
+) -> PreparedFormatOperation | InputFailure:
+    """Restore the rectangle when the two merge corners arrive back to front.
+
+    A merged cell covers slots its own address never names, so the rectangle
+    cannot be recovered by sorting the two address strings. The corners are
+    resolved against the live CellTopology instead, which rejects anything that
+    is not a gap-free rectangle of whole cells.
+    """
+    plan = prepared.plan
+    assert isinstance(plan, MergeCommandPlan)
+    start, end = plan.merge.start, plan.merge.end
+    start_row, start_column = table_cell_coordinate(start)
+    end_row, end_column = table_cell_coordinate(end)
+    if end_row >= start_row and end_column >= start_column:
+        return prepared
+    try:
+        region = table_topology(
+            before_detail,
+            plan.table.instance_id,
+        ).selection_region_by_addresses((start, end))
+    except HwpLiveError as error:
+        return InputFailure("schema_conflict", str(error))
+    if len(region) < 2:
+        return InputFailure(
+            "schema_conflict",
+            "병합 시작·끝 주소가 서로 다른 두 셀을 덮지 않습니다",
+        )
+    return PreparedFormatOperation(
+        MergeCommandPlan(MergeSpec(region[0], region[-1]), plan.table),
+        prepared.target_id,
+        prepared.target_basis,
+        (region[0], region[-1]),
+    )
 
 
 def topology_preflight(
@@ -213,52 +360,77 @@ def topology_preflight(
     return None
 
 
+def _selected_cells_failure(
+    error: HwpLiveError,
+    cell_address_error: str,
+) -> HwpLiveError:
+    reason = error.reason.partition(" 표 서식은 ")[0].rstrip()
+    native_reason = cell_address_error.strip()
+    if native_reason and native_reason not in reason:
+        reason = f"{reason}. 네이티브 셀 주소 검사 오류: {native_reason}"
+    return HwpLiveError(reason, mutation_started=error.mutation_started)
+
+
 def _resolve_selected_table_cells(
     prepared: PreparedFormatOperation,
     before: NativeSnapshot,
     detail: NativeDetailedInspection,
     application: HwpComApplication | None = None,
+    *,
+    explicit_target: bool = False,
 ) -> PreparedFormatOperation | InputFailure:
     plan = prepared.plan
     if not isinstance(plan, TableFormatCommandPlan) or plan.cells:
         return prepared
+    selection_mode = before.selection.mode
+    base_mode = selection_mode & 0x0F
+    strict_selection = bool(selection_mode & 0x10)
     try:
         topology = table_topology(detail, plan.table.instance_id)
-        selection_mode = before.selection.mode
-        if selection_mode == 0 and application is not None:
-            selection_mode = int(application.SelectionMode)
-        base_mode = selection_mode & 0x0F
-        strict_selection = bool(selection_mode & 0x10)
-        if base_mode == 3:
-            if before.selection.cell_addresses:
-                addresses = topology.selection_region_by_addresses(
-                    before.selection.cell_addresses
-                )
-            elif before.selection.cell_address_error:
-                raise HwpLiveError(before.selection.cell_address_error)
-            elif before.selection.selected:
-                addresses = topology.selection_region_by_list_ids(
-                    before.selection.start.list_id,
-                    before.selection.end.list_id,
-                )
-            elif strict_selection and application is not None:
-                addresses = table_formula_selection_region(application, topology)
-            else:
-                addresses = topology.selection_region_by_list_ids(
-                    before.selection.start.list_id,
-                    before.selection.end.list_id,
-                )
-        elif base_mode == 4 and before.control_type == "tbl":
+        if explicit_target:
             addresses = tuple(cell.address for cell in topology.cells)
         else:
-            return InputFailure(
-                "needs_input",
-                "현재 선택한 표 셀 범위를 확인하지 못했습니다",
-                ("inputs.parameters.cell",),
-            )
+            if selection_mode == 0 and application is not None:
+                selection_mode = int(application.SelectionMode)
+                base_mode = selection_mode & 0x0F
+                strict_selection = bool(selection_mode & 0x10)
+            if base_mode == 3:
+                if before.selection.cell_addresses:
+                    addresses = topology.selection_region_by_addresses(
+                        before.selection.cell_addresses
+                    )
+                elif before.selection.selected:
+                    addresses = topology.selection_region_by_list_ids(
+                        before.selection.start.list_id,
+                        before.selection.end.list_id,
+                    )
+                elif before.selection.cell_address_error:
+                    raise HwpLiveError(before.selection.cell_address_error)
+                elif strict_selection and application is not None:
+                    addresses = table_formula_selection_region(application, topology)
+                else:
+                    raise HwpLiveError("현재 선택한 표 셀 범위를 확인하지 못했습니다")
+            elif base_mode == 4 and before.control_type == "tbl":
+                addresses = tuple(cell.address for cell in topology.cells)
+            else:
+                return InputFailure(
+                    "needs_input",
+                    "현재 선택한 표 셀 범위를 확인하지 못했습니다",
+                    ("inputs.parameters.cell",),
+                )
     except HwpLiveError as error:
+        if not explicit_target and base_mode == 3:
+            error = _selected_cells_failure(
+                error,
+                before.selection.cell_address_error,
+            )
         return InputFailure("schema_conflict", str(error))
     if not addresses:
+        if explicit_target:
+            return InputFailure(
+                "schema_conflict",
+                "지정한 표의 실제 셀 주소를 네이티브 topology에서 확인하지 못했습니다",
+            )
         return InputFailure(
             "needs_input",
             "현재 선택한 표 셀이 없습니다",
@@ -516,6 +688,29 @@ def _with_topology_cell_geometry_targets(
     )
 
 
+def _pre_mutation_failure(
+    request: NativeFormatRecipeRequest,
+    before: NativeSnapshot,
+    prepared: PreparedFormatOperation,
+    failure: InputFailure,
+) -> OperationResult:
+    """Envelope for a rejection raised before any native command ran."""
+    return _failure_result(request, failure).model_copy(
+        update={
+            "verified": False,
+            "commands_executed": 0,
+            "commands_completed": 0,
+            "current_page": before.current_page,
+            "page_count": before.page_count,
+            "modified": before.modified,
+            "partial_mutation": False,
+            "retry_safe": True,
+            "resolved_target_id": prepared.target_id,
+            "target_resolution_basis": prepared.target_basis,
+        }
+    )
+
+
 def _failed_table_format_batch(
     request: NativeFormatRecipeRequest,
     before: NativeSnapshot,
@@ -706,22 +901,10 @@ def _execute_prepared(
             before,
             before_detail,
             request.candidate.application,
+            explicit_target=has_explicit_table_locator(request),
         )
         if isinstance(selected, InputFailure):
-            return _failure_result(request, selected).model_copy(
-                update={
-                    "verified": False,
-                    "commands_executed": 0,
-                    "commands_completed": 0,
-                    "current_page": before.current_page,
-                    "page_count": before.page_count,
-                    "modified": before.modified,
-                    "partial_mutation": False,
-                    "retry_safe": True,
-                    "resolved_target_id": prepared.target_id,
-                    "target_resolution_basis": prepared.target_basis,
-                }
-            )
+            return _pre_mutation_failure(request, before, prepared, selected)
         prepared = selected
         plan = prepared.plan
     if (
@@ -745,22 +928,15 @@ def _execute_prepared(
         plan = prepared.plan
     if isinstance(plan, (MergeCommandPlan, SplitCommandPlan)):
         assert before_detail is not None
+        if isinstance(plan, MergeCommandPlan):
+            normalized = _normalized_merge_plan(prepared, before_detail)
+            if isinstance(normalized, InputFailure):
+                return _pre_mutation_failure(request, before, prepared, normalized)
+            prepared = normalized
+            plan = prepared.plan
         preflight = topology_preflight(prepared, before_detail)
         if preflight is not None:
-            return _failure_result(request, preflight).model_copy(
-                update={
-                    "verified": False,
-                    "commands_executed": 0,
-                    "commands_completed": 0,
-                    "current_page": before.current_page,
-                    "page_count": before.page_count,
-                    "modified": before.modified,
-                    "partial_mutation": False,
-                    "retry_safe": True,
-                    "resolved_target_id": prepared.target_id,
-                    "target_resolution_basis": prepared.target_basis,
-                }
-            )
+            return _pre_mutation_failure(request, before, prepared, preflight)
     if isinstance(plan, TableFormatCommandPlan):
         executed = _execute_table_format_batches(
             request,
@@ -853,6 +1029,10 @@ def operate_native_format_recipe(
     before = read_native_snapshot(request.candidate.window_handle)
     if before is None:
         raise HwpLiveError("네이티브 서식 작업 전 문서 상태를 읽지 못했습니다")
+    selected = _request_with_selected_cells(workflow, request, before)
+    if isinstance(selected, InputFailure):
+        return _failure_result(request, selected)
+    request = selected
     prepared = prepare_native_format_operation(workflow, request, before)
     if isinstance(prepared, (InputFailure, TargetFailure)):
         return _failure_result(request, prepared)

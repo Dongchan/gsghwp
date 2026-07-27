@@ -31,7 +31,12 @@ _SERIES_LABELS = (
     "현황사진",
     "분석결과",
 )
+_MIN_SERIES_SIGNATURE_LABELS = len(_SERIES_LABELS) - 2
 _MAX_CONSECUTIVE_MISSES = 3
+
+
+class AmbiguousTableSeriesError(HwpLiveError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,9 +64,47 @@ def required_series_page(
     return inspected
 
 
-def _has_series_labels(text: str) -> bool:
-    compact = re.sub(r"\s+", "", text)
-    return all(label in compact for label in _SERIES_LABELS)
+def _compact_text(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
+def _series_labels(text: str) -> frozenset[str]:
+    compact = _compact_text(text)
+    return frozenset(label for label in _SERIES_LABELS if label in compact)
+
+
+def _table_series_labels(
+    page: NativePageInspection,
+    table_instance_id: str,
+) -> frozenset[str]:
+    return frozenset(
+        label
+        for cell in page.cells
+        if cell.table_instance_id == table_instance_id
+        for label in _series_labels(cell.text)
+    )
+
+
+def _required_series_signature(
+    page: NativePageInspection,
+    table_instance_id: str,
+) -> tuple[str, ...]:
+    labels = _table_series_labels(page, table_instance_id)
+    missing = tuple(label for label in _SERIES_LABELS if label not in labels)
+    if missing:
+        labels = "·".join(missing)
+        raise HwpLiveError(
+            f"동기화 원본 표 셀에서 시리즈 구조 라벨을 찾지 못했습니다: {labels}"
+        )
+    return tuple(label for label in _SERIES_LABELS if label in labels)
+
+
+def _matches_series_signature(
+    page: NativePageInspection,
+    table_instance_id: str,
+    signature: tuple[str, ...],
+) -> bool:
+    return set(signature).issubset(_table_series_labels(page, table_instance_id))
 
 
 def read_series_page_texts(
@@ -116,6 +159,10 @@ def discover_table_series(
     )
     if len(sources) != 1 or sources[0].rows is None or sources[0].columns is None:
         raise HwpLiveError("동기화 원본 표의 행·열 구조를 하나로 찾지 못했습니다")
+    source_signature = _required_series_signature(
+        source_page,
+        sources[0].instance_id,
+    )
     source_rows = sources[0].rows
     allowed_rows = {source_rows - block.delete_row_count for block in plan.blocks}
     allowed_rows.add(source_rows)
@@ -136,12 +183,18 @@ def discover_table_series(
     consecutive_misses = 0
     for page_number in range(plan.source_page + 1, last_page + 1):
         page_text = page_texts.get(page_number, "")
-        if _has_series_labels(page_text):
+        page_labels = _series_labels(page_text)
+        if len(page_labels) == len(_SERIES_LABELS):
             candidate_pages.append(page_number)
             consecutive_misses = 0
             if len(candidate_pages) >= len(plan.blocks) - 1:
                 break
             continue
+        if len(page_labels) >= _MIN_SERIES_SIGNATURE_LABELS:
+            raise AmbiguousTableSeriesError(
+                f"{page_number}쪽에서 시리즈 라벨 일부만 확인되어 기존 표 여부를 "
+                + "확정할 수 없습니다"
+            )
         consecutive_misses += 1
         if consecutive_misses >= _MAX_CONSECUTIVE_MISSES:
             break
@@ -151,13 +204,50 @@ def discover_table_series(
         include_cells=True,
     )
     for detailed in detailed_pages:
-        controls = tuple(
+        shaped_controls = tuple(
             control
             for control in detailed.controls
             if control.control_type == "tbl"
             and control.rows in allowed_rows
             and control.columns == sources[0].columns
         )
+        controls = tuple(
+            control
+            for control in shaped_controls
+            if _matches_series_signature(
+                detailed,
+                control.instance_id,
+                source_signature,
+            )
+        )
+        partial_controls = tuple(
+            control
+            for control in shaped_controls
+            if control not in controls
+            and len(_table_series_labels(detailed, control.instance_id))
+            >= _MIN_SERIES_SIGNATURE_LABELS
+        )
+        if len(controls) > 1 or partial_controls:
+            ambiguous_controls = (*controls, *partial_controls)
+            control_ids = ", ".join(
+                control.instance_id
+                for control in sorted(
+                    ambiguous_controls,
+                    key=lambda item: (
+                        item.anchor.paragraph,
+                        item.anchor.character,
+                    ),
+                )
+            )
+            raise AmbiguousTableSeriesError(
+                f"{detailed.page}쪽에서 시리즈 표 후보를 하나로 확정할 수 없습니다: "
+                + control_ids
+            )
+        if not controls:
+            raise AmbiguousTableSeriesError(
+                f"{detailed.page}쪽 본문에서 시리즈 라벨을 찾았지만 어느 표에 "
+                + "속하는지 확정할 수 없습니다"
+            )
         found.extend(
             DiscoveredSeriesTable(detailed, control)
             for control in sorted(

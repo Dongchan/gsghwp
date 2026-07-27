@@ -44,7 +44,11 @@ from hwp_live_safety import (
     require_writable_document,
     run_layout_mutation,
 )
-from hwp_operation_contract import OperationResult, OperationStatus
+from hwp_operation_contract import (
+    OperationResult,
+    OperationStatus,
+    page_growth_evidence,
+)
 from hwp_reference_layout_geometry import (
     MILLIMETERS_PER_INCH,
     HWPUNITS_PER_INCH,
@@ -615,6 +619,13 @@ def operate_layout(
             "created_control_ids": native.created_control_ids,
             "current_page": after.current_page,
             "page_count": after.page_count,
+            # 전에 없던 쪽은 이 배치가 만든 것이다. 커서가 마지막 쪽에 있다고 해서
+            # 마지막 쪽만 바뀐 게 아니다.
+            "changed_pages": page_growth_evidence(
+                before_page_count=before.page_count,
+                after_page_count=after.page_count,
+                current_page=after.current_page,
+            ),
             "modified": after.modified,
             "retry_safe": verified,
             "partial_mutation": False if verified else True,

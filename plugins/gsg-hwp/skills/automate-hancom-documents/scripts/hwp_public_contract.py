@@ -287,6 +287,35 @@ def _input_guidance(
     )
 
 
+_MAXIMUM_AFFECTED_PAGES = 500
+
+
+def _affected_pages(result: OperationResult, modified: bool) -> tuple[int, ...]:
+    """실제로 바뀐 쪽. 근거가 없으면 종전대로 커서 쪽만 보고한다.
+
+    변경 여부 판정은 종전과 같다. 바뀌지 않은 작업은 근거가 남아 있어도 빈 목록이다.
+    """
+    if not (modified or result.changed or result.reconcile_required):
+        return ()
+    if result.changed_pages:
+        return tuple(sorted(set(result.changed_pages)))
+    return () if result.current_page is None else (result.current_page,)
+
+
+def _truncation_note(pages: tuple[int, ...]) -> str:
+    """상한을 넘겨 잘라냈다는 사실을 응답 본문으로 알린다.
+
+    조용히 500개로 자르면 모델은 그 뒤 쪽을 "안 바뀐 쪽"으로 오해한다. 지금 고치는
+    결함과 같은 종류의 거짓말이므로, 구조화 필드는 스키마를 지키되 잘린 범위는 말한다.
+    """
+    return (
+        f" 변경된 쪽이 {len(pages)}개로 affected_pages 상한 "
+        f"{_MAXIMUM_AFFECTED_PAGES}개를 넘어 앞쪽 {_MAXIMUM_AFFECTED_PAGES}개만 "
+        f"담았습니다. 실제 변경 범위는 {pages[0]}~{pages[-1]}쪽이며 "
+        f"{pages[_MAXIMUM_AFFECTED_PAGES]}쪽부터는 목록에서 빠졌습니다."
+    )
+
+
 def _affected_target_ids(
     result: OperationResult,
     selected_target_id: str | None,
@@ -345,12 +374,12 @@ def to_public_action_result(
         else result.retry_safe
     )
     selected_id = selected_target_id or result.resolved_target_id
-    affected_pages = (
-        (result.current_page,)
-        if result.current_page is not None
-        and (modified or result.changed or result.reconcile_required)
-        else ()
-    )
+    affected_pages = _affected_pages(result, modified)
+    message = _public_message(result)
+    if len(affected_pages) > _MAXIMUM_AFFECTED_PAGES:
+        note = _truncation_note(affected_pages)
+        affected_pages = affected_pages[:_MAXIMUM_AFFECTED_PAGES]
+        message = message[: 4_000 - len(note)] + note
     state_token = (
         result.structure_digest_after
         or result.after_document_hash
@@ -390,7 +419,7 @@ def to_public_action_result(
     )
     return PublicActionResult(
         status=status,
-        message=_public_message(result),
+        message=message,
         request_id=result.request_id,
         idempotency_status=result.idempotency_status,
         runtime=result.runtime,

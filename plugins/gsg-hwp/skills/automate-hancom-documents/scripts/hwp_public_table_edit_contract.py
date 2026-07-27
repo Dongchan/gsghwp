@@ -38,10 +38,18 @@ class PublicTableFormattingInput(ContractModel):
     border_color: PublicTableColor | None = None
 
     def to_parameters(self) -> Mapping[str, OperationInputValue]:
-        parameters: dict[str, OperationInputValue] = {
-            "alignment": self.alignment,
-            "vertical_alignment": self.vertical_alignment,
-        }
+        # "inherit" means "change nothing". Emitting these two keys even then
+        # made every request carry a formatting parameter, which defeated the
+        # empty-request guard in hwp_live_native_format_inputs.parse_table_format
+        # (`has_format`): a request with nothing to apply ran SelectControl and
+        # Capture with no setter, then reported every cell as updated and
+        # verified. parse_table_format defaults both back to "inherit" when the
+        # key is absent, so omitting them changes nothing for real requests.
+        parameters: dict[str, OperationInputValue] = {}
+        if self.alignment != "inherit":
+            parameters["alignment"] = self.alignment
+        if self.vertical_alignment != "inherit":
+            parameters["vertical_alignment"] = self.vertical_alignment
         if self.cell is not None:
             parameters["cell"] = self.cell.upper()
         if self.row_height_mm is not None:

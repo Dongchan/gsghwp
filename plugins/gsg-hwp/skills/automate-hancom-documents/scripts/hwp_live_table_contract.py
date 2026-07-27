@@ -267,6 +267,14 @@ class TableBlock(ContractModel):
     base_style_name: str | None = Field(default=None, min_length=1, max_length=100)
     caption_style_id: int | None = Field(default=None, ge=0, le=4095)
     base_style_id: int | None = Field(default=None, ge=0, le=4095)
+    # 50 의 근거는 ReferenceLayoutValidation.cpp:27 이다. 네이티브가 표 모양에
+    # 두는 유일한 명시 상한이고 행·열 모두 1..50 이다.
+    # 주의: TableBlock 은 참조 레이아웃이 아니라 TableCreate/HTableCreation 로
+    # 만들어지며(hwp_live_native_table_layout.py:61), 그 경로에는 50 검사가 없다.
+    # 그 경로의 진짜 천장은 CellTopology.cpp:13 kMaximumPhysicalSlots(200,000)
+    # 물리 슬롯이다. 50 을 넘기려면 그 근거만으로는 부족하다 — TableMerge 의
+    # row/column(ge=0 le=49)·span(le=50), LayoutPlan 셀 예산, 그리고 셀당 명령
+    # 수가 함께 움직여야 한다. 근거가 갖춰지기 전까지 50 을 유지한다.
     rows: tuple[tuple[TableCell, ...], ...] = Field(min_length=1, max_length=50)
     column_widths_mm: tuple[float, ...] | None = None
     column_width_weights: tuple[float, ...] | None = None
@@ -297,6 +305,7 @@ class TableBlock(ContractModel):
                 "caption must contain only the title; HWP inserts the table number"
             )
         columns = len(self.rows[0])
+        # rows 와 같은 근거: ReferenceLayoutValidation.cpp:27 의 열 상한 50.
         if columns < 1 or columns > 50:
             raise ValueError("table must contain 1 to 50 columns")
         if any(len(row) != columns for row in self.rows):

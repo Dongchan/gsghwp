@@ -109,6 +109,7 @@ def _read_preceding_caption_source(
     page: int,
     table_positions: tuple[NativePosition, ...],
 ) -> TableCaptionFormatSource | None:
+    scanned_paragraph_pages: dict[tuple[int, int], int] = {}
     for table_position in sorted(
         table_positions,
         key=lambda position: (
@@ -119,31 +120,34 @@ def _read_preceding_caption_source(
         reverse=True,
     ):
         for paragraph in range(table_position.paragraph - 1, -1, -1):
+            paragraph_key = (table_position.list_id, paragraph)
+            scanned_page = scanned_paragraph_pages.get(paragraph_key)
+            if scanned_page is not None:
+                if scanned_page < page:
+                    break
+                continue
             guard()
             if not hwp.set_pos(table_position.list_id, paragraph, 0):
-                guard()
                 continue
-            guard()
             current_page = hwp.current_page
-            guard()
             if current_page < page:
+                scanned_paragraph_pages[paragraph_key] = current_page
                 break
-            if current_page > page or not hwp.MoveParaBegin():
-                guard()
+            if current_page > page:
+                scanned_paragraph_pages[paragraph_key] = current_page
                 continue
-            guard()
+            if not hwp.MoveParaBegin():
+                continue
             _ = hwp.MoveSelParaEnd()
-            guard()
             selection = hwp.get_selected_pos()
-            guard()
             if not selection[0]:
                 continue
             text = hwp.get_text_file(
                 format="UNICODE",
                 option="saveblock:true",
             )
-            guard()
             if not has_hierarchical_table_caption(text):
+                scanned_paragraph_pages[paragraph_key] = current_page
                 continue
             snapshot = read_native_snapshot(candidate.window_handle)
             if snapshot is None:
@@ -179,11 +183,18 @@ def find_hierarchical_table_caption_source(
     setup_page: int,
 ) -> TableCaptionFormatSource | None:
     with preserved_live_state(hwp, guard=guard):
+        guard()
         for page in range(setup_page, 0, -1):
-            guard()
-            page_text = hwp.get_page_text(page - 1)[:200_000]
+            # The page text is scanned in full. Slicing it here would not save a
+            # single COM round trip -- get_page_text has already marshalled the
+            # whole string across the process boundary before the slice runs --
+            # so a cap could only drop characters we already paid for and turn a
+            # caption that lives past the cut into a silent "not found".
+            page_text = hwp.get_page_text(page - 1)
             guard()
             if not has_hierarchical_table_caption(page_text):
+                # Nothing crossed COM since the guard above, so the next page
+                # starts with the active-document check already satisfied.
                 continue
             detailed = inspect_native_structure(candidate.window_handle, page)
             guard()
@@ -245,4 +256,7 @@ def find_hierarchical_table_caption_source(
             )
             if source is not None:
                 return source
+            # This branch did touch COM after its last guard, so re-establish the
+            # invariant the loop head relies on before scanning the next page.
+            guard()
         return None

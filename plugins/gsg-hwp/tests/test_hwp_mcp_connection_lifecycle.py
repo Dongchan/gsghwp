@@ -121,12 +121,14 @@ def test_connection_transport_error_is_unchanged_and_retry_safe() -> None:
     assert result.failure_stage == "connection"
     assert result.changed is False
     assert result.partial_change is False
+    assert result.partial_mutation is False
     assert result.retry_safe is True
 
     normalized_result = normalize_production_result(result, inputs)
     assert normalized_result.failure_stage == "connection"
     assert normalized_result.changed is False
     assert normalized_result.partial_change is False
+    assert normalized_result.partial_mutation is False
     assert normalized_result.retry_safe is True
 
     public_result = to_public_action_result(normalized_result, ())

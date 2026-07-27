@@ -33,6 +33,8 @@ from hwp_live_native_action_models import (  # noqa: E402
     NativeDetailedCell,
     NativeDetailedControl,
     NativeDetailedInspection,
+    NativePageControl,
+    NativePageInspection,
     NativeParagraphFormat,
     NativePosition,
     NativeSelection,
@@ -58,6 +60,7 @@ from hwp_live_native_format_contract import (  # noqa: E402
 from hwp_live_native_format_inputs import TableFormatSpec, table_cell_coordinate  # noqa: E402
 from hwp_live_native_format_target import ResolvedTable  # noqa: E402
 from hwp_live_native_layout_format import cell_format_commands  # noqa: E402
+from hwp_operation_contract import HwpOperateTarget, OperationResult  # noqa: E402
 from hwp_live_table_contract import (  # noqa: E402
     CellBorder,
     CellBorders,
@@ -697,7 +700,7 @@ def test_small_formats_keep_the_single_call_command_sequence(
     assert execution.batches[0].commands == build_native_format_commands(plan)
 
 
-def _snapshot() -> NativeSnapshot:
+def _snapshot(*, in_table: bool = True) -> NativeSnapshot:
     position = NativePosition(1, 0, 0)
     return NativeSnapshot(
         17,
@@ -708,25 +711,33 @@ def _snapshot() -> NativeSnapshot:
         position,
         NativeSelection(False, position, position),
         "",
-        "tbl",
-        "table-1",
-        "A1",
+        "tbl" if in_table else "",
+        "table-1" if in_table else "",
+        "A1" if in_table else "",
         0,
         NativeCharacterFormat("함초롬바탕", 1_000, False, 0),
         NativeParagraphFormat(0, 160, 0, 0, 0, 0, 0),
     )
 
 
-def _request() -> NativeFormatRecipeRequest:
+def _request(
+    target: HwpOperateTarget | None = None,
+    parameters: dict[str, str] | None = None,
+) -> NativeFormatRecipeRequest:
+    position = NativePosition(1, 0, 0)
     return cast(
         NativeFormatRecipeRequest,
         cast(
             object,
             SimpleNamespace(
                 candidate=SimpleNamespace(window_handle=41, application=None),
-                routing_page=SimpleNamespace(
-                    document_id=17,
-                    full_name="C:/documents/sample.hwp",
+                routing_page=NativePageInspection(
+                    17,
+                    "C:/documents/sample.hwp",
+                    1,
+                    1,
+                    "",
+                    (NativePageControl("tbl", "table-1", position, 2, 2),),
                 ),
                 resolution=SimpleNamespace(
                     workflow_id="table.format",
@@ -735,7 +746,11 @@ def _request() -> NativeFormatRecipeRequest:
                     candidates=(),
                     steps=(),
                 ),
+                target=target,
+                parameters={} if parameters is None else parameters,
                 postconditions=SimpleNamespace(preserve_page_count=True),
+                resolve_only=False,
+                allow_document_change=True,
             ),
         ),
     )
@@ -750,6 +765,177 @@ def _success(request: NativeActionRequest) -> NativeActionResult:
         100,
         (),
     )
+
+
+def _run_format_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+    request: NativeFormatRecipeRequest,
+    before: NativeSnapshot,
+    *,
+    detail: NativeDetailedInspection | None = None,
+) -> tuple[
+    OperationResult | None,
+    tuple[NativeActionRequest, ...],
+]:
+    snapshots = iter((before, before))
+    native_requests: list[NativeActionRequest] = []
+
+    def execute(
+        _window_handle: int,
+        native_request: NativeActionRequest,
+        *,
+        minimum_version: int,
+    ) -> NativeActionResult:
+        assert minimum_version == 9
+        native_requests.append(native_request)
+        return _success(native_request)
+
+    def inspect(_window_handle: int, _page: int) -> NativeDetailedInspection:
+        if detail is None:
+            pytest.fail("single-cell format inspected topology")
+        return detail
+
+    def snapshot(_window_handle: int) -> NativeSnapshot:
+        return next(snapshots)
+
+    monkeypatch.setattr(recipe, "read_native_snapshot", snapshot)
+    monkeypatch.setattr(recipe, "inspect_native_structure", inspect)
+    monkeypatch.setattr(recipe, "execute_native_actions", execute)
+    return (
+        recipe.operate_native_format_recipe(request),
+        tuple(native_requests),
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        HwpOperateTarget(kind="table", control_instance_id="table-1"),
+        HwpOperateTarget(kind="table", page_hint=1),
+    ),
+)
+def test_explicit_table_target_without_cell_formats_every_topology_cell(
+    monkeypatch: pytest.MonkeyPatch,
+    target: HwpOperateTarget,
+) -> None:
+    request = _request(
+        target,
+        {"fill_color": "#DDEEFF"},
+    )
+    result, native_requests = _run_format_recipe(
+        monkeypatch,
+        request,
+        _snapshot(in_table=False),
+        detail=_dense_detail(2, 2),
+    )
+
+    assert result is not None
+    assert result.status == "executed"
+    assert result.updated_addresses == ("A1", "B1", "A2", "B2")
+    commands = tuple(
+        command
+        for native_request in native_requests
+        for command in native_request.commands
+    )
+    assert (
+        tuple(
+            command.address for command in commands if isinstance(command, CellCommand)
+        )
+        == result.updated_addresses
+    )
+    assert (
+        sum(
+            isinstance(command, ParameterActionCommand) and command.action == "CellFill"
+            for command in commands
+        )
+        == 4
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "parameters", "in_table", "expected_addresses", "expected_basis"),
+    (
+        (
+            HwpOperateTarget(kind="table", control_instance_id="table-1"),
+            {"cell": "B1", "fill_color": "#DDEEFF"},
+            False,
+            ("B1",),
+            "target.control_instance_id",
+        ),
+        (
+            HwpOperateTarget(
+                kind="table",
+                binding="active",
+                match_policy="return_candidates",
+            ),
+            {"fill_color": "#DDEEFF"},
+            True,
+            ("A1",),
+            "target.unique_page_table",
+        ),
+        (
+            HwpOperateTarget(kind="table", binding="selection", page_hint=1),
+            {"fill_color": "#DDEEFF"},
+            True,
+            ("A1",),
+            "native.selection",
+        ),
+    ),
+)
+def test_existing_single_cell_and_cursor_targeting_stays_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    target: HwpOperateTarget,
+    parameters: dict[str, str],
+    in_table: bool,
+    expected_addresses: tuple[str, ...],
+    expected_basis: str,
+) -> None:
+    result, native_requests = _run_format_recipe(
+        monkeypatch,
+        _request(target, parameters),
+        _snapshot(in_table=in_table),
+    )
+
+    assert result is not None
+    assert result.status == "executed"
+    assert result.target_resolution_basis == expected_basis
+    assert result.updated_addresses == expected_addresses
+    commands = tuple(
+        command
+        for native_request in native_requests
+        for command in native_request.commands
+    )
+    assert (
+        tuple(
+            command.address for command in commands if isinstance(command, CellCommand)
+        )
+        == expected_addresses
+    )
+    assert any(
+        isinstance(command, ParameterActionCommand) and command.action == "CellFill"
+        for command in commands
+    )
+
+
+def test_table_format_without_target_or_cursor_explains_both_remedies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request(
+        None,
+        {"fill_color": "#DDEEFF"},
+    )
+    result, native_requests = _run_format_recipe(
+        monkeypatch,
+        request,
+        _snapshot(in_table=False),
+    )
+
+    assert result is not None
+    assert result.status == "needs_input"
+    assert not native_requests
+    assert result.required_inputs == ("inputs.target", "inputs.parameters.cell")
+    assert "target" in result.message
+    assert "cell" in result.message
 
 
 def test_single_cell_recipe_adds_no_inspection_or_native_call(

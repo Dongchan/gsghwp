@@ -324,6 +324,9 @@ def sync_table_template_series(
         native_elapsed_microseconds=executed.elapsed_microseconds,
         current_page=after.current_page,
         page_count=after.page_count,
+        # 동기화 대상 표가 실제로 있던 쪽. discover_table_series 결과를 다시 쓰므로
+        # 네이티브 왕복은 늘지 않는다.
+        affected_pages=tuple(sorted({target.page for target in verified})),
         modified=after.modified,
         verified=True,
         verification_error=None,

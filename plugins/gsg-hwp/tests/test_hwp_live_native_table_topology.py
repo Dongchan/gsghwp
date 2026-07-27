@@ -126,6 +126,10 @@ def test_table_formula_fallback_explains_the_total_81_cell_limit() -> None:
 
     message = str(failure.value)
     assert "행×열 격자가 81셀을 초과" in message
-    assert "cell로 대상 셀" in message
-    assert "start_cell을 지정" in message
+    # 실패 이유만 알리고, 셀 주소를 지정하라고 유도하지 않는다.
+    # 그 문구를 받은 모델은 실제로 A1, F3 같은 주소를 지어내 엉뚱한 셀에 썼다.
+    # 같은 규칙을 test_hwp_live_selection_targeting.py 가 공개 경로에서도 고정한다.
+    assert "cell로 대상 셀" not in message
+    assert "start_cell을 지정" not in message
+    assert "다시 요청" not in message
     get_default.assert_not_called()

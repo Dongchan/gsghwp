@@ -24,9 +24,11 @@ from hwp_live_native_action_contract import (  # noqa: E402
     NativeActionFailureEvidence,
 )
 from hwp_live_native_action_models import (  # noqa: E402
+    CaptureTableCommand,
     CellCommand,
     NativeActionRequest,
     NativeActionResult,
+    SelectControlCommand,
     SetCellTextCommand,
     TextPatchCommand,
 )
@@ -250,7 +252,7 @@ def _operate(
     )
 
 
-def test_large_fill_uses_bounded_native_calls_without_quadratic_preflight() -> None:
+def test_large_fill_uses_bounded_native_calls_keeping_the_batch_shape() -> None:
     table, prepared = _prepared(400)
     chunks = table_fill_chunks(prepared, table)
     requests: list[NativeActionRequest] = []
@@ -274,8 +276,19 @@ def test_large_fill_uses_bounded_native_calls_without_quadratic_preflight() -> N
     )
 
     assert len(requests) == len(chunks) > 1
+    # 각 호출은 SELECT_CONTROL, CAPTURE_TABLE 뒤에 편집 명령만 오는
+    # 네이티브 인식 형태를 유지해야 한다. CELL 을 끼우면 전체 사전검증과
+    # topology 재사용이 함께 사라진다.
     assert all(
-        any(isinstance(command, CellCommand) for command in request.commands)
+        not any(isinstance(command, CellCommand) for command in request.commands)
+        for request in requests
+    )
+    assert all(
+        isinstance(request.commands[0], SelectControlCommand)
+        and isinstance(request.commands[1], CaptureTableCommand)
+        and all(
+            isinstance(command, SetCellTextCommand) for command in request.commands[2:]
+        )
         for request in requests
     )
     assert all(
@@ -295,7 +308,7 @@ def test_large_fill_uses_bounded_native_calls_without_quadratic_preflight() -> N
     assert result.updated_addresses == executed_addresses
 
 
-def test_sparse_fill_in_large_table_bypasses_quadratic_preflight_once() -> None:
+def test_sparse_fill_in_large_table_stays_one_recognized_request() -> None:
     table = _table(1_000)
     prepared = prepare_table_fill(
         _candidate(),
@@ -309,10 +322,14 @@ def test_sparse_fill_in_large_table_bypasses_quadratic_preflight_once() -> None:
     chunks = table_fill_chunks(prepared, table)
 
     assert len(chunks) == 1
+    # 큰 표에 드문드문 채우는 요청도 한 번의 호출로 끝나고, 그 한 번이
+    # 네이티브 인식 형태여야 전체 사전검증이 살아 있다.
     assert chunks[0].request is not prepared.request
-    assert any(
+    assert not any(
         isinstance(command, CellCommand) for command in chunks[0].request.commands
     )
+    assert isinstance(chunks[0].request.commands[0], SelectControlCommand)
+    assert isinstance(chunks[0].request.commands[1], CaptureTableCommand)
     assert (
         sum(
             isinstance(command, SetCellTextCommand)

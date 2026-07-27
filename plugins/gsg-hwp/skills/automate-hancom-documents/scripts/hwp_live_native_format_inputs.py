@@ -298,12 +298,17 @@ def parse_merge(parameters: Mapping[str, OperationInputValue]) -> MergeSpec | In
     if unknown is not None:
         return unknown
     start, end = _address(parameters.get("start")), _address(parameters.get("end"))
+    # These messages state only what could not be determined. A message that
+    # tells the caller to supply a cell is what made models invent addresses
+    # like A1 or F3 and merge the wrong cells.
     if start is None or end is None:
-        return InputFailure("needs_input", "병합 시작·끝 셀 주소가 필요합니다", ("inputs.parameters.start", "inputs.parameters.end"))
-    start_row, start_column = table_cell_coordinate(start)
-    end_row, end_column = table_cell_coordinate(end)
-    if end_row < start_row or end_column < start_column or start == end:
-        return InputFailure("schema_conflict", "셀 병합 범위의 끝 주소가 시작 주소보다 뒤에 있어야 합니다")
+        return InputFailure("needs_input", "병합할 시작·끝 셀을 현재 선택에서도 전달된 입력에서도 확인하지 못했습니다", ("inputs.parameters.start", "inputs.parameters.end"))
+    if start == end:
+        return InputFailure("schema_conflict", "병합할 서로 다른 두 셀을 확인하지 못했습니다")
+    # Two opposite corners of one rectangle may arrive in any order. Which
+    # rectangle they span depends on the row_span/column_span of the addressed
+    # cells, so the order is normalized against the live CellTopology in
+    # hwp_live_native_format_recipe._normalized_merge_plan, never here.
     return MergeSpec(start, end)
 
 
@@ -318,7 +323,7 @@ def parse_split(parameters: Mapping[str, OperationInputValue]) -> SplitSpec | In
     if cell is None or columns is None or rows is None:
         return InputFailure(
             "needs_input",
-            "나눌 셀 주소와 칸·줄 수가 필요합니다",
+            "나눌 셀과 칸·줄 수를 현재 선택에서도 전달된 입력에서도 확인하지 못했습니다",
             ("inputs.parameters.cell", "inputs.parameters.columns", "inputs.parameters.rows"),
         )
     if columns == 1 and rows == 1:

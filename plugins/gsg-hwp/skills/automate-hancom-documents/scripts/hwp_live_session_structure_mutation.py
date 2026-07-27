@@ -154,6 +154,10 @@ def _selection_range(expected: SelectionPosition) -> SelectionRange:
     )
 
 
+def _normalize_paragraph_text(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def replace_validated_selection(
     hwp: LiveHwpApplication,
     candidate: HwpDocumentCandidate,
@@ -266,7 +270,9 @@ def patch_validated_text(
     if after is None:
         raise HwpLiveError("text.patch 후 한컴 문서 상태를 읽지 못했습니다")
     if request.replacement:
-        if not after.selection.selected or after.selected_text != request.replacement:
+        if not after.selection.selected or _normalize_paragraph_text(
+            after.selected_text
+        ) != _normalize_paragraph_text(request.replacement):
             raise HwpLiveError(
                 "text.patch 후 변경한 본문 범위를 다시 읽어 확인하지 못했습니다"
             )

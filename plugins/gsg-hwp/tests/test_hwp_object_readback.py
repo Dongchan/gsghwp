@@ -374,6 +374,10 @@ def test_picture_caption_probe_reads_exact_selected_caption(
             object,
             SimpleNamespace(
                 window_handle=91,
+                # The session-confirmed identity the native request is built
+                # from; HwpDocumentCandidate always carries both fields.
+                document_id=17,
+                full_name="C:/documents/sample.hwp",
                 document=SimpleNamespace(
                     DocumentID=17,
                     FullName="C:/documents/sample.hwp",

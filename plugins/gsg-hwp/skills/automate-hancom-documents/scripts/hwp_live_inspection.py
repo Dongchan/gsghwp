@@ -210,10 +210,15 @@ def inspect_styles(
     guard: Callable[[], None],
 ) -> DocumentStyleList:
     guard()
-    cursor = hwp.get_pos()
-    guard()
     selection = hwp.get_selected_pos()
     guard()
+    # The caret is only needed to put it back when nothing was selected; a
+    # selected block is restored through select_text and never consults it.
+    # Reading it unconditionally spends a COM round trip on a discarded value.
+    cursor: tuple[int, int, int] | None = None
+    if not selection[0]:
+        cursor = hwp.get_pos()
+        guard()
     modified = hwp.IsModified
     guard()
     style_xml = ""
@@ -235,7 +240,9 @@ def inspect_styles(
         guard()
         try:
             restored = (
-                hwp.select_text(selection) if selection[0] else hwp.set_pos(*cursor)
+                hwp.select_text(selection)
+                if selection[0] or cursor is None
+                else hwp.set_pos(*cursor)
             )
         except LIVE_OPERATION_ERRORS as error:
             raise HwpLiveError(
@@ -246,15 +253,19 @@ def inspect_styles(
                 "한컴 문서 스타일을 읽은 뒤 커서와 선택 영역을 복원하지 못했습니다"
             )
         guard()
-    restored_cursor = hwp.get_pos()
-    guard()
     restored_selection = hwp.get_selected_pos()
     guard()
+    # Same asymmetry as above: the caret comparison is dead whenever a block was
+    # selected, so only pay for the read on the branch that actually uses it.
+    caret_moved = False
+    if cursor is not None:
+        caret_moved = hwp.get_pos() != cursor
+        guard()
     current_modified = hwp.IsModified
     guard()
     if (
         restored_selection != selection
-        or (not selection[0] and restored_cursor != cursor)
+        or caret_moved
         or current_modified != modified
     ):
         raise HwpLiveError("한컴 문서 스타일을 읽는 동안 문서 상태가 바뀌었습니다")

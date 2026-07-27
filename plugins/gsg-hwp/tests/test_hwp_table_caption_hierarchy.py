@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast, final, override
 
@@ -15,6 +16,7 @@ SCRIPTS = (
 sys.path.insert(0, str(SCRIPTS))
 
 import hwp_live_caption as caption_module  # noqa: E402
+from hwp_errors import HwpLiveError  # noqa: E402
 from hwp_live_api import (  # noqa: E402
     HwpComApplication,
     HwpComDocument,
@@ -46,7 +48,10 @@ from hwp_live_native_layout import (  # noqa: E402
     build_native_layout_request,
 )
 from hwp_live_table_contract import TableBlock, TableCell  # noqa: E402
-from hwp_live_rot import HwpDocumentCandidate  # noqa: E402
+from hwp_live_rot import (  # noqa: E402
+    HwpDocumentCandidate,
+    require_active_candidate,
+)
 
 
 class _StateWrapper:
@@ -129,6 +134,177 @@ class _ParagraphWrapper(_StateWrapper):
     def get_text_file(self, *, format: str, option: str) -> str:
         assert (format, option) == ("UNICODE", "saveblock:true")
         return "<표 5.5.3-23> 원본" if self.cursor[1] == 11 else "본문"
+
+
+@final
+class _CountingParagraphWrapper(_StateWrapper):
+    def __init__(self, paragraph_texts: dict[int, str] | None = None) -> None:
+        super().__init__()
+        self.paragraph_texts = paragraph_texts or {}
+        self.live_calls: list[str] = []
+        self.scanned_paragraphs: list[int] = []
+        self.selected = False
+        self.document_switched = False
+        self.switch_after_first_text = False
+
+    @property
+    def current_page(self) -> int:
+        self.live_calls.append("current_page")
+        return 3
+
+    @override
+    def get_selected_pos(
+        self,
+    ) -> tuple[
+        bool,
+        int | None,
+        int | None,
+        int | None,
+        int | None,
+        int | None,
+        int | None,
+    ]:
+        self.live_calls.append("get_selected_pos")
+        if not self.selected:
+            return (False, None, None, None, None, None, None)
+        list_id, paragraph, character = self.cursor
+        return (True, list_id, paragraph, character, list_id, paragraph, 20)
+
+    @override
+    def set_pos(self, list_id: int, paragraph: int, character: int) -> bool:
+        self.live_calls.append("set_pos")
+        self.selected = False
+        return super().set_pos(list_id, paragraph, character)
+
+    def MoveParaBegin(self) -> bool:
+        self.live_calls.append("MoveParaBegin")
+        self.cursor = (self.cursor[0], self.cursor[1], 0)
+        return True
+
+    def MoveSelParaEnd(self) -> bool:
+        self.live_calls.append("MoveSelParaEnd")
+        self.selected = True
+        return True
+
+    def get_text_file(self, *, format: str, option: str) -> str:
+        self.live_calls.append("get_text_file")
+        assert (format, option) == ("UNICODE", "saveblock:true")
+        paragraph = self.cursor[1]
+        self.scanned_paragraphs.append(paragraph)
+        if self.switch_after_first_text:
+            self.document_switched = True
+        return self.paragraph_texts.get(paragraph, "본문")
+
+
+@final
+class _CountingIdentityApplication:
+    def __init__(
+        self,
+        path: str,
+        *,
+        document_id: Callable[[], int] = lambda: 17,
+    ) -> None:
+        self.path = path
+        self.document_id = document_id
+        self.accesses: list[str] = []
+
+    @property
+    def XHwpDocuments(self) -> _CountingIdentityApplication:
+        self.accesses.append("XHwpDocuments")
+        return self
+
+    @property
+    def Active_XHwpDocument(self) -> _CountingIdentityApplication:
+        self.accesses.append("Active_XHwpDocument")
+        return self
+
+    @property
+    def DocumentID(self) -> int:
+        self.accesses.append("DocumentID")
+        return self.document_id()
+
+    @property
+    def FullName(self) -> str:
+        self.accesses.append("FullName")
+        return self.path
+
+
+def _candidate(path: str) -> HwpDocumentCandidate:
+    return HwpDocumentCandidate(
+        selector="sample",
+        moniker_name="!HwpObject.1",
+        application=cast(HwpComApplication, object()),
+        document=cast(HwpComDocument, object()),
+        document_id=17,
+        full_name=path,
+        document_format="HWP",
+        edit_mode=1,
+        window_handle=101,
+        active=True,
+    )
+
+
+def _manual_caption_snapshot(
+    path: str,
+    source_position: NativePosition,
+) -> NativeSnapshot:
+    return NativeSnapshot(
+        document_id=17,
+        full_name=path,
+        current_page=3,
+        page_count=5,
+        modified=False,
+        cursor=NativePosition(
+            source_position.list_id,
+            source_position.paragraph,
+            20,
+        ),
+        selection=NativeSelection(
+            selected=True,
+            start=source_position,
+            end=NativePosition(
+                source_position.list_id,
+                source_position.paragraph,
+                20,
+            ),
+        ),
+        selected_text="<표 5.5.3-23> 원본",
+        control_type="",
+        control_instance_id="",
+        cell_address="",
+        style_id=4,
+        character_format=NativeCharacterFormat("함초롬바탕", 1_000, False, 0),
+        paragraph_format=NativeParagraphFormat(0, 160, 0, 0, 0, 0, 0),
+    )
+
+
+def _manual_caption_inspection(
+    path: str,
+    *table_positions: NativePosition,
+) -> NativeDetailedInspection:
+    return NativeDetailedInspection(
+        document_id=17,
+        full_name=path,
+        page=3,
+        page_count=5,
+        text="<표 5.5.3-23> 원본",
+        controls=tuple(
+            NativeDetailedControl(
+                control_type="tbl",
+                instance_id=f"table-{index}",
+                user_description="표",
+                anchor=position,
+                page_start=3,
+                page_end=3,
+                top_level=True,
+                rows=2,
+                columns=2,
+            )
+            for index, position in enumerate(table_positions, start=1)
+        ),
+        cells=(),
+        captions=(),
+    )
 
 
 def _captioned_table(*, style_id: int) -> TableBlock:
@@ -407,3 +583,165 @@ def test_manual_hierarchical_title_before_table_supplies_format_source(
     assert source == TableCaptionFormatSource(4, source_position)
     assert wrapper.cursor == (0, 7, 0)
     assert not wrapper.selected
+
+
+def test_manual_caption_scan_preserves_source_with_one_guard_per_paragraph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "C:/documents/sample.hwp"
+    source_position = NativePosition(0, 11, 0)
+    snapshot = _manual_caption_snapshot(path, source_position)
+    detailed = _manual_caption_inspection(
+        path,
+        NativePosition(0, 12, 0),
+    )
+
+    def read_snapshot(window_handle: int) -> NativeSnapshot | None:
+        return snapshot if window_handle == 101 else None
+
+    def inspect(
+        window_handle: int,
+        page: int,
+    ) -> NativeDetailedInspection | None:
+        return detailed if (window_handle, page) == (101, 3) else None
+
+    monkeypatch.setattr(
+        caption_module,
+        "read_native_snapshot",
+        read_snapshot,
+    )
+    monkeypatch.setattr(caption_module, "inspect_native_structure", inspect)
+    wrapper = _CountingParagraphWrapper(
+        {11: "<표 5.5.3-23> 원본"},
+    )
+    candidate = _candidate(path)
+    identity = _CountingIdentityApplication(path)
+
+    def guard() -> None:
+        require_active_candidate(
+            candidate,
+            cast(HwpComApplication, cast(object, identity)),
+        )
+
+    source = find_hierarchical_table_caption_source(
+        candidate,
+        cast(LiveHwpApplication, cast(object, wrapper)),
+        guard,
+        setup_page=3,
+    )
+
+    assert source == TableCaptionFormatSource(4, source_position)
+    assert wrapper.live_calls[1:7] == [
+        "set_pos",
+        "current_page",
+        "MoveParaBegin",
+        "MoveSelParaEnd",
+        "get_selected_pos",
+        "get_text_file",
+    ]
+    assert (
+        identity.accesses
+        == [
+            "XHwpDocuments",
+            "Active_XHwpDocument",
+            "DocumentID",
+            "FullName",
+        ]
+        * 13
+    )
+    assert len(wrapper.live_calls[1:7]) + (len(identity.accesses) - 12 * 4) == 10
+
+
+def test_manual_caption_scan_reuses_paragraph_reads_across_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "C:/documents/sample.hwp"
+    detailed = _manual_caption_inspection(
+        path,
+        NativePosition(0, 6, 0),
+        NativePosition(0, 4, 0),
+    )
+
+    def inspect(
+        window_handle: int,
+        page: int,
+    ) -> NativeDetailedInspection | None:
+        return detailed if (window_handle, page) == (101, 3) else None
+
+    monkeypatch.setattr(caption_module, "inspect_native_structure", inspect)
+    wrapper = _CountingParagraphWrapper()
+    candidate = _candidate(path)
+    identity = _CountingIdentityApplication(path)
+
+    def guard() -> None:
+        require_active_candidate(
+            candidate,
+            cast(HwpComApplication, cast(object, identity)),
+        )
+
+    source = find_hierarchical_table_caption_source(
+        candidate,
+        cast(LiveHwpApplication, cast(object, wrapper)),
+        guard,
+        setup_page=3,
+    )
+
+    assert source is None
+    assert wrapper.scanned_paragraphs == [5, 4, 3, 2, 1, 0]
+    assert wrapper.live_calls.count("get_text_file") == 6
+    # Each guard() is four COM round trips. The per-page head guard was hoisted
+    # out of the scan loop, so a page that carries no hierarchical caption text
+    # now costs one guard instead of two; only pages that enter the slow path
+    # pay to re-establish the invariant afterwards. 22 -> 21 here, and the gap
+    # widens by one guard for every additional non-matching page scanned.
+    assert (
+        identity.accesses
+        == [
+            "XHwpDocuments",
+            "Active_XHwpDocument",
+            "DocumentID",
+            "FullName",
+        ]
+        * 21
+    )
+
+
+def test_manual_caption_scan_stops_before_next_paragraph_if_document_switches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "C:/documents/sample.hwp"
+    detailed = _manual_caption_inspection(
+        path,
+        NativePosition(0, 3, 0),
+    )
+
+    def inspect(
+        window_handle: int,
+        page: int,
+    ) -> NativeDetailedInspection | None:
+        return detailed if (window_handle, page) == (101, 3) else None
+
+    monkeypatch.setattr(caption_module, "inspect_native_structure", inspect)
+    wrapper = _CountingParagraphWrapper()
+    wrapper.switch_after_first_text = True
+    candidate = _candidate(path)
+    identity = _CountingIdentityApplication(
+        path,
+        document_id=lambda: 18 if wrapper.document_switched else 17,
+    )
+
+    def guard() -> None:
+        require_active_candidate(
+            candidate,
+            cast(HwpComApplication, cast(object, identity)),
+        )
+
+    with pytest.raises(HwpLiveError, match="활성 한컴 문서"):
+        _ = find_hierarchical_table_caption_source(
+            candidate,
+            cast(LiveHwpApplication, cast(object, wrapper)),
+            guard,
+            setup_page=3,
+        )
+
+    assert wrapper.scanned_paragraphs == [2]

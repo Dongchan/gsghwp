@@ -176,11 +176,14 @@ def table_formula_selection_region(
     application: HwpComApplication,
     topology: TableTopology,
 ) -> tuple[str, ...]:
+    # 실패 메시지에 "셀 주소를 지정해 다시 요청하라"고 적지 않는다.
+    # 그 문구를 받은 모델은 실제로 A1, F3 같은 주소를 지어내서 엉뚱한 셀에 쓴다.
+    # 사용자가 겪은 증상이 이것이다. 무엇이 안 됐는지만 알리고 판단은 호출부에 맡긴다.
+    # 이 경로는 이제 마지막 대안이다. 선택이나 셀 주소가 있으면 topology 로 먼저 푼다.
     if topology.rows * topology.columns > 81:
         raise HwpLiveError(
             "대상 표의 행×열 격자가 81셀을 초과해 TableFormula로 선택 주소를 "
-            + "안전하게 확인할 수 없습니다. 표 서식은 cell로 대상 셀을 지정하고, "
-            + "행렬 표 채움은 start_cell을 지정해 다시 요청하세요"
+            + "확인할 수 없습니다"
         )
     try:
         field = application.HParameterSet.HFieldCtrl

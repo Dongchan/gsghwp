@@ -47,10 +47,17 @@ class HwpRuntimeSafetyError(DocumentAutomationError):
 
 class HwpLiveError(DocumentAutomationError):
     reason: str
+    mutation_started: bool | None
 
-    def __init__(self, reason: str) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        mutation_started: bool | None = None,
+    ) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.mutation_started = mutation_started
 
 
 class HwpTargetProcessLostError(HwpLiveError):

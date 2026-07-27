@@ -16,6 +16,7 @@ from hwp_live_native_action_models import (
     NativeDetailedCaption,
     NativeDetailedControl,
     NativePageInspection,
+    NativePosition,
     NativeSnapshot,
     NativeSetter,
     ParameterActionCommand,
@@ -41,7 +42,9 @@ from hwp_operation_contract import (
     WorkflowResolution,
 )
 from hwp_priority_object_inputs import (
+    ControlTargetFailure,
     ControlTargetRequest,
+    ResolvedObjectControl,
     native_position,
     resolve_control_target,
     resolve_style_position,
@@ -66,6 +69,23 @@ from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
 _OBJECT_WORKFLOWS = frozenset[HwpWorkflowId](
     ("image.insert", "image.replace", "caption.add", "style.copy", "style.apply")
 )
+
+
+def _style_verification_scope_is_sufficient(
+    recipe_inputs: HwpPriorityRecipeInputs,
+    before: NativeSnapshot | None,
+) -> bool:
+    if recipe_inputs.target_position is not None:
+        return True
+    if before is None:
+        return False
+    selection = before.selection
+    return (
+        selection.selected
+        and selection.base_mode == 1
+        and selection.start.list_id == selection.end.list_id
+        and selection.start.paragraph == selection.end.paragraph
+    )
 
 
 def _selection_snapshot(
@@ -120,6 +140,9 @@ def operate_object_recipe(
     image_fitted_height_mm: float | None = None
     image_replace_before: NativeDetailedControl | None = None
     image_replace_expectation: PictureReplaceExpectation | None = None
+    style_expected_id: int | None = None
+    style_target_position: NativePosition | None = None
+    style_verification_scope_sufficient = False
     if workflow == "image.insert":
         image = single_image(assets)
         if image is None:
@@ -182,9 +205,21 @@ def operate_object_recipe(
                 _selection_snapshot(candidate, target),
             )
         )
-        control_id = None if resolved_control is None else resolved_control.instance_id
+        if image is not None and isinstance(resolved_control, ControlTargetFailure):
+            return _result(
+                resolution,
+                resolved_control.status,
+                resolved_control.message,
+                required_inputs=resolved_control.required_inputs,
+            )
+        resolved_picture = (
+            resolved_control
+            if isinstance(resolved_control, ResolvedObjectControl)
+            else None
+        )
+        control_id = None if resolved_picture is None else resolved_picture.instance_id
         target_resolution_basis = (
-            None if resolved_control is None else resolved_control.basis
+            None if resolved_picture is None else resolved_picture.basis
         )
         if image is None or control_id is None:
             return _result(
@@ -274,15 +309,31 @@ def operate_object_recipe(
                 _selection_snapshot(candidate, target),
             )
         )
-        control_id = None if resolved_control is None else resolved_control.instance_id
+        if (
+            recipe_inputs is not None
+            and recipe_inputs.caption_text is not None
+            and isinstance(resolved_control, ControlTargetFailure)
+        ):
+            return _result(
+                resolution,
+                resolved_control.status,
+                resolved_control.message,
+                required_inputs=resolved_control.required_inputs,
+            )
+        resolved_object = (
+            resolved_control
+            if isinstance(resolved_control, ResolvedObjectControl)
+            else None
+        )
+        control_id = None if resolved_object is None else resolved_object.instance_id
         target_resolution_basis = (
-            None if resolved_control is None else resolved_control.basis
+            None if resolved_object is None else resolved_object.basis
         )
         if (
             recipe_inputs is None
             or recipe_inputs.caption_text is None
             or control_id is None
-            or resolved_control is None
+            or resolved_object is None
         ):
             return _result(
                 resolution,
@@ -301,7 +352,7 @@ def operate_object_recipe(
                 "캡션 텍스트가 비어 있습니다",
                 required_inputs=("inputs.recipe.caption_text",),
             )
-        if resolved_control.control_type == "tbl":
+        if resolved_object.control_type == "tbl":
             before_structure = inspect_native_structure(
                 candidate.window_handle,
                 routing_page.page,
@@ -368,10 +419,11 @@ def operate_object_recipe(
         caption_control_id = control_id
         resolved_target_id = control_id
     elif workflow == "style.apply":
+        style_before = _selection_snapshot(candidate, target)
         style_target = resolve_style_position(
             recipe_inputs,
             target,
-            _selection_snapshot(candidate, target),
+            style_before,
         )
         if (
             recipe_inputs is None
@@ -384,9 +436,14 @@ def operate_object_recipe(
                 "스타일 ID와 적용 위치가 필요합니다",
                 required_inputs=("inputs.recipe.style_id", "inputs.target"),
             )
+        style_expected_id = recipe_inputs.style_id
+        style_target_position = native_position(style_target.position)
+        style_verification_scope_sufficient = _style_verification_scope_is_sufficient(
+            recipe_inputs, style_before
+        )
         commands = (
-            MovePositionCommand(native_position(style_target.position)),
-            style_command(recipe_inputs.style_id),
+            MovePositionCommand(style_target_position),
+            style_command(style_expected_id),
         )
         resolved_target_id = (
             f"position:{style_target.position.list_id}:"
@@ -426,7 +483,7 @@ def operate_object_recipe(
             f"{recipe_inputs.target_position.character}"
         )
         target_resolution_basis = "explicit_recipe_target_position"
-    executed, elapsed, current_page, page_count, modified = _execute(
+    executed, elapsed, current_page, page_count, modified, after_snapshot = _execute(
         candidate, commands
     )
     if picture_caption_probe is not None:
@@ -545,6 +602,16 @@ def operate_object_recipe(
             ):
                 raise HwpLiveError("기존 캡션의 자동번호 또는 스타일이 변경되었습니다")
         operation_verified = True
+    if workflow == "style.apply":
+        if style_target_position is None or style_expected_id is None:
+            raise HwpLiveError(
+                "스타일 적용 결과를 확인할 위치 또는 스타일 ID가 없습니다"
+            )
+        if style_verification_scope_sufficient:
+            operation_verified = (
+                after_snapshot.cursor == style_target_position
+                and after_snapshot.style_id == style_expected_id
+            )
     return _result(
         resolution,
         "executed",

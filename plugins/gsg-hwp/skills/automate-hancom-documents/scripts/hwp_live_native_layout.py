@@ -630,6 +630,18 @@ def build_native_layout_execution_plan(
     groups = _layout_command_groups(request)
     requirements = _address_requirements(groups)
     canonical_work = _layout_topology_work(groups)
+    # LAYOUT_COMMAND_LIMIT mirrors kMaximumCommands in ActionProtocol.cpp:21.
+    # The parser there rejects the whole script (ActionProtocol.cpp:537) without
+    # looking at `atomic`, so an atomic request over the limit can only come
+    # back as BAD_REQUEST after a full round trip. Splitting it is not an
+    # option — it is one rollback unit — so fail here, where the cause is still
+    # nameable. Non-atomic requests keep falling through to the splitter.
+    if request.atomic and len(request.commands) > LAYOUT_COMMAND_LIMIT:
+        raise HwpLiveError(
+            "레이아웃 요청 명령이 네이티브 한계 20000개를 넘었습니다"
+            + f" (요청 {len(request.commands)}개)."
+            + " 원자 실행을 유지하려면 블록 수를 줄여 다시 요청하세요"
+        )
     if (
         request.atomic
         or (

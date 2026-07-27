@@ -73,7 +73,10 @@ class PreviewApplication(Protocol):
 
     def RecalcPageCount(self) -> bool: ...
 
-    def goto_page(self, page_index: int | str = 1) -> tuple[int, int]: ...
+    # pyhwpx returns (print page, page index) on success but a bare False when
+    # the requested index falls outside the document, so the union is the real
+    # contract rather than a defensive fiction.
+    def goto_page(self, page_index: int | str = 1) -> tuple[int, int] | bool: ...
 
     def set_pos(self, List: int, para: int, pos: int) -> bool: ...
 
@@ -376,10 +379,18 @@ def render_page(
                     if not has_selection or restorable_selection:
                         _ = hwp.RecalcPageCount()
                         guard()
-                        _ = hwp.goto_page(target_page)
+                        moved = hwp.goto_page(target_page)
                         guard()
-                        current_page = hwp.current_page
-                        guard()
+                        # goto_page() finishes by reading the caret page and
+                        # returns (print page, page index), so the second element
+                        # is the value hwp.current_page would report. Reusing it
+                        # avoids repeating a property walk that costs four COM
+                        # round trips. Older shapes fall back to the direct read.
+                        if isinstance(moved, tuple) and len(moved) == 2:
+                            current_page = int(moved[1])
+                        else:
+                            current_page = hwp.current_page
+                            guard()
                         if current_page != target_page:
                             raise HwpLiveError(
                                 "한컴 미리보기 쪽으로 이동하지 못했습니다"

@@ -13,6 +13,7 @@ from hwp_live_native_action_models import (
     NativeDetailedControl,
     NativePageInspection,
     NativePosition,
+    NativeSnapshot,
     RunCommand,
     SelectControlCommand,
 )
@@ -122,8 +123,8 @@ def probe_picture_caption(
     native = execute_native_actions(
         candidate.window_handle,
         NativeActionRequest(
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             commands=(
                 SelectControlCommand(control_id),
                 CaptureTableCommand(),
@@ -140,8 +141,8 @@ def probe_picture_caption(
     if snapshot is None:
         raise HwpLiveError("그림 캡션 선택 결과를 읽지 못했습니다")
     if (
-        snapshot.document_id != candidate.document.DocumentID
-        or snapshot.full_name != candidate.document.FullName
+        snapshot.document_id != candidate.document_id
+        or snapshot.full_name != candidate.full_name
     ):
         raise HwpLiveError("그림 캡션 확인 결과가 대상 문서와 다릅니다")
     return PictureCaptionProbe(
@@ -332,12 +333,12 @@ def object_recipe_result(
 def execute_object_commands(
     candidate: HwpDocumentCandidate,
     commands: tuple[NativeActionCommand, ...],
-) -> tuple[int, int, int, int, bool]:
+) -> tuple[int, int, int, int, bool, NativeSnapshot]:
     native = execute_native_actions(
         candidate.window_handle,
         NativeActionRequest(
-            document_id=candidate.document.DocumentID,
-            full_name=candidate.document.FullName,
+            document_id=candidate.document_id,
+            full_name=candidate.full_name,
             commands=commands,
         ),
         minimum_version=9,
@@ -353,4 +354,5 @@ def execute_object_commands(
         after.current_page,
         after.page_count,
         after.modified,
+        after,
     )

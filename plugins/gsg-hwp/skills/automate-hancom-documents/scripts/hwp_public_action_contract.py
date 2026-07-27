@@ -45,6 +45,13 @@ type PublicImageInsertTarget = Literal["selection", "document_end"]
 type PublicObjectKind = Literal["table", "picture"]
 type PublicTextAlignment = Literal["left", "center", "right", "justify", "inherit"]
 type PublicStyleId = Annotated[int, Field(ge=0, le=4_095)]
+# 250 x 350 은 네이티브 한계가 아니다. INSERT_PICTURE 는 ActionProtocol.cpp:391
+# 에서 ParsePositiveMillimeter 로 읽고, 그 상한은 ActionProtocol.cpp:136 의
+# 1,000mm 다. 그래서 A3(297x420) 같은 큰 용지에서 250x350 을 넘는 그림이 막힌다.
+# 다만 여기만 올릴 수는 없다. hwp_insert_image / hwp_replace_image 는 같은 값을
+# hwp_priority_recipe_contract.py:29-30 의 picture_width_mm / picture_height_mm
+# (역시 250 / 350)로 그대로 넘긴다. 여기만 풀면 스키마 거부가 도구 안쪽의
+# ValidationError 로 바뀔 뿐이라 상황이 더 나빠진다. 두 곳을 함께 올려야 한다.
 type PublicImageWidth = Annotated[float, Field(ge=1, le=250)]
 type PublicImageHeight = Annotated[float, Field(ge=1, le=350)]
 type PublicFontName = Annotated[str, Field(min_length=1, max_length=100)]
@@ -135,7 +142,11 @@ class PublicTextPatchTarget(ContractModel):
     kind: Literal["current", "range", "find", "table_cell"] = "current"
     start: PublicTextPatchPosition | None = None
     end: PublicTextPatchPosition | None = None
-    occurrence: int | None = Field(default=None, ge=1, le=1_000_000)
+    # 상한 20,000 은 ActionTextPatch.cpp:793 kMaximumSearches 에서 왔다.
+    # SelectTextPatchMatch 의 ForwardFind 루프(ActionTextPatch.cpp:815)가 정확히
+    # kMaximumSearches 회만 돌고, 한 회가 최대 한 건을 세므로 도달 가능한
+    # occurrence 는 20,000 이 끝이다. 그 위는 항상 TEXT_SEARCH_LIMIT 으로 돌아온다.
+    occurrence: int | None = Field(default=None, ge=1, le=20_000)
     match_case: bool = False
     table_instance_id: str | None = Field(default=None, min_length=1, max_length=100)
     cell: str | None = Field(default=None, pattern=r"^[A-Za-z]+[1-9][0-9]*$")
