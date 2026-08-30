@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "gsg-hwp": {
+    "gsg-hwp-beta-live": {
       "type": "stdio",
       "command": "powershell.exe",
       "args": [

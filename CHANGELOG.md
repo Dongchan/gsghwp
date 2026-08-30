@@ -2,6 +2,69 @@
 
 배포 버전은 Semantic Versioning 형식인 `주버전.부버전.수정버전`을 사용합니다.
 
+## [1.6.1] - 2026-08-31
+
+### 업그레이드 안내 — MCP 서버 등록명이 바뀌었습니다
+
+- MCP 서버 등록명을 `gsg-hwp`에서 `gsg-hwp-beta-live`로 변경. 패키지와
+  저장소 루트의 `.mcp.json`, README·QUICKSTART-KO·AGENTS·CLAUDE 안내,
+  릴리스 QA 단언까지 같은 이름으로 통일. 스킬 지침(`SKILL.md`,
+  `agents/openai.yaml`)이 원래 쓰던 이름에 맞춘 정정
+- **이전에 `gsg-hwp`라는 이름으로 직접 등록해 쓰던 사용자는 재등록이**
+  **필요합니다.** 이름이 다르면 도구 접두사(`mcp__<서버이름>__`)도 달라져
+  지침이 도구를 찾지 못합니다. 한/글과 Claude Code를 닫고
+  `claude mcp remove gsg-hwp`로 옛 등록을 지운 뒤,
+  `claude mcp add --transport stdio --scope user gsg-hwp-beta-live -- powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <배포경로>\plugins\gsg-hwp\scripts\start-mcp.ps1`
+  로 다시 등록합니다
+- Codex 플러그인 등록(`codex plugin add gsg-hwp@gsg-hwp`)은 이름이 바뀌지
+  않아 그대로 사용합니다
+
+### 자동 업데이트의 런타임 설치 수리
+
+- 자동 업데이트가 새 버전의 Python 런타임을 설치하는 단계가 한 번도 동작하지
+  않았음. `Invoke-GsgHwpRuntimeSync`와 `Test-GsgHwpUpdatedRuntime`이 모듈
+  스코프의 `$ErrorActionPreference = "Stop"` 아래에서 `& uv … 2>&1`을
+  호출해, uv가 정상 동작 중 stderr에 쓰는 첫 줄(`Using CPython 3.12.10`)이
+  `NativeCommandError`로 승격되며 예외가 발생. 동기화는 항상 실패했고
+  `python.exe`만 있는 반쪽 `.venv`가 남았음
+- 두 함수의 외부 명령 호출 구간에서만 `Continue`로 낮추고, 성공 여부는
+  출력이 아니라 종료 코드로 판정하도록 수정. 출력은 그대로 기록 파일에 남음
+- 격리 A/B 실증: 수리 전 예외 발생·`.venv` 2파일, 수리 후 정상 종료·6,555파일
+- `install.ps1`은 같은 `uv sync`를 `2>&1` 없이 호출하므로 수동 설치는 영향이
+  없었음. 죽어 있던 것은 자동 업데이트 경로뿐
+
+### 첫 실행 자동 프로비저닝
+
+- `plugins/gsg-hwp/scripts/GsgHwp.Bootstrap.psm1` 추가와 `start-mcp.ps1`
+  개편. 런타임이 없으면 서버를 띄우기 전에 스스로 갖춤 — 버전별 `.venv`
+  구성, 파일 경로 보안 모듈 확인, 네이티브 브리지 설치·등록 순
+- 새 PC에서 배포본을 풀고 MCP만 등록해도 첫 기동이 설치를 끝냄. 진행 상황은
+  `[GSG HWP]` 접두가 붙은 stderr 메시지로 표시
+- 한/글이 실행 중이면 네이티브 설치만 미루고
+  `%LOCALAPPDATA%\GSG_HWP\state\pending-native-install.json` 마커를 남김.
+  한/글을 닫고 MCP 클라이언트를 다시 시작하면 그때 설치
+- 동시 기동 잠금(`state\runtime-bootstrap.lock`) 추가. 60분 넘게 갱신되지
+  않은 잠금은 무시하고, 30분을 기다려도 안 풀리면 잠금 없이 진행해 교착으로
+  멈추지 않음
+- 이미 갖춰진 상태에서는 출력 없이 `Test-Path` 두 번으로 바로 기동
+- `uv`가 없으면 `winget install --id astral-sh.uv -e` 안내와 재시작 방법을
+  한국어로 출력하고 종료 코드 2로 끝냄. 배포본 사용자에게 저장소 클론을
+  권하던 옛 메시지 제거
+
+### 문서와 QA
+
+- `CLAUDE.md` 전면 개정. 설치 정책만 있던 문서에 Claude Code 사용자용
+  증상별 문제 해결을 신설 — MCP 미기동, uv 부재, 반쪽 런타임, 도구 미노출,
+  브리지 미적용, 자동 업데이트 확인·되돌리기. `hwp_runtime_info` 한 번으로
+  상태를 읽는 법(`distribution`·`native_bridge_state`·
+  `loaded_native_bridge_modules`·`reload_required`·`worker_state`),
+  로그·상태 파일 위치, 새 브리지는 한/글 재시작이 필요하다는 사실 수록
+- 릴리스 QA에 단언 추가: 패키지 필수 파일 목록에 Bootstrap 모듈 등록,
+  런처가 `Initialize-GsgHwpRuntime`을 포함하고 `Clone the repository`를
+  포함하지 않을 것
+- 네이티브 브리지 `0.5.176`, MCP 런타임 `0.3.91`, 프로토콜 `14`, 도구 수는
+  1.6.0과 같음. 이번 판은 설치·기동 경로와 문서만 바뀜
+
 ## [1.6.0] - 2026-08-30
 
 ### 정직한 실행과 복구
@@ -161,6 +224,35 @@
 
 ### 구조 변화 (공개 GitHub v1.2.2 대비, 양쪽 트리 실측)
 
+- 편집 실행이 C++/ATL 네이티브라는 사실 자체는 v1.2.2에도 그대로였습니다 — 그
+  트리에 이미 24종 명령 프로토콜과 `ActionExecutor`·`ActionTextPatch`·
+  `CellTopology`·`BatchExecutor` 가 있고, v1.2.2 네이티브 84파일 중 **43개는
+  지금도 바이트 단위로 같습니다**. 이번에 바뀐 것은 그 실행기를 **둘러싼
+  층**입니다
+- 디스패치 표면 17개 → 40개(`ProtocolVersion` 12→14, 기존 번호 재배치 없음):
+  프로세스 안 문단 스타일 조회(18), 앞면 전환 차단(19~20), 관측한 문서 상태를
+  조건으로 거는 쓰기(21~24·38), 2단계 텍스트 패치(39~40), 그래프 세션(25~37).
+  40개 중 8개가 "문서를 쓰는 멤버"로 분류돼 호출 앞뒤로 쓰기 세대를 올립니다
+- 전송 형식 2종(`HCB1`·`HCA1`) → 5종: 번들 봉투 `HLB1`, 준비 패치 영수증
+  `HTP2`, 이진 그래프 프레임 `HGN1`(프로토콜 15/스키마 1, 4MiB 프레임, 권능 57)
+- **쓰기 한 번이 증거를 함께 싣습니다** — 번들 `MUTATE` 하나가 쓰기 전 서명
+  대조(`STALE_CONTENT`), 실행, 쓰기 후 서명 대조, "정말 바뀌었나"
+  판정(`MUTATION_NO_CONTENT_CHANGE`)까지 한 호출에서 끝냅니다. 프로토콜 14
+  멤버만으로는 세 호출이 걸리는 판정입니다(`ProtocolBundle.cpp:725-814`)
+- 읽기가 프로세스 안으로: 문단 스타일이 문단당 COM 왕복 1회 → 호출 1회
+  (`LiveInspection.h:20`), `TableInspection` 854→2,531줄(셀별 서식 읽기, 권위
+  있는 표 치수, SetPos 2회차 순회 제거)
+- 셀 서식이 셀 단위 → 구간 단위. v1.2.2는 구간 경로에서도 기하 명령만 구간을
+  탔고 글자·문단 서식은 셀마다 나갔습니다. 공개 스키마도 `A4:P4` 구간과 주소
+  목록을 받아 45칸 머리글이 45번 호출로 갈라지지 않습니다. 반면 표 채우기는
+  v1.2.2에서도 이미 네이티브 배치 1회였고, 표 삽입 경로의 셀별 COM 반복문은
+  지금도 그대로입니다
+- **작업별 COM 왕복 횟수는 미측정입니다.** 위 "빨라진 것"의 초 단위 수치는
+  이번 캠페인 수리의 전/후 측정이지 v1.2.2 대비가 아닙니다
+- 아직 파이썬 몫: 표 셀 서식·쪽 설정·캡션 편집은 브리지를 거치지 않고 직접
+  COM을 몰며(그래서 네이티브 쓰기 계수기가 그 쓰기를 못 봅니다), 쪽 계획
+  컴파일·참고 이미지 분석 27모듈·레이아웃 맞춤 계산(306→826줄, COM 호출
+  0)·도구 계약·검증 정책도 파이썬이 그대로 소유합니다
 - 네이티브 문서 그래프 엔진 신규: C++ 소스 84→152개, 증가분 68개 중 56개가
   `DocumentGraph*` 계열 (additive COM 디스패치 25~37, 그래프 전송 프로토콜
   15/HGN1) — 파이썬 `hwp_native_graph` 계열 15모듈 동반

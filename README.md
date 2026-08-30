@@ -2,7 +2,7 @@
 
 GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서 현재 열려 있는 HWP 문서를 빠르게 조회하고 네이티브 방식으로 편집·검수하도록 연결하는 로컬 MCP**입니다.
 
-- 배포 버전: **v1.6.0**
+- 배포 버전: **v1.6.1**
 - 원본 소스 버전: `0.5.73-dev.3`
 - MCP 런타임: `0.3.91`
 - C++ 네이티브 브리지: `0.5.176`
@@ -12,6 +12,27 @@ GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서
 - 공식 API 카탈로그: 1,452개 중 네이티브 라우팅 1,448개
 
 버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록합니다.
+
+### v1.6.1 주요 변경
+
+- **MCP 서버 등록명을 `gsg-hwp`에서 `gsg-hwp-beta-live`로 통일했습니다.**
+  이전에 `gsg-hwp`라는 이름으로 직접 등록해 쓰던 사용자는 **재등록이
+  필요합니다.** 이름이 다르면 도구 접두사(`mcp__<서버이름>__`)도 달라져
+  지침이 도구를 찾지 못합니다. `claude mcp remove gsg-hwp`로 옛 등록을 지운
+  뒤 아래 "Claude Code 등록" 명령으로 다시 등록하세요. Codex 플러그인 등록
+  (`codex plugin add gsg-hwp@gsg-hwp`)은 이름이 바뀌지 않아 그대로 씁니다.
+- 자동 업데이트가 새 버전의 Python 런타임을 설치하는 단계가 한 번도 동작하지
+  않던 결함을 고쳤습니다. uv가 정상 동작 중 stderr에 쓰는 첫 줄이 오류로
+  승격되며 동기화가 항상 실패하고 반쪽 `.venv`가 남았습니다. 이제 성공 여부를
+  출력이 아니라 종료 코드로 판정합니다. 수동 설치(`install.ps1`)는 같은
+  경로를 쓰지 않아 영향이 없었습니다.
+- 첫 실행 자동 프로비저닝을 더했습니다. 런타임이 없으면 서버를 띄우기 전에
+  스스로 갖춥니다 — 버전별 `.venv` 구성, 파일 경로 보안 모듈 확인, 네이티브
+  브리지 설치·등록 순. 새 PC에서 배포본을 풀고 MCP만 등록해도 첫 기동이
+  설치를 끝냅니다. 한/글이 실행 중이면 네이티브 설치만 미루고, 한/글을 닫고
+  MCP 클라이언트를 다시 시작하면 그때 설치합니다.
+- 네이티브 브리지 `0.5.176`, MCP 런타임 `0.3.91`, 프로토콜 `14`, 도구 수는
+  v1.6.0과 같습니다. 이번 판은 설치·기동 경로와 문서만 바뀌었습니다.
 
 ### v1.6.0 주요 변경
 
@@ -199,7 +220,7 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 | `automation:0068` | `IHwpObject.ImportStyle` | 스타일 가져오기 | 공식 TLB 슬롯과 유효 `HStyleTemplate/HSet` 입력에서도 `0xD0000005`로 실패 |
 | `automation:0365` | `IDHwpParameterArray.Clone` | ParameterArray 복제 | 런타임 객체가 공식 인터페이스를 제공하지 않아 `E_NOINTERFACE`로 실패 |
 
-`1,448개 라우팅`은 `1,448개의 MCP 도구가 화면에 노출된다`는 뜻이 아닙니다. 실제 운영 표면은 작업 중심 도구 74개와 재로드 도구 1개로 제한합니다. 모든 API를 각각 도구로 노출하면 도구 스키마가 지나치게 커지고, AI가 비슷한 도구 사이에서 헤매며, 선택·전송·추론 병목이 생길 수 있기 때문입니다.
+`1,448개 라우팅`은 `1,448개의 MCP 도구가 화면에 노출된다`는 뜻이 아닙니다. 실제 운영 표면은 작업 중심 도구 76개와 재로드 도구 1개로 제한합니다. 모든 API를 각각 도구로 노출하면 도구 스키마가 지나치게 커지고, AI가 비슷한 도구 사이에서 헤매며, 선택·전송·추론 병목이 생길 수 있기 때문입니다.
 
 원하는 기능이 공개 도구에 없더라도 내부 카탈로그와 네이티브 라우트에 대응 기능이 이미 있는 경우가 많습니다. 다음처럼 에이전트에게 **필요한 기능 하나만** 연결해 달라고 요청할 수 있습니다.
 
@@ -216,7 +237,7 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 - `uv` 패키지 관리자
 - `uv`가 내려받고 관리하는 Python 3.12를 버전별 `.venv`에 격리하여 사용
 
-배포 ZIP에는 개발자의 `.venv`나 일반 Python 설치본을 넣지 않습니다. `install.ps1`이 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\1.6.0\.venv`를 새로 만들며, 시작 스크립트는 그 안의 `Scripts\python.exe`만 실행합니다. PC에 별도로 설치된 시스템 Python 3.12는 선택하거나 수정하지 않습니다.
+배포 ZIP에는 개발자의 `.venv`나 일반 Python 설치본을 넣지 않습니다. `install.ps1`이 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\<배포버전>\.venv`를 새로 만들며, 시작 스크립트는 그 안의 `Scripts\python.exe`만 실행합니다. PC에 별도로 설치된 시스템 Python 3.12는 선택하거나 수정하지 않습니다.
 
 네이티브 UserAction DLL, 파일 경로 보안 모듈과 Event Bridge는 `Win32`, 런처는 `x64` Release 빌드입니다. 다른 한/글 주버전·비트 조합은 별도 검증 전까지 지원 대상으로 간주하지 않습니다.
 
@@ -236,7 +257,7 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 
 ### Claude Code에 요청
 
-> https://github.com/innae1121-bit/gsghwp.git 를 설치해줘. README.md와 CLAUDE.md를 먼저 읽고 DLL·레지스트리 백업/복원, 자동 업데이트와 전용 `.venv` 내용을 안내한 뒤 install.ps1 미리보기와 실제 설치를 실행해. 마지막에 gsg-hwp stdio MCP를 사용자 범위로 등록하고 연결 상태를 확인해줘.
+> https://github.com/innae1121-bit/gsghwp.git 를 설치해줘. README.md와 CLAUDE.md를 먼저 읽고 DLL·레지스트리 백업/복원, 자동 업데이트와 전용 `.venv` 내용을 안내한 뒤 install.ps1 미리보기와 실제 설치를 실행해. 마지막에 gsg-hwp-beta-live stdio MCP를 사용자 범위로 등록하고 연결 상태를 확인해줘.
 
 ### 다른 에이전트 앱에 요청
 
@@ -255,9 +276,11 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 | 레지스트리 3 | `HKCU\Software\HNC\HwpAutomation\Modules`의 `FilePathCheckerModule` 값 |
 | 원본 백업 | `%LOCALAPPDATA%\GSG_HWP\backups\<시각-식별자>` |
 | 활성 설치 기록 | `%LOCALAPPDATA%\GSG_HWP\state\active-install.json` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.6.0\.venv` |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\<배포버전>\.venv` |
 | 자동 업데이트 상태 | `%LOCALAPPDATA%\GSG_HWP\updater` |
 | 내려받은 버전 | `%LOCALAPPDATA%\GSG_HWP\packages\<버전>\gsg-hwp` |
+
+`<배포버전>`과 `<버전>` 자리의 실제 폴더 이름은 `plugins\gsg-hwp\compatibility-manifest.json`의 `distribution`에서 읽습니다. 네이티브 DLL 경로의 버전은 같은 파일의 `native_bridge`입니다.
 
 백업에는 다음 정보가 저장됩니다.
 
@@ -325,7 +348,7 @@ Codex와 한/글을 다시 시작하고 새 작업을 열어 플러그인과 MCP
 
 ```powershell
 $startMcp = (Resolve-Path ".\plugins\gsg-hwp\scripts\start-mcp.ps1").Path
-claude mcp add --transport stdio --scope user gsg-hwp -- `
+claude mcp add --transport stdio --scope user gsg-hwp-beta-live -- `
   powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $startMcp
 claude mcp list
 ```
@@ -339,7 +362,7 @@ Claude Code의 최신 MCP 명령 형식은 [공식 MCP 문서](https://code.clau
 ```json
 {
   "mcpServers": {
-    "gsg-hwp": {
+    "gsg-hwp-beta-live": {
       "type": "stdio",
       "command": "powershell.exe",
       "args": [
@@ -378,7 +401,7 @@ codex plugin remove gsg-hwp@gsg-hwp
 codex plugin marketplace remove gsg-hwp
 
 # Claude Code
-claude mcp remove gsg-hwp
+claude mcp remove gsg-hwp-beta-live
 ```
 
 설치 전에 네이티브 또는 파일 경로 보안 DLL이 있었다면 각 원본 DLL을 되돌리고, 없었다면 GSG HWP가 추가한 DLL을 제거합니다. 레지스트리 3개 값도 설치 전의 존재 여부·종류·값으로 복원합니다. 복구에 사용한 백업은 감사와 추가 복구를 위해 보존합니다. Python 환경을 남기려면 `uninstall.ps1 -AcceptChanges -KeepRuntime`을 사용합니다.
@@ -432,8 +455,7 @@ gsghwp/
    │  ├─ HancomLiveBridgeNative/      # C++ UserAction DLL 및 ATL 배치 소스
    │  ├─ HancomEventBridge/           # Win32 이벤트 사이드카
    │  └─ HancomMcpLauncher/           # MCP 사용자 세션 런처
-   ├─ skills/                         # HWP 작업 지침, Python MCP 구현, API 카탈로그
-   └─ tests/                          # 런타임 회귀 테스트
+   └─ skills/                         # HWP 작업 지침, Python MCP 구현, API 카탈로그
 ```
 
 ## 라이선스와 권리 범위

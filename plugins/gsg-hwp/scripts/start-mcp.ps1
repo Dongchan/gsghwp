@@ -6,6 +6,18 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Write-GsgHwpLauncherError {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Message + [Environment]::NewLine)
+    $stream = [Console]::OpenStandardError()
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush()
+}
+
 $bootstrapRoot = Split-Path -Parent $PSScriptRoot
 $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
 $bootstrapUpdateModule = Join-Path $bootstrapRoot "scripts\GsgHwp.Update.psm1"
@@ -38,13 +50,39 @@ $server = Join-Path $pluginRoot (
     "skills\automate-hancom-documents\scripts\hwp_mcp_hot_reload.py"
 )
 
-foreach ($requiredPath in @($python, $launcher, $server)) {
+$pendingNativeMarker = Join-Path $localAppData "GSG_HWP\state\pending-native-install.json"
+if (
+    (-not (Test-Path -LiteralPath $python -PathType Leaf)) -or
+    (Test-Path -LiteralPath $pendingNativeMarker -PathType Leaf)
+) {
+    $bootstrapModule = Join-Path $pluginRoot "scripts\GsgHwp.Bootstrap.psm1"
+    if (-not (Test-Path -LiteralPath $bootstrapModule -PathType Leaf)) {
+        $bootstrapModule = Join-Path $bootstrapRoot "scripts\GsgHwp.Bootstrap.psm1"
+    }
+    if (Test-Path -LiteralPath $bootstrapModule -PathType Leaf) {
+        Import-Module -Name $bootstrapModule -Force
+        $null = Initialize-GsgHwpRuntime -PackageRoot $pluginRoot `
+            -PendingMarkerPath $pendingNativeMarker -LocalAppData $localAppData
+    }
+}
+
+foreach ($requiredPath in @($launcher, $server)) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-        [Console]::Error.WriteLine(
-            "GSG HWP runtime is incomplete. Clone the repository and run install.ps1 -AcceptChanges."
+        Write-GsgHwpLauncherError -Message (
+            "GSG HWP 플러그인 파일이 빠져 있어 MCP 서버를 시작할 수 없습니다: $requiredPath"
+        )
+        Write-GsgHwpLauncherError -Message (
+            "최신 릴리스 zip을 플러그인 폴더에 다시 풀어 넣은 뒤 MCP 클라이언트를 재시작하세요."
         )
         exit 2
     }
+}
+
+if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+    Write-GsgHwpLauncherError -Message (
+        "GSG HWP Python 런타임을 준비하지 못해 MCP 서버를 시작할 수 없습니다: $python"
+    )
+    exit 2
 }
 
 & $launcher $python "-B" $server

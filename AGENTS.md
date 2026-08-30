@@ -6,7 +6,7 @@
 
 실제 설치 전에 다음 내용을 사용자에게 분명히 알린다.
 
-1. `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.121\HancomLiveBridge.dll`이 복사 또는 교체된다.
+1. `%LOCALAPPDATA%\HancomDocumentAutomation\native\<compatibility-manifest.json의 native_bridge 값>\HancomLiveBridge.dll`이 복사 또는 교체된다.
 2. `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll`이 복사 또는 교체된다.
 3. HKCU의 다음 세 값이 변경된다.
    - `Software\HNC\HwpUserAction\Modules`
@@ -41,7 +41,7 @@ codex plugin add gsg-hwp@gsg-hwp
 
 ```powershell
 $startMcp = (Resolve-Path ".\plugins\gsg-hwp\scripts\start-mcp.ps1").Path
-claude mcp add --transport stdio --scope user gsg-hwp -- `
+claude mcp add --transport stdio --scope user gsg-hwp-beta-live -- `
   powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $startMcp
 ```
 
@@ -49,13 +49,13 @@ claude mcp add --transport stdio --scope user gsg-hwp -- `
 
 `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <절대 경로>\plugins\gsg-hwp\scripts\start-mcp.ps1`을 stdio 서버로 등록한다.
 
-7. 한/글과 에이전트 앱을 다시 시작하고 새 작업에서 `gsg-hwp` 연결과 `hwp_runtime_info`를 확인한다.
+7. 한/글과 에이전트 앱을 다시 시작하고 새 작업에서 `gsg-hwp-beta-live` 연결과 `hwp_runtime_info`를 확인한다.
 
 ## 제거와 원상복구
 
 직전 자동 업데이트만 되돌리는 요청이면 한/글을 종료하고 `restore-update.ps1` 미리보기 후 `restore-update.ps1 -AcceptChanges`를 실행한다. 이 작업은 직전 DLL·HKCU·활성 패키지 상태를 복원하며 최초 설치 전 백업은 유지한다.
 
-1. 대상 앱에서 `gsg-hwp` MCP 또는 플러그인을 제거한다.
+1. 대상 앱에서 `gsg-hwp-beta-live` MCP 또는 `gsg-hwp` 플러그인을 제거한다.
 2. 한/글을 모두 종료한다.
 3. `uninstall.ps1`을 옵션 없이 실행해 복원 예정 내용을 표시한다.
 4. 안내 후 `uninstall.ps1 -AcceptChanges`를 실행한다.
@@ -72,7 +72,7 @@ codex plugin marketplace remove gsg-hwp
 Claude Code 제거 명령:
 
 ```powershell
-claude mcp remove gsg-hwp
+claude mcp remove gsg-hwp-beta-live
 ```
 
 설치나 복원이 실패하면 수동 레지스트리 편집, `regsvr32`, 다른 DLL 복사 또는 UI 자동화로 우회하지 않는다. 오류와 백업 파일 경로를 보존해 사용자에게 보고한다.

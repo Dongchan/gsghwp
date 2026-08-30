@@ -56,6 +56,7 @@ $requiredFiles = @(
     "plugins\gsg-hwp\LICENSE",
     "plugins\gsg-hwp\THIRD_PARTY_NOTICES.md",
     "plugins\gsg-hwp\scripts\start-mcp.ps1",
+    "plugins\gsg-hwp\scripts\GsgHwp.Bootstrap.psm1",
     "plugins\gsg-hwp\scripts\GsgHwp.Update.psm1",
     "plugins\gsg-hwp\update-policy.json"
 )
@@ -164,7 +165,7 @@ Assert-Equal -Expected ($expectedDisabledApi -join "|") `
 Assert-Equal -Expected "gsg-hwp" -Actual $marketplace.plugins[0].name -Message "Marketplace plugin mismatch"
 Assert-Equal -Expected "./plugins/gsg-hwp" -Actual $marketplace.plugins[0].source.path `
     -Message "Marketplace source path mismatch"
-Assert-Equal -Expected "powershell.exe" -Actual $mcp.mcpServers."gsg-hwp".command `
+Assert-Equal -Expected "powershell.exe" -Actual $mcp.mcpServers."gsg-hwp-beta-live".command `
     -Message "MCP must start through the portable PowerShell launcher"
 $installSource = Get-Content -LiteralPath (Join-Path $repositoryRoot "install.ps1") -Raw -Encoding UTF8
 $updaterSource = Get-Content -LiteralPath (
@@ -181,6 +182,10 @@ Assert-True -Condition ($launcherSource -match "\.venv\\Scripts\\python\.exe") `
     -Message "MCP launcher must use the versioned virtual environment"
 Assert-True -Condition ($launcherSource -notmatch "Get-Command\s+['`"]?python") `
     -Message "MCP launcher must not fall back to a system Python"
+Assert-True -Condition ($launcherSource -match "Initialize-GsgHwpRuntime") `
+    -Message "MCP launcher must provision a missing runtime on first run"
+Assert-True -Condition ($launcherSource -notmatch "Clone the repository") `
+    -Message "MCP launcher must not tell packaged users to clone the repository"
 
 $launcher = Join-Path $pluginRoot "addon\HancomMcpLauncher\bin\Release\HancomMcpLauncher.exe"
 $eventBridge = Join-Path $pluginRoot "addon\HancomEventBridge\bin\Release\HancomEventBridge.exe"

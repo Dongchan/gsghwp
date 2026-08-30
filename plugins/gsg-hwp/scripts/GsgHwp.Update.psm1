@@ -277,8 +277,10 @@ function Invoke-GsgHwpRuntimeSync {
     $previousEnvironment = $env:UV_PROJECT_ENVIRONMENT
     try {
         $env:UV_PROJECT_ENVIRONMENT = $Paths.RuntimeEnvironment
+        $ErrorActionPreference = "Continue"
         $syncOutput = & $uv.Source sync --managed-python --locked --no-dev `
             --no-install-project --project $PluginRoot 2>&1
+        $ErrorActionPreference = "Stop"
         $syncOutput | Set-Content -LiteralPath $LogPath -Encoding UTF8
         if ($LASTEXITCODE -ne 0) {
             throw "Automatic update Python runtime synchronization failed."
@@ -312,9 +314,11 @@ function Test-GsgHwpUpdatedRuntime {
     $previousPythonPath = $env:PYTHONPATH
     try {
         $env:PYTHONPATH = $scripts
+        $ErrorActionPreference = "Continue"
         $testOutput = & $python -B -c (
             "import hwp_mcp; assert callable(hwp_mcp.build_server)"
         ) 2>&1
+        $ErrorActionPreference = "Stop"
         $testOutput | Add-Content -LiteralPath $LogPath -Encoding UTF8
         if ($LASTEXITCODE -ne 0) {
             throw "Updated MCP runtime self-test failed."
@@ -574,7 +578,9 @@ Export-ModuleMember -Function @(
     "Expand-GsgHwpUpdateArchive",
     "Get-GsgHwpActivePackageRoot",
     "Invoke-GsgHwpAutoUpdate",
+    "Invoke-GsgHwpRuntimeSync",
     "Read-GsgHwpUpdatePolicy",
     "Resolve-GsgHwpPackageRoot",
+    "Test-GsgHwpUpdatedRuntime",
     "Test-GsgHwpUpdateManifest"
 )

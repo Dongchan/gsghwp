@@ -19,8 +19,9 @@ $manifest = Get-Content -LiteralPath $paths.ManifestPath -Raw -Encoding UTF8 | C
 Write-Host "GSG HWP v$($manifest.distribution) 원상복구 예정 변경사항"
 Write-Host "  설치 전 HKCU 레지스트리 3개 값 복원"
 Write-Host "  설치 전 네이티브/파일 경로 보안 DLL 복원 또는 GSG HWP가 추가한 DLL 제거"
+Write-Host "  자동 업데이트 패키지·상태 제거: $($paths.PackagesRoot), $($paths.UpdaterRoot)"
 if (-not $KeepRuntime) {
-    Write-Host "  전용 Python 환경 제거: $($paths.RuntimeVersionRoot)"
+    Write-Host "  전용 Python 환경 제거(설치된 모든 버전): $($paths.RuntimeRoot)"
 }
 Write-Host "  복구 백업 파일은 감사와 추가 복구를 위해 보존"
 
@@ -44,4 +45,4 @@ else {
     Write-Host "활성 설치 기록이 없어 DLL과 레지스트리는 변경하지 않았습니다."
 }
 Write-Host "Codex 플러그인 제거 명령: codex plugin remove gsg-hwp@gsg-hwp"
-Write-Host "변경 사항 적용을 위해 한/글과 Codex를 다시 시작하세요."
+Write-Host "변경 사항 적용을 위해 한/글과 Codex·Claude를 다시 시작하세요."
