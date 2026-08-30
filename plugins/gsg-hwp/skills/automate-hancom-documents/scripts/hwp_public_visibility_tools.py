@@ -24,7 +24,7 @@ from hwp_public_visibility_resolver import (
     resolve_visibility_table,
 )
 from hwp_visibility_series_contract import VisibilitySeriesPlanError
-from hwp_visibility_template import build_visibility_series_plan
+from hwp_visibility_template import build_visibility_series_plan_with_observation
 
 
 SYNC_VISIBILITY_INTENT = "예비조망점표 기준 가시권 분석표 동기화"
@@ -124,15 +124,20 @@ class HwpPublicVisibilityTools:
         if isinstance(template, PublicActionResult):
             return template.model_copy(update={"request_id": operation_id})
         try:
-            plan = build_visibility_series_plan(
+            plan, observation = build_visibility_series_plan_with_observation(
                 source.table,
                 template.table,
                 visibility_folder,
                 current_folder,
             )
         except VisibilitySeriesPlanError as error:
-            return self._public(
-                _failure(operation_id, str(error)),
+            result = self._public(_failure(operation_id, str(error)))
+            return result.model_copy(
+                update={
+                    "visibility_template_observation": (error.template_observation,)
+                    if error.template_observation is not None
+                    else (),
+                }
             )
         inputs = HwpOperateInputs(
             request_id=operation_id,
@@ -159,4 +164,30 @@ class HwpPublicVisibilityTools:
             inputs,
             None,
         )
-        return self._public(result)
+        viewpoint_count = sum(
+            1
+            for block in plan.blocks
+            for cell in block.text_cells
+            if cell.replacement.startswith("예비조망점")
+        )
+        expected_images = viewpoint_count * 2
+        placed_images = sum(len(block.images) for block in plan.blocks)
+        guidance: tuple[str, ...] = ()
+        if placed_images == 0:
+            guidance = (
+                "사진 폴더가 없거나 번호 사진을 찾지 못해 표 개수와 값만 동기화했습니다.",
+            )
+        elif placed_images < expected_images:
+            guidance = (
+                (
+                    f"사진 {placed_images}/{expected_images}장만 매칭해 넣었습니다. "
+                    + "없는 번호는 표 값만 채웠습니다."
+                ),
+            )
+        public = self._public(result)
+        return public.model_copy(
+            update={
+                "visibility_template_observation": (observation,),
+                "input_guidance": (*public.input_guidance, *guidance),
+            }
+        )

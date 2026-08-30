@@ -1,25 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from types import MappingProxyType
-from typing import Final
-
 from hwp_errors import HwpLiveError
 from hwp_live_native_action_models import NativeSnapshot
 from hwp_live_native_format_inputs import TextFormatSpec
 from hwp_live_native_text_format import rgb_value
-from hwp_live_values import Alignment
-
-
-_ALIGNMENT_VALUES: Final[Mapping[Alignment, int]] = MappingProxyType(
-    {
-        "inherit": -1,
-        "left": 0,
-        "center": 1,
-        "right": 2,
-        "justify": 3,
-    }
-)
+from hwp_live_values import ALIGNMENT_VALUES as _ALIGNMENT_VALUES
 
 
 def verify_text_format(

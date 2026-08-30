@@ -5,21 +5,58 @@
 #include <atlcomcli.h>
 
 #include "../BridgeStatus.h"
+#include "../DocumentGraphProtocol.h"
+#include "../OfficialApiVirtualMethod.h"
 #include "../ParagraphText.h"
 #include "../TableInspection.h"
 #include "FakeParameterArrayDispatch.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
+
+bool DocumentGraphSchemaSmoke();
+bool DocumentGraphPropertyRegistrySmoke(const wchar_t* scenario);
+bool DocumentGraphCodecStoreSmoke();
+bool DocumentGraphCaptureSmoke();
+bool DocumentGraphCaptureMismatchDiagnosticsSmoke();
+bool DocumentGraphCaptureIntegrationSmoke();
+bool DocumentGraphCaptureNegativeSmoke();
+bool DocumentGraphControlsSmoke();
+bool DocumentGraphEffectivePropertiesSmoke();
+bool DocumentGraphImagesSmoke();
+bool DocumentGraphIdentitySmoke();
+bool DocumentGraphLayoutSmoke();
+bool DocumentGraphProtocolSmoke();
+bool DocumentGraphPatchValidateProtocolSmoke();
+bool EmitDocumentGraphProtocolGolden(const wchar_t* const outputRoot);
+bool EmitDocumentGraphProtocolLarge(std::uint64_t fieldBytes);
+bool DocumentGraphReadCapabilitySmoke();
+bool DocumentGraphContinuationSmoke();
+bool DocumentGraphQuerySmoke();
+bool DocumentGraphStoriesSmoke();
+bool DocumentGraphTablesSmoke();
+bool DocumentGraphTextSmoke();
+bool OfficialApiCapabilitySmoke();
+bool TextPatchReadbackSmoke();
+bool TextPatchProtocolSmoke();
+bool TableReaderPerformanceSmoke();
+bool ReferenceClosurePerformanceSmoke();
+int RunNativeStructureFixtures(
+    const wchar_t* fixtureRoot,
+    const wchar_t* receiptRoot);
 
 namespace {
 
@@ -32,6 +69,132 @@ constexpr IID kDispatchEventIid = {
     0x40D5,
     {0x88, 0xCA, 0xCA, 0x43, 0x9C, 0xC6, 0x82, 0x0C},
 };
+
+std::wstring FileSha256(const std::wstring& path) {
+    HANDLE file = CreateFileW(
+        path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE |
+        FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) return {};
+    HCRYPTPROV provider = 0;
+    HCRYPTHASH hash = 0;
+    if (!CryptAcquireContextW(
+            &provider, nullptr, nullptr, PROV_RSA_AES,
+            CRYPT_VERIFYCONTEXT | CRYPT_SILENT) ||
+        !CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash)) {
+        if (provider != 0) CryptReleaseContext(provider, 0);
+        CloseHandle(file);
+        return {};
+    }
+    std::array<std::uint8_t, 1U << 16> buffer{};
+    bool ok = true;
+    for (;;) {
+        DWORD count = 0;
+        if (!ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size()),
+                      &count, nullptr)) {
+            ok = false;
+            break;
+        }
+        if (count == 0) break;
+        if (!CryptHashData(hash, buffer.data(), count, 0)) {
+            ok = false;
+            break;
+        }
+    }
+    std::array<std::uint8_t, 32> digest{};
+    DWORD digestBytes = static_cast<DWORD>(digest.size());
+    ok = ok && CryptGetHashParam(
+        hash, HP_HASHVAL, digest.data(), &digestBytes, 0) &&
+        digestBytes == digest.size();
+    CryptDestroyHash(hash);
+    CryptReleaseContext(provider, 0);
+    CloseHandle(file);
+    if (!ok) return {};
+    static constexpr wchar_t digits[] = L"0123456789abcdef";
+    std::wstring encoded;
+    encoded.reserve(digest.size() * 2);
+    for (const std::uint8_t value : digest) {
+        encoded.push_back(digits[value >> 4]);
+        encoded.push_back(digits[value & 0x0f]);
+    }
+    return encoded;
+}
+
+std::string Utf8(const std::wstring_view value) {
+    if (value.empty()) return {};
+    const int byteCount = WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (byteCount <= 0) return {};
+    std::string bytes(static_cast<std::size_t>(byteCount), '\0');
+    if (WideCharToMultiByte(
+            CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+            static_cast<int>(value.size()), bytes.data(), byteCount,
+            nullptr, nullptr) != byteCount) return {};
+    return bytes;
+}
+
+std::wstring Sha256Bytes(const std::string_view bytes) {
+    HCRYPTPROV provider = 0;
+    HCRYPTHASH hash = 0;
+    if (!CryptAcquireContextW(
+            &provider, nullptr, nullptr, PROV_RSA_AES,
+            CRYPT_VERIFYCONTEXT | CRYPT_SILENT) ||
+        !CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash)) {
+        if (provider != 0) CryptReleaseContext(provider, 0);
+        return {};
+    }
+    const bool hashed = bytes.size() <= UINT32_MAX && CryptHashData(
+        hash, reinterpret_cast<const BYTE*>(bytes.data()),
+        static_cast<DWORD>(bytes.size()), 0) != FALSE;
+    std::array<std::uint8_t, 32> digest{};
+    DWORD digestBytes = static_cast<DWORD>(digest.size());
+    const bool ok = hashed && CryptGetHashParam(
+        hash, HP_HASHVAL, digest.data(), &digestBytes, 0) != FALSE &&
+        digestBytes == digest.size();
+    CryptDestroyHash(hash);
+    CryptReleaseContext(provider, 0);
+    if (!ok) return {};
+    static constexpr wchar_t digits[] = L"0123456789abcdef";
+    std::wstring encoded;
+    encoded.reserve(64);
+    for (const std::uint8_t value : digest) {
+        encoded.push_back(digits[value >> 4]);
+        encoded.push_back(digits[value & 0x0f]);
+    }
+    return encoded;
+}
+
+std::wstring CanonicalArgvSha256(
+    const int argumentCount, wchar_t** const arguments) {
+    std::string canonical;
+    for (int index = 0; index < argumentCount; ++index) {
+        const std::string argument = Utf8(arguments[index]);
+        const std::uint64_t size = argument.size();
+        for (unsigned int shift = 0; shift != 64; shift += 8)
+            canonical.push_back(static_cast<char>((size >> shift) & 0xff));
+        canonical += argument;
+    }
+    return Sha256Bytes(canonical);
+}
+
+std::uint64_t ProcessStartFileTime() noexcept {
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(
+            GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0;
+    ULARGE_INTEGER value{};
+    value.LowPart = created.dwLowDateTime;
+    value.HighPart = created.dwHighDateTime;
+    return value.QuadPart;
+}
+
+bool IsLowerHex64(const wchar_t* const value) noexcept {
+    if (value == nullptr || std::wcslen(value) != 64) return false;
+    return std::all_of(value, value + 64, [](const wchar_t current) {
+        return (current >= L'0' && current <= L'9') ||
+            (current >= L'a' && current <= L'f');
+    });
+}
 
 std::wstring EncodeUtf8Base64(const std::wstring& value) {
     const int byteCount = WideCharToMultiByte(
@@ -82,13 +245,317 @@ std::wstring EncodeUtf8Base64(const std::wstring& value) {
 
 bool WriteCheckpointFixture(
     const std::filesystem::path& path,
-    const std::string& encodedBlock) {
+    const std::string& encodedBlock,
+    const std::string& contentSignature) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    constexpr char magic[] = "GSG_HWP_ENCODED_BLOCK_V1\n";
-    output.write(magic, static_cast<std::streamsize>(sizeof(magic) - 1));
+    constexpr char legacyMagic[] = "GSG_HWP_ENCODED_BLOCK_V1\n";
+    constexpr char signedMagic[] = "GSG_HWP_ENCODED_BLOCK_V2\n";
+    if (contentSignature.empty()) {
+        output.write(
+            legacyMagic,
+            static_cast<std::streamsize>(sizeof(legacyMagic) - 1));
+    } else {
+        output.write(
+            signedMagic,
+            static_cast<std::streamsize>(sizeof(signedMagic) - 1));
+        output.write(
+            contentSignature.data(),
+            static_cast<std::streamsize>(contentSignature.size()));
+        output.put('\n');
+    }
     output.write(
         encodedBlock.data(),
         static_cast<std::streamsize>(encodedBlock.size()));
+    output.close();
+    return output.good();
+}
+
+// The inverse of EncodeUtf8Base64, and the reason it exists: a response carries
+// its message base64-encoded, so searching the raw response text for a phrase
+// the bridge reported can never match. A check written that way does not fail
+// loudly -- it silently reads a working feature as broken, which is exactly what
+// happened to the rollback check below.
+std::wstring DecodeUtf8Base64(const std::wstring& value) {
+    const auto sextet = [](const wchar_t character) -> int {
+        if (character >= L'A' && character <= L'Z') {
+            return character - L'A';
+        }
+        if (character >= L'a' && character <= L'z') {
+            return character - L'a' + 26;
+        }
+        if (character >= L'0' && character <= L'9') {
+            return character - L'0' + 52;
+        }
+        if (character == L'+') {
+            return 62;
+        }
+        if (character == L'/') {
+            return 63;
+        }
+        return -1;
+    };
+    std::vector<unsigned char> bytes;
+    std::uint32_t accumulator = 0;
+    int bits = 0;
+    for (const wchar_t character : value) {
+        if (character == L'=') {
+            break;
+        }
+        const int decoded = sextet(character);
+        if (decoded < 0) {
+            return L"";
+        }
+        accumulator = (accumulator << 6) | static_cast<std::uint32_t>(decoded);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            bytes.push_back(
+                static_cast<unsigned char>((accumulator >> bits) & 0xFFU));
+        }
+    }
+    if (bytes.empty()) {
+        return L"";
+    }
+    const int characterCount = MultiByteToWideChar(
+        CP_UTF8,
+        MB_ERR_INVALID_CHARS,
+        reinterpret_cast<const char*>(bytes.data()),
+        static_cast<int>(bytes.size()),
+        nullptr,
+        0);
+    if (characterCount <= 0) {
+        return L"";
+    }
+    std::wstring decoded(static_cast<size_t>(characterCount), L'\0');
+    if (MultiByteToWideChar(
+            CP_UTF8,
+            MB_ERR_INVALID_CHARS,
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<int>(bytes.size()),
+            decoded.data(),
+            characterCount) != characterCount) {
+        return L"";
+    }
+    return decoded;
+}
+
+// One tab-separated field of a response, decoded. Out of range reads as empty.
+std::wstring DecodedResponseField(const std::wstring& response, const size_t index) {
+    size_t start = 0;
+    for (size_t field = 0; field <= index; ++field) {
+        const size_t end = response.find(L'\t', start);
+        if (field == index) {
+            return DecodeUtf8Base64(
+                end == std::wstring::npos
+                    ? response.substr(start)
+                    : response.substr(start, end - start));
+        }
+        if (end == std::wstring::npos) {
+            return L"";
+        }
+        start = end + 1;
+    }
+    return L"";
+}
+
+// Call results, decoded to one "method=value" per line.
+//
+// They ride inside one base64 field, and every entry base64-encodes its method
+// name and its string value again. Searching the outer field for a word can
+// therefore never match, which is exactly how a working probe read as broken --
+// the same mistake that read a working rollback message as missing two rounds
+// ago. Decoding is the only way to assert on what the bridge actually said.
+std::wstring DecodedCallResults(const std::wstring& response) {
+    const std::wstring block = DecodedResponseField(response, 8);
+    std::wstring text;
+    size_t start = 0;
+    while (start <= block.size()) {
+        const size_t end = block.find(L'\n', start);
+        const std::wstring line = end == std::wstring::npos
+            ? block.substr(start)
+            : block.substr(start, end - start);
+        if (!line.empty()) {
+            std::vector<std::wstring> parts;
+            size_t field = 0;
+            for (;;) {
+                const size_t stop = line.find(L'\t', field);
+                parts.push_back(
+                    stop == std::wstring::npos
+                        ? line.substr(field)
+                        : line.substr(field, stop - field));
+                if (stop == std::wstring::npos) {
+                    break;
+                }
+                field = stop + 1;
+            }
+            if (parts.size() >= 2) {
+                text += DecodeUtf8Base64(parts[1]);
+                text += L'=';
+                if (parts.size() >= 3) {
+                    // Only a string value is encoded again; a number is plain.
+                    text += parts[0] == L"S" ? DecodeUtf8Base64(parts[2]) : parts[2];
+                }
+                text += L'\n';
+            }
+        }
+        if (end == std::wstring::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return text;
+}
+
+std::vector<std::filesystem::path> CheckpointRollbackCopies(
+    const std::filesystem::path& checkpoint) {
+    std::vector<std::filesystem::path> copies;
+    const std::wstring prefix = checkpoint.filename().wstring() + L".";
+    std::error_code error;
+    for (std::filesystem::directory_iterator entry(
+             checkpoint.parent_path(),
+             error);
+         !error && entry != std::filesystem::directory_iterator();
+         entry.increment(error)) {
+        const std::wstring name = entry->path().filename().wstring();
+        constexpr wchar_t suffix[] = L".rollback";
+        if (name.rfind(prefix, 0) == 0 &&
+            name.size() >= std::size(suffix) - 1 &&
+            name.compare(
+                name.size() - (std::size(suffix) - 1),
+                std::size(suffix) - 1,
+                suffix) == 0) {
+            copies.push_back(entry->path());
+        }
+    }
+    return copies;
+}
+
+// A restore that fails after both attempts keeps a uniquely named copy of the
+// document it found. Every case that ends that way clears only this checkpoint's
+// copies, so a later case never mistakes them for its own evidence.
+void RemoveCheckpointRollbackCopy(const std::filesystem::path& checkpoint) {
+    std::error_code ignored;
+    for (const std::filesystem::path& rollback :
+         CheckpointRollbackCopies(checkpoint)) {
+        static_cast<void>(std::filesystem::remove(rollback, ignored));
+        static_cast<void>(std::filesystem::remove(
+            std::filesystem::path(rollback.wstring() + L".gsgmeta"),
+            ignored));
+    }
+}
+
+bool RemoveAbandonedCheckpointSmokeFiles() {
+    constexpr std::wstring_view prefixes[]{
+        L"HancomLiveBridgeCheckpointDocumentSmoke-",
+        L"HancomLiveBridgeUserDocumentSmoke-",
+        L"HancomLiveBridgeBlockProbeSmoke-",
+        L"HancomLiveBridgeCheckpointSmoke-",
+        L"HancomLiveBridgeLegacyCheckpointSmoke-",
+    };
+    const auto hasOwnedPrefix = [&](const std::wstring& name) {
+        return std::any_of(
+            std::begin(prefixes),
+            std::end(prefixes),
+            [&](const std::wstring_view prefix) {
+                return name.size() >= prefix.size() &&
+                    name.compare(0, prefix.size(), prefix) == 0;
+            });
+    };
+    std::error_code error;
+    const std::filesystem::path root = std::filesystem::temp_directory_path(error);
+    if (error) {
+        return false;
+    }
+    for (std::filesystem::directory_iterator entries(root, error), end;
+         !error && entries != end;
+         entries.increment(error)) {
+        const std::wstring name = entries->path().filename().wstring();
+        const bool owned = hasOwnedPrefix(name);
+        if (!owned) {
+            continue;
+        }
+        std::filesystem::permissions(
+            entries->path(),
+            std::filesystem::perms::owner_all,
+            std::filesystem::perm_options::add,
+            error);
+        if (error || !std::filesystem::remove(entries->path(), error) || error) {
+            return false;
+        }
+    }
+    if (error) {
+        return false;
+    }
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(root, error)) {
+        const std::wstring name = entry.path().filename().wstring();
+        if (hasOwnedPrefix(name)) {
+            return false;
+        }
+    }
+    return !error;
+}
+
+// A checkpoint written in the document-file layout: it carries none of our
+// magics, which is exactly how the bridge tells the two layouts apart.
+bool WriteDocumentCheckpointFixture(const std::filesystem::path& path) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    constexpr char body[] = "HWP DOCUMENT FILE CHECKPOINT FIXTURE";
+    output.write(body, static_cast<std::streamsize>(sizeof(body) - 1));
+    output.close();
+    return output.good();
+}
+
+std::string ReadFileBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string(
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>());
+}
+
+// The content signature this fake engine produces for a restored document.
+//
+// It has to be here because the restore refuses to delete anything inside the
+// checkpoint's own area unless a signature exists to catch a wrong deletion --
+// so a checkpoint without one cannot exercise that path at all. Every success
+// case below is therefore a real signature comparison and not a page count.
+//
+// The value is measured, not invented: run any of these cases with the wrong
+// one and the refusal prints "expected <this> but read <that>".
+// Note the doubled "SIG": the sidecar line is the key "SIG " followed by the
+// signature string, and a signature string starts with "SIG " of its own. The
+// writer in ActionLifecycle.cpp does the same, and a fixture that wrote only one
+// of them silently produced a signature nothing could ever match.
+constexpr char kCheckpointDocumentSignature[] =
+    "SIG 4 1 10845636922292024283 10045998281374587588 19 0 2 "
+    "10610860378690137251 146";
+constexpr LONG kCheckpointDocumentExpectedPages = 4;
+constexpr char kCheckpointEmptyCaptureWithTextSignature[] =
+    "SIG 4 1 10845636922292024283 1469598103934665603 0 1 2 "
+    "10610860378690137251 146";
+constexpr char kCheckpointPictureOnlySignature[] =
+    "SIG 4 1 10845636922292024283 1469598103934665603 0 1 1 "
+    "10610860378690137251 146";
+
+// The sidecar a document-file checkpoint carries its format and signature in.
+bool WriteDocumentCheckpointMeta(
+    const std::filesystem::path& path,
+    const std::string& signature,
+    const std::string& originSignature = "",
+    const LONG originPageCount = -1) {
+    std::ofstream output(
+        std::filesystem::path(path.wstring() + L".gsgmeta"),
+        std::ios::binary | std::ios::trunc);
+    std::string text = "GSG_HWP_DOCUMENT_FILE_V1\nFMT HWP\n";
+    if (!signature.empty()) {
+        text += "SIG " + signature + "\n";
+    }
+    if (!originSignature.empty() && originPageCount > 0) {
+        text += "HISTORY P1_SINGLE_TEXT_UNDO\n";
+        text += "ORIGIN " + originSignature + "\n";
+        text += "ORIGIN_PAGES " + std::to_string(originPageCount) + "\n";
+    }
+    output.write(text.data(), static_cast<std::streamsize>(text.size()));
     output.close();
     return output.good();
 }
@@ -149,6 +616,95 @@ bool CellTopologyOwnerIndexSmoke() {
         topology.OwnerAt(2, 1) == nullptr;
 }
 
+// Runs the real sampler on real topology output. The wanted positions and the
+// coordinates CellTopology::Build writes have to count from the same base; when
+// they did not, this returned nothing for every table and cell appearance was
+// silently absent from every inspection response.
+bool TableCellFormatSamplingSmoke() {
+    const auto addressesOf = [](const hancom::inspection::CellTopology& topology) {
+        std::vector<std::wstring> addresses;
+        for (const hancom::inspection::CellTopologyCell* const cell :
+             hancom::inspection::SampleCells(topology.Cells())) {
+            addresses.push_back(cell->address);
+        }
+        return addresses;
+    };
+
+    hancom::inspection::CellTopology grid;
+    std::wstring error;
+    if (!grid.Build(
+            {
+                IndexedTopologyCell(L"A1"), IndexedTopologyCell(L"B1"),
+                IndexedTopologyCell(L"C1"), IndexedTopologyCell(L"D1"),
+                IndexedTopologyCell(L"A2"), IndexedTopologyCell(L"B2"),
+                IndexedTopologyCell(L"C2"), IndexedTopologyCell(L"D2"),
+                IndexedTopologyCell(L"A3"), IndexedTopologyCell(L"B3"),
+                IndexedTopologyCell(L"C3"), IndexedTopologyCell(L"D3"),
+            },
+            &error)) {
+        return false;
+    }
+    // The sampler crosses first/middle/last columns with first/early/middle/
+    // last rows. In a 3x4 table early and middle are both row 2, yielding
+    // nine distinct physical owners in canonical wanted-position order.
+    if (addressesOf(grid) != std::vector<std::wstring>{
+            L"A1", L"B1", L"D1", L"A2", L"B2", L"D2",
+            L"A3", L"B3", L"D3"}) {
+        return false;
+    }
+
+    // A merged first row answers through its owner, so the first two wanted
+    // positions collapse into one record instead of dropping out.
+    hancom::inspection::CellTopology merged;
+    if (!merged.Build(
+            {
+                IndexedTopologyCell(L"A1", 1, 4),
+                IndexedTopologyCell(L"A2"), IndexedTopologyCell(L"B2"),
+                IndexedTopologyCell(L"C2"), IndexedTopologyCell(L"D2"),
+                IndexedTopologyCell(L"A3"), IndexedTopologyCell(L"B3"),
+                IndexedTopologyCell(L"C3"), IndexedTopologyCell(L"D3"),
+            },
+            &error)) {
+        return false;
+    }
+    if (addressesOf(merged) != std::vector<std::wstring>{
+            L"A1", L"A2", L"B2", L"D2", L"A3", L"B3", L"D3"}) {
+        return false;
+    }
+
+    // One row, one column: every wanted position is the same cell.
+    hancom::inspection::CellTopology single;
+    if (!single.Build({IndexedTopologyCell(L"A1")}, &error)) {
+        return false;
+    }
+    if (addressesOf(single) != std::vector<std::wstring>{L"A1"}) {
+        return false;
+    }
+
+    // Nothing inspected, nothing sampled -- and no crash reaching for row 0.
+    return hancom::inspection::SampleCells({}).empty();
+}
+
+bool OfficialApiVirtualPropertyGetSmoke() {
+    auto* const target = new FakeVirtualPropertyGetDispatch();
+    CComPtr<IUnknown> interfaceObject;
+    size_t slot = 0;
+    const HRESULT status =
+        hancom::official_api::ResolveVirtualPropertyGet(
+            target,
+            L"HAction",
+            VT_DISPATCH,
+            interfaceObject,
+            &slot);
+    static_cast<void>(target->Release());
+    if (FAILED(status)) {
+        std::wcerr << L"ResolveVirtualPropertyGet failed: 0x"
+                   << std::hex << static_cast<unsigned long>(status)
+                   << std::dec << L'\n';
+    }
+    return status == S_OK && interfaceObject != nullptr && slot == 9U;
+}
+
 bool ParagraphTextNormalizationSmoke() {
     return hancom::text::SameParagraphText(
                L"first\nsecond",
@@ -171,6 +727,50 @@ struct IHncUserActionModule {
     virtual BOOL UpdateUI(LPCSTR action, LPDISPATCH object, UINT* state) = 0;
     virtual int DoAction(LPCSTR action, LPDISPATCH object) = 0;
 };
+
+// Since 0.5.173 the enumeration is the three lifecycle actions followed by the
+// 32 ribbon slot AIDs. Checking the slots by shape rather than by 32 literals
+// keeps this smoke from becoming a second copy of the pool that can drift.
+constexpr char kSlotActionPrefix[] = "{2C445309-901C-49B2-BED1-D2D9CFFB";
+constexpr int kSlotActionPrefixLength = 33;
+constexpr int kSlotActionLength = 38;
+constexpr int kLifecycleActionCount = 3;
+
+bool SlotActionMatches(const char* const action, const int index) noexcept {
+    if (action == nullptr ||
+        std::strlen(action) != static_cast<std::size_t>(kSlotActionLength) ||
+        std::strncmp(action, kSlotActionPrefix, kSlotActionPrefixLength) != 0) {
+        return false;
+    }
+    char expected[6] = {};
+    if (sprintf_s(expected, "%04X}", index) < 0) {
+        return false;
+    }
+    return std::strcmp(action + kSlotActionPrefixLength, expected) == 0;
+}
+
+bool UserActionEnumerationMatches(IHncUserActionModule* const module) noexcept {
+    if (module == nullptr) {
+        return false;
+    }
+    const char* const initial = module->EnumAction(0);
+    const char* const load = module->EnumAction(1);
+    const char* const bootstrap = module->EnumAction(2);
+    if (initial == nullptr || load == nullptr || bootstrap == nullptr ||
+        std::strcmp(initial, kOnInitialLoad) != 0 ||
+        std::strcmp(load, kOnLoad) != 0 ||
+        std::strcmp(bootstrap, kBootstrapAction) != 0) {
+        return false;
+    }
+    for (int index = 0; index < bridge_status::kSlotCount; ++index) {
+        if (!SlotActionMatches(
+                module->EnumAction(kLifecycleActionCount + index), index)) {
+            return false;
+        }
+    }
+    return module->EnumAction(
+               kLifecycleActionCount + bridge_status::kSlotCount) == nullptr;
+}
 
 class FakeListParaPosDispatch final : public IDispatch {
 public:
@@ -379,6 +979,14 @@ public:
         HwpLineType = 87,
         HwpLineWidth = 88,
         MutateTableTopology = 89,
+        HInsertFile = 90,
+        PageBreakBefore = 91,
+        GetHeadingString = 92,
+        HFindReplace = 93,
+        FindString = 94,
+        FindDirection = 95,
+        FindMatchCase = 96,
+        FindIgnoreMessage = 97,
     };
 
     bool CompletedLifecycleSequence() const noexcept {
@@ -502,6 +1110,28 @@ public:
                 nullptr));
             CloseHandle(file);
         }
+    }
+
+    // A document too large for the engine to serialize. GetTextFile answers
+    // S_OK with an empty string, having already spent the whole attempt, so
+    // the count of attempts is the cost this fixture measures.
+    void PrepareSaveVerifyOversizeRefusalFixture() {
+        PrepareSaveVerifySerializationFixture();
+        unstableSerializationMetadataFixture_ = false;
+        oversizeSerializationRefusalFixture_ = true;
+        hwpmlSerializationAttempts_ = 0;
+    }
+
+    // Refusing to serialize is this one fixture's business. Every later
+    // fixture in the run needs the engine answering normally again, so the
+    // refusal is switched off explicitly rather than left for the next
+    // Prepare call to remember.
+    void ClearSaveVerifyOversizeRefusalFixture() noexcept {
+        oversizeSerializationRefusalFixture_ = false;
+    }
+
+    size_t HwpmlSerializationAttempts() const noexcept {
+        return hwpmlSerializationAttempts_;
     }
 
     void PrepareSaveVerifySectionDiagnosticFixture() {
@@ -661,17 +1291,31 @@ public:
     void PrepareCheckpointRestoreFixture(const bool wrongTargetPageCount) {
         checkpointRestoreFixture_ = true;
         checkpointWrongTargetPageCount_ = wrongTargetPageCount;
+        checkpointSetTextFileFails_ = false;
         checkpointDocumentBlock_ = L"CHECKPOINT_ROLLBACK";
         checkpointSetAttempts_ = 0;
+        checkpointBlockBodyPresent_ = true;
+        checkpointBlockBodySelected_ = false;
         pageCount_ = 2;
+        currentList_ = 0;
+        currentParagraph_ = 0;
+        currentCharacter_ = 0;
         runActions_.clear();
+    }
+
+    void PrepareCheckpointRestoreFailureFixture() {
+        PrepareCheckpointRestoreFixture(true);
+        checkpointSetTextFileFails_ = true;
     }
 
     bool CheckpointRestoreSucceeded() const noexcept {
         const std::vector<std::wstring> expected{
             L"MoveDocBegin",
-            L"SelectAll",
+            L"MoveDocEnd",
             L"Delete",
+            L"MoveDocBegin",
+            L"MoveDocEnd",
+            L"MoveDocBegin",
             L"MoveDocBegin",
         };
         return checkpointRestoreFixture_ &&
@@ -684,12 +1328,18 @@ public:
     bool CheckpointRollbackSucceeded() const noexcept {
         const std::vector<std::wstring> expected{
             L"MoveDocBegin",
-            L"SelectAll",
+            L"MoveDocEnd",
             L"Delete",
             L"MoveDocBegin",
+            L"MoveDocEnd",
             L"MoveDocBegin",
-            L"SelectAll",
+            L"MoveDocBegin",
+            L"MoveDocBegin",
+            L"MoveDocEnd",
             L"Delete",
+            L"MoveDocBegin",
+            L"MoveDocEnd",
+            L"MoveDocBegin",
             L"MoveDocBegin",
         };
         return checkpointRestoreFixture_ &&
@@ -699,13 +1349,481 @@ public:
             runActions_ == expected;
     }
 
+    bool CheckpointRestoreWasNotAttempted() const noexcept {
+        return checkpointRestoreFixture_ &&
+            checkpointSetAttempts_ == 0 &&
+            checkpointDocumentBlock_ == L"CHECKPOINT_ROLLBACK" &&
+            checkpointBlockBodyPresent_ &&
+            pageCount_ == 2 &&
+            runActions_.empty();
+    }
+
     void RestoreCheckpointRestoreFixture() {
         checkpointRestoreFixture_ = false;
         checkpointWrongTargetPageCount_ = false;
+        checkpointSetTextFileFails_ = false;
         checkpointDocumentBlock_.clear();
         checkpointSetAttempts_ = 0;
+        checkpointBlockBodyPresent_ = false;
+        checkpointBlockBodySelected_ = false;
         pageCount_ = 1;
         runActions_.clear();
+    }
+
+    // The other checkpoint layout: the file is handed to the engine's InsertFile
+    // instead of an encoded block being poured in. Two things go wrong on that
+    // path that the block layout never sees, and this models both separately so
+    // a test can tell which one a restore actually survived.
+    //
+    // `residueAtFront` is which side it lands on. At the front, the paragraph
+    // left by emptying retains one `secd` and the inserted document begins with a
+    // second `secd` at paragraph 1. Deleting only the paragraph leaves the first
+    // section control behind and therefore leaves the extra page behind too.
+    // The other side is still modelled because the tail trim still handles it.
+    //
+    // `sectionsNeedKeeping` is the document the flattening insert cannot
+    // reproduce at all: its sections do not share one page layout, so pouring
+    // them into one reflows it into an extra page that no trim can take back.
+    // Only the section-faithful insert restores it.
+    void PrepareCheckpointDocumentFileFixture(
+        const bool sectionsNeedKeeping,
+        const bool residueAtFront) {
+        checkpointDocumentFileFixture_ = true;
+        checkpointInsertNeverMatches_ = false;
+        checkpointRollbackInsertFails_ = false;
+        checkpointResidueAtFront_ = residueAtFront;
+        checkpointSectionsNeedKeeping_ = sectionsNeedKeeping;
+        checkpointInsertKeepSections_.clear();
+        checkpointResidueParagraph_ = false;
+        checkpointLeadingSectionResidue_ = false;
+        checkpointLeadingSectionDeletes_ = 0;
+        checkpointFlattenedPenalty_ = false;
+        checkpointWholeSelected_ = false;
+        checkpointBodySelected_ = false;
+        checkpointTailSelected_ = false;
+        checkpointHeadSelected_ = false;
+        checkpointContentParagraphs_ = kCheckpointContentParagraphs;
+        checkpointPendingKeepSection_ = -1;
+        checkpointPendingFileName_.clear();
+        checkpointOpenCount_ = 0;
+        checkpointClearCallCount_ = 0;
+        checkpointClearFails_ = false;
+        checkpointTargetPageMismatch_ = false;
+        checkpointRollbackOpenFails_ = false;
+        checkpointLastKeepSection_ = -1;
+        checkpointHeadProbeActive_ = false;
+        checkpointHeadControlIndex_ = 0;
+        checkpointHeadPageBreakBefore_ = false;
+        checkpointHeadSectionIsolated_ = true;
+        checkpointTailAnswer_ = L"\r\n";
+        checkpointHeadAnswer_ = L"\r\n";
+        checkpointAbsorbsResidue_ = false;
+        checkpointInsertCaretBeforeEnd_ = false;
+        checkpointSingleParagraph_ = false;
+        checkpointSelectionMisreports_ = false;
+        checkpointHeadRangeReportsAfterInsert_ = 0;
+        checkpointEngineUndoRestores_ = false;
+        checkpointEngineUndoWrongStep_ = false;
+        checkpointSignatureCaptureUnavailable_ = false;
+        checkpointPageCountBelow_ = false;
+        checkpointHeadResidueDeleted_ = false;
+        checkpointTextFileEmpty_ = false;
+        checkpointPictureOnly_ = false;
+        checkpointPresenceScan_ = false;
+        checkpointTextLossInsertAttempts_ = 0;
+        checkpointDeleteLeavesTextAttempts_ = 0;
+        checkpointCrossListEndAttempts_ = 0;
+        checkpointBodyDeleteAttempts_ = 0;
+        checkpointDocumentBlock_ = L"CHECKPOINT_ROLLBACK";
+        pageCount_ = 2;
+        currentList_ = 0;
+        currentParagraph_ = 0;
+        currentCharacter_ = 0;
+        runActions_.clear();
+    }
+
+    void SetDocumentPathFixture(const std::wstring& path) {
+        fullName_ = path;
+        checkpointUserDocumentPath_ = path;
+    }
+
+    void SetCheckpointDirectTargetMismatch() noexcept {
+        checkpointTargetPageMismatch_ = true;
+    }
+
+    void SetCheckpointClearFails() noexcept {
+        checkpointClearFails_ = true;
+    }
+
+    void SetCheckpointDirectRollbackFailure() noexcept {
+        checkpointTargetPageMismatch_ = true;
+        checkpointRollbackOpenFails_ = true;
+    }
+
+    bool CheckpointDirectRestoreExact() const noexcept {
+        return checkpointDocumentFileFixture_ && checkpointOpenCount_ == 1 &&
+            checkpointDocumentBlock_ == L"CHECKPOINT_TARGET" &&
+            pageCount_ == kCheckpointDocumentPages && documentOpen_ &&
+            !modified_ && currentList_ == 0 && currentParagraph_ == 0 &&
+            currentCharacter_ == 0 && selectionMode_ == 0 &&
+            fullName_ == checkpointUserDocumentPath_ &&
+            std::find(runActions_.begin(), runActions_.end(), L"MoveDocBegin") !=
+                runActions_.end() && checkpointInsertKeepSections_.empty();
+    }
+
+    bool CheckpointDirectRollbackExact() const noexcept {
+        return checkpointDocumentFileFixture_ && checkpointOpenCount_ == 2 &&
+            checkpointDocumentBlock_ == L"CHECKPOINT_ROLLBACK" &&
+            pageCount_ == 2 && documentOpen_ && !modified_ &&
+            currentList_ == 0 && currentParagraph_ == 0 &&
+            currentCharacter_ == 0 && selectionMode_ == 0 &&
+            fullName_ == checkpointUserDocumentPath_ &&
+            checkpointInsertKeepSections_.empty();
+    }
+
+    bool CheckpointNoClearRestoreExact() const noexcept {
+        return CheckpointDirectRestoreExact() && checkpointClearCallCount_ == 1;
+    }
+
+    bool CheckpointNoClearRollbackExact() const noexcept {
+        return CheckpointDirectRollbackExact() && checkpointClearCallCount_ == 1;
+    }
+
+    bool CheckpointDirectRollbackFailed() const noexcept {
+        return checkpointDocumentFileFixture_ && checkpointOpenCount_ == 2 &&
+            checkpointDocumentBlock_ == L"CHECKPOINT_TARGET" &&
+            pageCount_ == kCheckpointDocumentPages - 1 && !documentOpen_ &&
+            checkpointInsertKeepSections_.empty();
+    }
+
+    std::wstring CheckpointDirectState() const {
+        return L"opens=" + std::to_wstring(checkpointOpenCount_) +
+            L";block=" + checkpointDocumentBlock_ +
+            L";pages=" + std::to_wstring(pageCount_) +
+            L";open=" + std::to_wstring(documentOpen_) +
+            L";modified=" + std::to_wstring(modified_) +
+            L";position=" + std::to_wstring(currentList_) + L":" +
+                std::to_wstring(currentParagraph_) + L":" +
+                std::to_wstring(currentCharacter_) +
+            L";selection=" + std::to_wstring(selectionMode_) +
+            L";path=" + std::to_wstring(
+                fullName_ == checkpointUserDocumentPath_) +
+            L";inserts=" + std::to_wstring(checkpointInsertKeepSections_.size());
+    }
+
+    void SetCheckpointEngineUndoRestores() noexcept {
+        checkpointEngineUndoRestores_ = true;
+    }
+
+    void SetCheckpointEngineUndoWrongStep() noexcept {
+        checkpointEngineUndoWrongStep_ = true;
+    }
+
+    bool CheckpointEngineUndoRestoredExactly() const noexcept {
+        return checkpointDocumentFileFixture_ &&
+            checkpointDocumentBlock_ == L"CHECKPOINT_TARGET" &&
+            pageCount_ == kCheckpointDocumentPages &&
+            checkpointContentParagraphs_ == kCheckpointContentParagraphs &&
+            !checkpointResidueParagraph_ &&
+            !checkpointLeadingSectionResidue_ &&
+            checkpointInsertKeepSections_.empty();
+    }
+
+    bool CheckpointEngineWrongStepWasReversed() const noexcept {
+        return CheckpointEngineUndoRestoredExactly() &&
+            std::find(runActions_.begin(), runActions_.end(), L"Undo") !=
+                runActions_.end() &&
+            std::find(runActions_.begin(), runActions_.end(), L"Redo") !=
+                runActions_.end();
+    }
+
+    // An engine no insert can satisfy: whatever the restore does, the document
+    // it produces is not the checkpoint. This is the path that ends with the
+    // document in a state nobody can name, and it is the reason the copy the
+    // call started from has to survive it.
+    // What GetTextFile answers between the insert caret and document end.
+    //
+    // "\r\n" is the leftover paragraph and is safe to remove. The other two are
+    // the refusals, and until this existed neither of them had ever run: a fake
+    // that only ever answers "one empty paragraph" cannot exercise the branch
+    // that decides not to delete.
+    //
+    //   body text -> the trim must leave it and let the verification refuse
+    //   ""        -> a read that failed, not an empty stretch. Also must be left
+    //                alone; IsOnlyParagraphBreaks says true for it, so this is
+    //                the one that used to delete an unseen selection.
+    void SetCheckpointTailAnswer(const wchar_t* const answer) {
+        checkpointTailAnswer_ = answer;
+    }
+
+    // What GetTextFile("HWP","") hands back. An empty answer is how this call
+    // reports a failed allocation, which is the thing the block probe measures.
+    void SetCheckpointDocumentBlock(const wchar_t* const block) {
+        checkpointDocumentBlock_ = block;
+    }
+
+    // Nothing in the document moved. The probe is read-only, so this must hold
+    // across it.
+    bool CheckpointDocumentFileUntouched() const noexcept {
+        return checkpointDocumentFileFixture_ && pageCount_ == 2 &&
+            checkpointContentParagraphs_ == kCheckpointContentParagraphs &&
+            checkpointInsertKeepSections_.empty() && runActions_.empty();
+    }
+
+    // The same for the first paragraph. "\f" is the one that matters: a manual
+    // page break reads as a form feed, and deleting it takes a page with it --
+    // which would make the page count come out right for a document that just
+    // lost a break.
+    void SetCheckpointHeadAnswer(const wchar_t* const answer) {
+        checkpointHeadAnswer_ = answer;
+    }
+
+    void SetCheckpointHeadPageBreakBefore() noexcept {
+        checkpointHeadPageBreakBefore_ = true;
+    }
+
+    void SetCheckpointHeadSectionUnproven() noexcept {
+        checkpointHeadSectionIsolated_ = false;
+    }
+
+    // The engine absorbs the leftover paragraph instead of keeping it, so the
+    // insert lands on exactly the checkpoint's page count. This is the shape of
+    // the 28 page document that has always restored correctly, and the only one
+    // that exercises "the page count already matches, do not go looking".
+    void SetCheckpointInsertAbsorbsResidue() noexcept {
+        checkpointAbsorbsResidue_ = true;
+    }
+
+    // Model the observed case where MoveNextPos=1 does not identify the end of
+    // the inserted checkpoint: selecting from the caret to document end returns
+    // checkpoint body text. That text must survive while the independent head
+    // probe is still allowed to trim a paragraph-break-only residue.
+    void SetCheckpointInsertCaretBeforeEnd() noexcept {
+        checkpointInsertCaretBeforeEnd_ = true;
+        checkpointTailAnswer_ = L"checkpoint body text";
+    }
+
+    // One paragraph in the whole document, so there is no second paragraph to
+    // bound the first with. Nothing may be deleted from a range that cannot be
+    // established.
+    void SetCheckpointSingleParagraph() noexcept {
+        checkpointSingleParagraph_ = true;
+    }
+
+    // The engine reports a selection other than the one that was asked for.
+    // SelectTextRange is supposed to catch that; until this existed the fake
+    // echoed the request back and the check could never fail.
+    void SetCheckpointSelectionMisreports() noexcept {
+        checkpointSelectionMisreports_ = true;
+    }
+
+    void SetCheckpointSignatureCaptureUnavailable() noexcept {
+        checkpointSignatureCaptureUnavailable_ = true;
+    }
+
+    void SetCheckpointPageCountBelow() noexcept {
+        checkpointPageCountBelow_ = true;
+    }
+
+    void SetCheckpointTextCaptureEmpty() noexcept {
+        checkpointTextFileEmpty_ = true;
+    }
+
+    void SetCheckpointPictureOnly() noexcept {
+        checkpointTextFileEmpty_ = true;
+        checkpointPictureOnly_ = true;
+    }
+
+    void SetCheckpointTextLossInsertAttempts() noexcept {
+        checkpointTextLossInsertAttempts_ = 2;
+    }
+
+    void SetCheckpointDeleteLeavesTextOnce() noexcept {
+        checkpointDeleteLeavesTextAttempts_ = 1;
+    }
+
+    void SetCheckpointCrossListEndOnce() noexcept {
+        checkpointCrossListEndAttempts_ = 1;
+    }
+
+    bool CheckpointTextLossWasRejectedAndRolledBack() const noexcept {
+        const std::vector<LONG> expected{0L, 1L, 0L};
+        return checkpointContentParagraphs_ == kCheckpointContentParagraphs &&
+            checkpointInsertKeepSections_ == expected;
+    }
+
+    bool CheckpointPictureOnlyRestoredStructurally() const noexcept {
+        return checkpointPictureOnly_ && CheckpointDocumentFileRestoredExactly();
+    }
+
+    bool CheckpointResidualTextWasRejectedAndRolledBack() const noexcept {
+        const std::vector<LONG> expected{0L};
+        return checkpointBodyDeleteAttempts_ == 2 &&
+            checkpointContentParagraphs_ == kCheckpointContentParagraphs &&
+            checkpointInsertKeepSections_ == expected;
+    }
+
+    bool CheckpointCrossListWasRejectedBeforeTargetDelete() const noexcept {
+        const std::vector<LONG> expected{0L};
+        return checkpointBodyDeleteAttempts_ == 1 &&
+            checkpointContentParagraphs_ == kCheckpointContentParagraphs &&
+            checkpointInsertKeepSections_ == expected;
+    }
+
+    bool CheckpointHeadResidueWasNeverDeleted() const noexcept {
+        return !checkpointHeadResidueDeleted_ &&
+            checkpointLeadingSectionDeletes_ == 0;
+    }
+
+    bool CheckpointLeadingSectionResidueRemovedOnce() const noexcept {
+        return checkpointLeadingSectionDeletes_ == 1;
+    }
+
+    bool CheckpointLeadingSectionResidueRemovedTwice() const noexcept {
+        return checkpointLeadingSectionDeletes_ == 2;
+    }
+
+    // A page the restore ends up with that no leftover paragraph explains and no
+    // trimming can remove. It is what puts the document above the checkpoint's
+    // page count without there being anything the trim is allowed to take.
+    void SetCheckpointUnexplainedExtraPage() noexcept {
+        checkpointInsertNeverMatches_ = true;
+    }
+
+    // Nothing was removed. Used by both refusal cases: the leftover paragraph
+    // the fixture created is still there afterwards.
+    bool PendingCheckpointFileIsRollback() const noexcept {
+        constexpr size_t kRollbackSuffixLength = 9;
+        return checkpointPendingFileName_.size() >= kRollbackSuffixLength &&
+            checkpointPendingFileName_.compare(
+                checkpointPendingFileName_.size() - kRollbackSuffixLength,
+                kRollbackSuffixLength,
+                L".rollback") == 0;
+    }
+
+    bool CheckpointDocumentFileRolledBackExactly() const noexcept {
+        return checkpointDocumentFileFixture_ &&
+            pageCount_ == 2 &&
+            checkpointContentParagraphs_ == kCheckpointContentParagraphs &&
+            !checkpointResidueParagraph_ &&
+            PendingCheckpointFileIsRollback();
+    }
+
+    void PrepareCheckpointDocumentFileRollbackFixture() {
+        PrepareCheckpointDocumentFileFixture(false, true);
+        checkpointInsertNeverMatches_ = true;
+        checkpointRollbackInsertFails_ = true;
+    }
+
+    void RestoreCheckpointDocumentFileFixture() {
+        checkpointDocumentFileFixture_ = false;
+        checkpointInsertNeverMatches_ = false;
+        checkpointRollbackInsertFails_ = false;
+        checkpointResidueAtFront_ = true;
+        checkpointSectionsNeedKeeping_ = false;
+        checkpointInsertKeepSections_.clear();
+        checkpointResidueParagraph_ = false;
+        checkpointLeadingSectionResidue_ = false;
+        checkpointLeadingSectionDeletes_ = 0;
+        checkpointFlattenedPenalty_ = false;
+        checkpointWholeSelected_ = false;
+        checkpointBodySelected_ = false;
+        checkpointTailSelected_ = false;
+        checkpointHeadSelected_ = false;
+        checkpointContentParagraphs_ = 0;
+        checkpointPendingKeepSection_ = -1;
+        checkpointPendingFileName_.clear();
+        checkpointLastKeepSection_ = -1;
+        checkpointHeadProbeActive_ = false;
+        checkpointHeadControlIndex_ = 0;
+        checkpointHeadPageBreakBefore_ = false;
+        checkpointHeadSectionIsolated_ = true;
+        checkpointTailAnswer_ = L"\r\n";
+        checkpointHeadAnswer_ = L"\r\n";
+        checkpointAbsorbsResidue_ = false;
+        checkpointInsertCaretBeforeEnd_ = false;
+        checkpointSingleParagraph_ = false;
+        checkpointSelectionMisreports_ = false;
+        checkpointHeadRangeReportsAfterInsert_ = 0;
+        checkpointSignatureCaptureUnavailable_ = false;
+        checkpointPageCountBelow_ = false;
+        checkpointHeadResidueDeleted_ = false;
+        checkpointTextFileEmpty_ = false;
+        checkpointPictureOnly_ = false;
+        checkpointPresenceScan_ = false;
+        checkpointTextLossInsertAttempts_ = 0;
+        checkpointDeleteLeavesTextAttempts_ = 0;
+        checkpointCrossListEndAttempts_ = 0;
+        checkpointBodyDeleteAttempts_ = 0;
+        checkpointDocumentBlock_.clear();
+        pageCount_ = 1;
+        currentList_ = 0;
+        currentParagraph_ = 0;
+        currentCharacter_ = 0;
+        runActions_.clear();
+    }
+
+    // The document that is left is the checkpoint's four pages and nothing else,
+    // and one insert was enough: the leftover paragraph was trimmed rather than
+    // paid for with a page.
+    bool CheckpointDocumentFileRestoredExactly() const noexcept {
+        const std::vector<LONG> expected{0L};
+        return checkpointDocumentFileFixture_ &&
+            pageCount_ == kCheckpointDocumentPages &&
+            !checkpointResidueParagraph_ &&
+            checkpointInsertKeepSections_ == expected;
+    }
+
+    // Same four pages, but this checkpoint needed its sections: the flattening
+    // insert ran first, could not reproduce it, and the section-faithful insert
+    // was tried after it.
+    bool CheckpointDocumentFileRestoredBySection() const noexcept {
+        const std::vector<LONG> expected{0L, 1L};
+        return checkpointDocumentFileFixture_ &&
+            pageCount_ == kCheckpointDocumentPages &&
+            !checkpointResidueParagraph_ &&
+            checkpointInsertKeepSections_ == expected;
+    }
+
+    // What the field measured on one 164 page checkpoint:
+    //
+    //   KeepSection off -> 165. The isolated leading section costs a page.
+    //   KeepSection on  -> 166. The split adds another page.
+    //
+    // A paragraph-only delete deliberately leaves the first charge in this
+    // model. The restore becomes exact only after DeleteCtrl removes the proved
+    // leading `secd` and Delete removes its empty paragraph.
+    LONG CheckpointDocumentFilePages() const noexcept {
+        const bool sectionOfItsOwn =
+            checkpointLeadingSectionResidue_ &&
+            checkpointLastKeepSection_ == 1L;
+        const bool ordinaryResidue =
+            checkpointResidueParagraph_ &&
+            !checkpointLeadingSectionResidue_;
+        return kCheckpointDocumentPages +
+            (checkpointLeadingSectionResidue_ ? 1L : 0L) +
+            (ordinaryResidue ? 1L : 0L) +
+            (sectionOfItsOwn ? 1L : 0L) +
+            (checkpointFlattenedPenalty_ ? 1L : 0L) -
+            (checkpointPageCountBelow_ ? 3L : 0L);
+    }
+
+    // A leftover paragraph in front pushes the whole inserted document down one
+    // paragraph. That shift is the defect: it is why the body text moved a page.
+    LONG CheckpointContentBaseParagraph() const noexcept {
+        return checkpointResidueParagraph_ && checkpointResidueAtFront_ ? 1L : 0L;
+    }
+
+    LONG CheckpointContentEndParagraph() const noexcept {
+        return checkpointContentParagraphs_ > 0
+            ? CheckpointContentBaseParagraph() + checkpointContentParagraphs_ - 1
+            : 0L;
+    }
+
+    LONG CheckpointLastParagraph() const noexcept {
+        return checkpointResidueParagraph_ && !checkpointResidueAtFront_
+            ? CheckpointContentEndParagraph() + 1
+            : CheckpointContentEndParagraph();
     }
 
     void PrepareReferenceLayoutFixture(const bool failAfterFirstText) {
@@ -949,6 +2067,123 @@ public:
         selectionMode_ = 0;
     }
 
+    void PrepareTextFormatReadbackFixture(const bool dropAppliedFormat) {
+        PrepareFormattingTopologyPolicyFixture();
+        dropAppliedTextFormat_ = dropAppliedFormat;
+        pendingTextFormatReadback_ = false;
+        textFormatActionsExecuted_ = 0;
+        textFormatReadbacks_ = 0;
+    }
+
+    void PrepareRequestedFormatPreflightFixture(
+        const bool requestedPropertyUnavailable,
+        const bool automaticNumberReadback = false,
+        const bool staleContent = false) {
+        PrepareFormattingTopologyPolicyFixture();
+        unavailableUnrelatedFormatProperty_ = true;
+        unavailableRequestedFormatProperty_ = requestedPropertyUnavailable;
+        automaticNumberReadback_ = automaticNumberReadback;
+        ReferenceCell* const cell = ReferenceCellByAddress(L"B2");
+        if (cell != nullptr) {
+            cell->text = staleContent ? L"new" : L"old";
+        }
+        static_cast<void>(SetReferenceCurrentCell(L"B2"));
+        selectionMode_ = 0;
+    }
+
+    // A paragraph that HWP numbers automatically. SelectText refuses the
+    // range, the block readback carries the drawn number in front of the
+    // selected text, and the patch has to come through both.
+    void PrepareAutomaticNumberTextPatchFixture(const bool selectTextRefuses) {
+        PrepareFormattingTopologyPolicyFixture();
+        automaticNumberReadback_ = true;
+        automaticNumberSelectTextRefuses_ = selectTextRefuses;
+        automaticNumberSelectTextRefusals_ = 0;
+        caretSelectionPending_ = false;
+        caretSelectionsCompleted_ = 0;
+        ReferenceCell* const cell = ReferenceCellByAddress(L"B2");
+        if (cell != nullptr) {
+            cell->text = L"old";
+        }
+        static_cast<void>(SetReferenceCurrentCell(L"B2"));
+        selectionMode_ = 0;
+    }
+
+    bool AutomaticNumberTextPatchApplied() const noexcept {
+        const ReferenceCell* const cell = ReferenceCellByAddress(L"B2");
+        return cell != nullptr && cell->text == L"new";
+    }
+
+    // A cell whose text holds the literal with other body text in front of it,
+    // and a ForwardFind that reports `surplus` characters more than it
+    // matched. Whatever the replacement does, those characters are not the
+    // text that was searched for and must still be there afterwards.
+    void PrepareFindSelectionSurplusFixture(
+        const size_t surplus,
+        const bool automaticNumberReadback,
+        const bool displayOnlyPrefix = false) {
+        PrepareFormattingTopologyPolicyFixture();
+        automaticNumberReadback_ = automaticNumberReadback;
+        automaticNumberSelectTextRefuses_ = false;
+        automaticNumberSelectTextRefusals_ = 0;
+        caretSelectionPending_ = false;
+        caretSelectionsCompleted_ = 0;
+        findSelectionSurplus_ = surplus;
+        findDisplayOnlyPrefix_ = displayOnlyPrefix;
+        findString_.clear();
+        ReferenceCell* const cell = ReferenceCellByAddress(L"B2");
+        if (cell != nullptr) {
+            cell->text = L"the old";
+        }
+        static_cast<void>(SetReferenceCurrentCell(L"B2"));
+        selectionMode_ = 0;
+    }
+
+    std::wstring FindSelectionSurplusCellText() const {
+        const ReferenceCell* const cell = ReferenceCellByAddress(L"B2");
+        return cell == nullptr ? std::wstring() : cell->text;
+    }
+
+    bool AutomaticNumberSelectTextFallbackUsed() const noexcept {
+        return automaticNumberSelectTextRefusals_ > 0 &&
+            caretSelectionsCompleted_ >= automaticNumberSelectTextRefusals_;
+    }
+
+    bool TextFormatReadbackSucceeded() const noexcept {
+        const ReferenceCell* const cell = ReferenceCellByAddress(L"A1");
+        return cell != nullptr && cell->format.textColor == 255 &&
+            cell->format.alignment == 3 && textFormatActionsExecuted_ == 2 &&
+            textFormatReadbacks_ == 2;
+    }
+
+    bool TextFormatMismatchWasReadBack() const noexcept {
+        const ReferenceCell* const cell = ReferenceCellByAddress(L"A1");
+        return cell != nullptr && cell->format.textColor != 65280 &&
+            textFormatActionsExecuted_ == 1 && textFormatReadbacks_ == 1;
+    }
+
+    void PrepareRangeFormatReadbackFixture(const bool dropAppliedFormat) {
+        PrepareFormattingTopologyPolicyFixture();
+        rangeFormatReadbackFixture_ = true;
+        dropAppliedRangeFormat_ = dropAppliedFormat;
+        rangeCellFillValue_ = 0;
+        rangeCellFillCoveredBlock_ = false;
+        rangeCellBorderCoveredBlock_ = false;
+        rangePaddingCoveredBlock_ = false;
+        rangeSubsequentActionCoveredBlock_ = false;
+    }
+
+    bool RangeFormatSelectionWasPreserved() const noexcept {
+        return rangeCellFillValue_ == 255 && rangeCellFillCoveredBlock_ &&
+            rangeCellBorderCoveredBlock_ && rangePaddingCoveredBlock_ &&
+            rangeSubsequentActionCoveredBlock_ && selectionMode_ == 3;
+    }
+
+    bool RangeFormatMismatchWasReadBack() const noexcept {
+        return rangeCellFillValue_ != 65280 && rangeCellFillCoveredBlock_ &&
+            selectionMode_ == 3;
+    }
+
     bool TopologyWasPreservedAfterCellFormatting() const noexcept {
         const ReferenceCell* const b1 = ReferenceCellByAddress(L"B1");
         return b1 != nullptr && currentList_ == b1->listId &&
@@ -1120,6 +2355,22 @@ public:
 
     size_t InsertTextExecutions() const noexcept {
         return insertTextExecutions_;
+    }
+
+    void PrepareFirstWriteReadbackFailure() noexcept {
+        firstWriteReadbackFixture_ = true;
+        firstWriteReadbackFailed_ = false;
+        selectionMode_ = 0;
+        currentList_ = 0;
+        currentParagraph_ = 108;
+        currentCharacter_ = 0;
+        insertedText_.clear();
+        insertTextExecutions_ = 0;
+    }
+
+    bool FirstWriteReadbackFailureWasClassified() const noexcept {
+        return firstWriteReadbackFailed_ && insertTextExecutions_ == 1 &&
+            insertedText_ == L"new";
     }
 
     void PrepareSelectedControlTextPatch() noexcept {
@@ -1344,6 +2595,16 @@ public:
             members[0] = HParaShape;
         } else if (referenceLayoutFixture_ && name == L"HCharShape") {
             members[0] = HCharShape;
+        } else if (name == L"HFindReplace") {
+            members[0] = HFindReplace;
+        } else if (name == L"FindString") {
+            members[0] = FindString;
+        } else if (name == L"Direction") {
+            members[0] = FindDirection;
+        } else if (name == L"MatchCase") {
+            members[0] = FindMatchCase;
+        } else if (name == L"IgnoreMessage") {
+            members[0] = FindIgnoreMessage;
         } else if (name == L"HSet") {
             members[0] = HSet;
         } else if (name == L"GetDefault") {
@@ -1366,10 +2627,14 @@ public:
             members[0] = PrevSpacing;
         } else if (name == L"NextSpacing") {
             members[0] = NextSpacing;
+        } else if (name == L"PageBreakBefore") {
+            members[0] = PageBreakBefore;
         } else if (name == L"SetMessageBoxMode") {
             members[0] = SetMessageBoxMode;
         } else if (name == L"SelectText") {
             members[0] = SelectText;
+        } else if (name == L"GetHeadingString") {
+            members[0] = GetHeadingString;
         } else if (name == L"GetTextFile") {
             members[0] = GetTextFile;
         } else if (name == L"SetTextFile") {
@@ -1382,6 +2647,8 @@ public:
             members[0] = ReleaseScan;
         } else if (name == L"HInsertText") {
             members[0] = HInsertText;
+        } else if (name == L"HInsertFile") {
+            members[0] = HInsertFile;
         } else if (name == L"HArrayFixture") {
             members[0] = HArrayFixture;
         } else if (name == L"SelectionMode") {
@@ -1460,13 +2727,15 @@ public:
             members[0] = Properties;
         } else if (referenceLayoutFixture_ && name == L"KeyIndicator") {
             members[0] = KeyIndicator;
-        } else if (referenceLayoutFixture_ && name == L"FaceNameHangul") {
+        } else if (referenceLayoutFixture_ && name == L"FaceNameHangul" &&
+                   !unavailableUnrelatedFormatProperty_) {
             members[0] = FaceNameHangul;
         } else if (referenceLayoutFixture_ && name == L"Height") {
             members[0] = CharacterHeight;
         } else if (referenceLayoutFixture_ && name == L"Bold") {
             members[0] = Bold;
-        } else if (referenceLayoutFixture_ && name == L"TextColor") {
+        } else if (referenceLayoutFixture_ && name == L"TextColor" &&
+                   !unavailableRequestedFormatProperty_) {
             members[0] = TextColor;
         } else if (referenceLayoutFixture_ && name == L"RatioHangul") {
             members[0] = RatioHangul;
@@ -1519,6 +2788,19 @@ public:
             if (referenceLayoutFixture_) {
                 const VARIANT& value = parameters->rgvarg[0];
                 if (member == GenericParameter || member == Properties) {
+                    return S_OK;
+                }
+                if (member == FindString) {
+                    if (value.vt != VT_BSTR) {
+                        return DISP_E_TYPEMISMATCH;
+                    }
+                    findString_.assign(
+                        value.bstrVal,
+                        SysStringLen(value.bstrVal));
+                    return S_OK;
+                }
+                if (member == FindDirection || member == FindMatchCase ||
+                    member == FindIgnoreMessage) {
                     return S_OK;
                 }
                 if (member == FaceNameHangul) {
@@ -1652,7 +2934,10 @@ public:
                 member == HAction || member == CurSelectedCtrl ||
                 member == HParameterSet ||
                 member == XHwpMessageBox || member == Application ||
-                member == XHwpDocumentInfo || member == Properties) {
+                 member == XHwpDocumentInfo || member == Properties) {
+                if (member == HeadCtrl && checkpointHeadProbeActive_) {
+                    checkpointHeadControlIndex_ = 0;
+                }
                 if (inspectionScopeFixture_ &&
                     (member == HeadCtrl || member == LastCtrl)) {
                     if (inspectionControls_.empty()) {
@@ -1688,7 +2973,8 @@ public:
                 return S_OK;
             }
             if (member == HStyle || member == HParaShape || member == HInsertText ||
-                member == HCharShape) {
+                member == HCharShape || member == HInsertFile ||
+                member == HFindReplace) {
                 activeParameter_ = member;
                 result->vt = VT_DISPATCH;
                 result->pdispVal = this;
@@ -1762,6 +3048,11 @@ public:
                 return S_OK;
             }
             if (member == CtrlID) {
+                if (checkpointHeadProbeActive_) {
+                    result->vt = VT_BSTR;
+                    result->bstrVal = SysAllocString(L"secd");
+                    return result->bstrVal != nullptr ? S_OK : E_OUTOFMEMORY;
+                }
                 if (inspectionScopeFixture_ && InspectionControlReady()) {
                     ++inspectionIdentityReads_;
                     const std::wstring& type = inspectionControls_[
@@ -1775,6 +3066,22 @@ public:
                 result->vt = VT_BSTR;
                 result->bstrVal = SysAllocString(L"tbl");
                 return result->bstrVal != nullptr ? S_OK : E_OUTOFMEMORY;
+            }
+            if (checkpointHeadProbeActive_ && member == Next) {
+                ++checkpointHeadControlIndex_;
+                const bool hasNextSection =
+                    checkpointLeadingSectionResidue_ &&
+                    checkpointHeadSectionIsolated_ &&
+                    checkpointHeadControlIndex_ == 1;
+                if (!hasNextSection) {
+                    checkpointHeadProbeActive_ = false;
+                    result->vt = VT_EMPTY;
+                    return S_OK;
+                }
+                result->vt = VT_DISPATCH;
+                result->pdispVal = this;
+                static_cast<void>(AddRef());
+                return S_OK;
             }
             if (inspectionScopeFixture_ &&
                 (member == Next || member == Prev)) {
@@ -1836,6 +3143,16 @@ public:
                  member == PrevSpacing || member == NextSpacing)) {
                 result->vt = VT_I4;
                 result->lVal = ReferenceFormatValue(pendingReferenceFormat_, member);
+                return S_OK;
+            }
+            if (member == PageBreakBefore) {
+                result->vt = VT_BOOL;
+                result->boolVal =
+                    checkpointDocumentFileFixture_ &&
+                        checkpointResidueParagraph_ &&
+                        checkpointHeadPageBreakBefore_
+                    ? VARIANT_TRUE
+                    : VARIANT_FALSE;
                 return S_OK;
             }
             if (member >= Apply && member <= NextSpacing) {
@@ -1969,6 +3286,11 @@ public:
                     parameters->rgvarg[2].plVal == nullptr) {
                     return DISP_E_TYPEMISMATCH;
                 }
+                if (firstWriteReadbackFixture_ && insertTextExecutions_ > 0 &&
+                    !firstWriteReadbackFailed_) {
+                    firstWriteReadbackFailed_ = true;
+                    return E_FAIL;
+                }
                 const ReferenceCell* const cell = ReferenceCurrentCell();
                 const bool staleEmptySelection =
                     emptyCellTextFixture_ && emptyCellSelectAll_ &&
@@ -2005,6 +3327,21 @@ public:
                 const std::wstring options(parameters->rgvarg[0].bstrVal);
                 const std::wstring format(parameters->rgvarg[1].bstrVal);
                 const std::wstring path(parameters->rgvarg[2].bstrVal);
+                if (checkpointDocumentFileFixture_) {
+                    // The engine streams the open document to disk. This is the
+                    // copy a restore takes before it deletes anything, so it has
+                    // to be a real file: the failure path is judged on whether
+                    // it is still there afterwards.
+                    std::ofstream copy(
+                        std::filesystem::path(path),
+                        std::ios::binary | std::ios::trunc);
+                    constexpr char body[] = "HWP ROLLBACK COPY";
+                    copy.write(body, static_cast<std::streamsize>(sizeof(body) - 1));
+                    copy.close();
+                    result->vt = VT_BOOL;
+                    result->boolVal = copy.good() ? VARIANT_TRUE : VARIANT_FALSE;
+                    return S_OK;
+                }
                 saveAsCalledWithArguments_ =
                     path == lifecyclePath_ &&
                     format == lifecycleFormat_ &&
@@ -2027,6 +3364,12 @@ public:
                     return DISP_E_TYPEMISMATCH;
                 }
                 ++clearCallCount_;
+                if (checkpointDocumentFileFixture_) {
+                    ++checkpointClearCallCount_;
+                    if (checkpointClearFails_) {
+                        return E_FAIL;
+                    }
+                }
                 clearCalledWithDiscard_ = parameters->rgvarg[0].iVal == 1;
                 lifecycleCalls_.push_back(L"Clear");
                 documentOpen_ = false;
@@ -2046,17 +3389,38 @@ public:
                 const std::wstring options(parameters->rgvarg[0].bstrVal);
                 const std::wstring format(parameters->rgvarg[1].bstrVal);
                 const std::wstring path(parameters->rgvarg[2].bstrVal);
-                openCalledWithArguments_ =
-                    path == lifecyclePath_ &&
-                    format == lifecycleFormat_ &&
+                const bool checkpointOpen =
+                    checkpointDocumentFileFixture_ &&
+                    path == checkpointUserDocumentPath_ &&
+                    format == L"HWP" &&
                     options == L"lock:FALSE";
+                openCalledWithArguments_ =
+                    checkpointOpen || (
+                        path == lifecyclePath_ &&
+                        format == lifecycleFormat_ &&
+                        options == L"lock:FALSE");
                 lifecycleCalls_.push_back(L"Open");
-                const bool opened =
-                    openReturnsTrue_ && openCalledWithArguments_;
+                const size_t checkpointOpenOrdinal = checkpointOpen
+                    ? ++checkpointOpenCount_
+                    : 0;
+                const bool opened = openReturnsTrue_ && openCalledWithArguments_ &&
+                    !(checkpointRollbackOpenFails_ &&
+                      checkpointOpenOrdinal == 2);
                 if (opened) {
                     documentOpen_ = true;
                     modified_ = false;
-                    fullName_ = lifecycleReopenedPath_;
+                    fullName_ = checkpointOpen ? path : lifecycleReopenedPath_;
+                    if (checkpointOpen) {
+                        const bool target = checkpointOpenOrdinal == 1;
+                        checkpointDocumentBlock_ = target
+                            ? L"CHECKPOINT_TARGET"
+                            : L"CHECKPOINT_ROLLBACK";
+                        pageCount_ = target
+                            ? (checkpointTargetPageMismatch_
+                                ? kCheckpointDocumentPages - 1
+                                : kCheckpointDocumentPages)
+                            : 2;
+                    }
                     lifecycleMismatchActive_ =
                         lifecycleMismatchAfterOpen_;
                 }
@@ -2103,8 +3467,14 @@ public:
                     !(parameters->cArgs == 1 && parameters->rgvarg[0].vt == VT_BSTR)) {
                     return DISP_E_BADPARAMCOUNT;
                 }
-                if (referenceLayoutFixture_ && parameters != nullptr &&
-                    parameters->cArgs == 1 &&
+                // A real engine answers CreateSet("ListParaPos") with a position
+                // set whatever else is going on. Handing back the main dispatch
+                // instead makes every selection read fail, and a caller that
+                // checks the range it selected then cannot tell "the range is
+                // not there" from "this harness cannot describe a range".
+                if ((referenceLayoutFixture_ || checkpointRestoreFixture_ ||
+                     checkpointDocumentFileFixture_) &&
+                    parameters != nullptr && parameters->cArgs == 1 &&
                     std::wstring(parameters->rgvarg[0].bstrVal) == L"ListParaPos") {
                     result->vt = VT_DISPATCH;
                     result->pdispVal = new FakeListParaPosDispatch();
@@ -2168,6 +3538,20 @@ public:
                     parameters->rgvarg[0].vt != VT_DISPATCH) {
                     return DISP_E_TYPEMISMATCH;
                 }
+                if (checkpointDocumentFileFixture_) {
+                    const bool deleted =
+                        checkpointLeadingSectionResidue_ &&
+                        checkpointHeadControlIndex_ == 0;
+                    if (deleted) {
+                        checkpointLeadingSectionResidue_ = false;
+                        ++checkpointLeadingSectionDeletes_;
+                        pageCount_ = CheckpointDocumentFilePages();
+                    }
+                    result->vt = VT_BOOL;
+                    result->boolVal =
+                        deleted ? VARIANT_TRUE : VARIANT_FALSE;
+                    return S_OK;
+                }
                 if (referenceLayoutFixture_) {
                     const bool deleted = referenceTableExists_;
                     if (deleted) {
@@ -2207,6 +3591,22 @@ public:
                     return DISP_E_TYPEMISMATCH;
                 }
                 const std::wstring item(parameters->rgvarg[0].bstrVal);
+                if (checkpointHeadProbeActive_) {
+                    result->vt = VT_I4;
+                    result->lVal = item == L"List"
+                        ? 0L
+                        : item == L"Para"
+                        ? (checkpointLeadingSectionResidue_ &&
+                                   checkpointHeadControlIndex_ == 0
+                               ? 0L
+                               : CheckpointContentBaseParagraph())
+                        : item == L"Pos"
+                        ? 0L
+                        : 0L;
+                    return item == L"List" || item == L"Para" || item == L"Pos"
+                        ? S_OK
+                        : DISP_E_MEMBERNOTFOUND;
+                }
                 if (inspectionScopeFixture_ && InspectionControlReady()) {
                     const InspectionControl& control = inspectionControls_[
                         static_cast<size_t>(inspectionControlIndex_)];
@@ -2255,6 +3655,22 @@ public:
                 if (parameters == nullptr || parameters->cArgs != 2 ||
                     parameters->rgvarg[1].vt != VT_BSTR) {
                     return DISP_E_TYPEMISMATCH;
+                }
+                if (checkpointDocumentFileFixture_ &&
+                    std::wstring(parameters->rgvarg[1].bstrVal) == L"KeepSection") {
+                    if (parameters->rgvarg[0].vt != VT_I4) {
+                        return DISP_E_TYPEMISMATCH;
+                    }
+                    checkpointPendingKeepSection_ = parameters->rgvarg[0].lVal;
+                }
+                if (checkpointDocumentFileFixture_ &&
+                    std::wstring(parameters->rgvarg[1].bstrVal) == L"FileName") {
+                    if (parameters->rgvarg[0].vt != VT_BSTR) {
+                        return DISP_E_TYPEMISMATCH;
+                    }
+                    checkpointPendingFileName_.assign(
+                        parameters->rgvarg[0].bstrVal,
+                        SysStringLen(parameters->rgvarg[0].bstrVal));
                 }
                 if (currentAction_ == L"SetWithoutDefault") {
                     actionInputApplied_ =
@@ -2320,7 +3736,19 @@ public:
                         currentList_ = list;
                         currentParagraph_ = parameters->rgvarg[1].lVal;
                         currentCharacter_ = parameters->rgvarg[0].lVal;
-                        selectionMode_ = 0;
+                        if (caretSelectionPending_) {
+                            // Block selection is on, so moving the caret
+                            // extends the selection from where it started
+                            // instead of dropping it.
+                            selectedEndList_ = currentList_;
+                            selectedEndParagraph_ = currentParagraph_;
+                            selectedEndCharacter_ = currentCharacter_;
+                            selectionMode_ = 1;
+                            caretSelectionPending_ = false;
+                            ++caretSelectionsCompleted_;
+                        } else {
+                            selectionMode_ = 0;
+                        }
                         tailSelection_ = false;
                     }
                     result->vt = VT_BOOL;
@@ -2336,16 +3764,103 @@ public:
                     currentCharacter_ = parameters->rgvarg[0].lVal;
                     tailSelection_ = false;
                 }
+                if (checkpointDocumentFileFixture_ && parameters != nullptr &&
+                    parameters->cArgs == 3 &&
+                    parameters->rgvarg[0].vt == VT_I4 &&
+                    parameters->rgvarg[1].vt == VT_I4 &&
+                    parameters->rgvarg[2].vt == VT_I4) {
+                    currentList_ = parameters->rgvarg[2].lVal;
+                    currentParagraph_ = parameters->rgvarg[1].lVal;
+                    currentCharacter_ = parameters->rgvarg[0].lVal;
+                    checkpointTailSelected_ = false;
+                }
                 positionedAfterAnchor_ = anchorRead_;
                 result->vt = VT_BOOL;
                 result->boolVal = VARIANT_TRUE;
                 return S_OK;
             }
+            if (member == GetHeadingString) {
+                // The number HWP draws in front of the paragraph. It occupies
+                // no character cell, so it is not part of any range, but the
+                // block readback still carries it.
+                result->vt = VT_BSTR;
+                result->bstrVal = SysAllocString(
+                    automaticNumberReadback_ ? L"(2)" : L"");
+                return result->bstrVal != nullptr ? S_OK : E_OUTOFMEMORY;
+            }
             if (member == SelectText) {
                 if (parameters == nullptr || parameters->cArgs != 4) {
                     return DISP_E_BADPARAMCOUNT;
                 }
+                if (checkpointRestoreFixture_) {
+                    selectedStartList_ = currentList_;
+                    selectedStartParagraph_ = parameters->rgvarg[3].lVal;
+                    selectedStartCharacter_ = parameters->rgvarg[2].lVal;
+                    selectedEndList_ = currentList_;
+                    selectedEndParagraph_ = parameters->rgvarg[1].lVal;
+                    selectedEndCharacter_ = parameters->rgvarg[0].lVal;
+                    checkpointBlockBodySelected_ =
+                        checkpointBlockBodyPresent_ &&
+                        selectedStartParagraph_ == 0 &&
+                        selectedStartCharacter_ == 0 &&
+                        selectedEndParagraph_ == 108 &&
+                        selectedEndCharacter_ == 0;
+                    selectionMode_ = 1;
+                    result->vt = VT_BOOL;
+                    result->boolVal = VARIANT_TRUE;
+                    return S_OK;
+                }
+                if (checkpointDocumentFileFixture_) {
+                    const LONG startParagraph = parameters->rgvarg[3].lVal;
+                    const LONG startCharacter = parameters->rgvarg[2].lVal;
+                    const LONG endParagraph = parameters->rgvarg[1].lVal;
+                    const LONG endCharacter = parameters->rgvarg[0].lVal;
+                    // A range that runs into a paragraph the document does not
+                    // have cannot be selected. That refusal is what stops a
+                    // one-paragraph document from being read as a document whose
+                    // first paragraph is a leftover.
+                    const bool inRange = endParagraph <= CheckpointLastParagraph();
+                    if (inRange) {
+                        selectedStartList_ = currentList_;
+                        selectedStartParagraph_ = startParagraph;
+                        selectedStartCharacter_ = startCharacter;
+                        selectedEndList_ = currentList_;
+                        selectedEndParagraph_ = endParagraph;
+                        selectedEndCharacter_ = endCharacter;
+                        selectionMode_ = 1;
+                        checkpointHeadSelected_ =
+                            checkpointResidueParagraph_ &&
+                            checkpointResidueAtFront_ &&
+                            startParagraph == 0 && startCharacter == 0 &&
+                            endParagraph == 1 && endCharacter == 0;
+                        checkpointBodySelected_ =
+                            checkpointContentParagraphs_ > 0 &&
+                            startParagraph == 0 && startCharacter == 0 &&
+                            endParagraph == CheckpointContentEndParagraph() &&
+                            endCharacter == kCheckpointParagraphLength;
+                        checkpointWholeSelected_ =
+                            startParagraph == 0 && startCharacter == 0 &&
+                            endParagraph == CheckpointLastParagraph() &&
+                            endCharacter ==
+                                (checkpointResidueParagraph_ &&
+                                         !checkpointResidueAtFront_
+                                     ? 0
+                                     : kCheckpointParagraphLength);
+                    }
+                    result->vt = VT_BOOL;
+                    result->boolVal = inRange ? VARIANT_TRUE : VARIANT_FALSE;
+                    return S_OK;
+                }
                 if (referenceLayoutFixture_) {
+                    if (automaticNumberSelectTextRefuses_) {
+                        // Measured in HWP 2024: a paragraph whose number is
+                        // drawn automatically answers false here even for a
+                        // range inside its body, and leaves no selection.
+                        ++automaticNumberSelectTextRefusals_;
+                        result->vt = VT_BOOL;
+                        result->boolVal = VARIANT_FALSE;
+                        return S_OK;
+                    }
                     selectedStartList_ = currentList_;
                     selectedStartParagraph_ = parameters->rgvarg[3].lVal;
                     selectedStartCharacter_ = parameters->rgvarg[2].lVal;
@@ -2369,6 +3884,8 @@ public:
                 scanStarted_ = true;
                 scanReleased_ = false;
                 scanStep_ = 0;
+                checkpointPresenceScan_ =
+                    checkpointDocumentFileFixture_ && checkpointTextFileEmpty_;
                 if (preflightSelectionFixture_ &&
                     preflightSelectionControlCaptured_) {
                     preflightSelectionReadOccurred_ = true;
@@ -2388,7 +3905,11 @@ public:
                 const ReferenceCell* const cell = referenceLayoutFixture_
                     ? ReferenceCurrentCell()
                     : nullptr;
-                const std::wstring scanned = referenceLayoutFixture_ && cell != nullptr
+                const std::wstring scanned = checkpointPresenceScan_
+                    ? (checkpointContentParagraphs_ > 0 && !checkpointPictureOnly_
+                        ? L"body-text"
+                        : L"")
+                    : referenceLayoutFixture_ && cell != nullptr
                     ? cell->text
                     : L"cell-text";
                 *parameters->rgvarg[0].pbstrVal = SysAllocString(
@@ -2415,6 +3936,35 @@ public:
                 }
                 const std::wstring options(parameters->rgvarg[0].bstrVal);
                 const std::wstring format(parameters->rgvarg[1].bstrVal);
+                if (checkpointDocumentFileFixture_ &&
+                    checkpointSignatureCaptureUnavailable_ &&
+                    format == L"TEXT" && options.empty()) {
+                    return E_FAIL;
+                }
+                if (checkpointDocumentFileFixture_ &&
+                    (checkpointTextFileEmpty_ ||
+                     checkpointContentParagraphs_ == 0) &&
+                    format == L"TEXT" && options.empty()) {
+                    result->vt = VT_BSTR;
+                    result->bstrVal = SysAllocString(L"");
+                    return result->bstrVal != nullptr ? S_OK : E_OUTOFMEMORY;
+                }
+                if (checkpointDocumentFileFixture_ && format == L"UNICODE" &&
+                    options == L"saveblock:true") {
+                    // What the leftover paragraph reads as, on either side: one
+                    // paragraph break and nothing else. Any other selection reads
+                    // as body text, which is what stops it from being deleted.
+                    const wchar_t* const answer =
+                        checkpointContentParagraphs_ == 0 &&
+                                checkpointResidueParagraph_
+                            ? L"\r\n"
+                        : checkpointTailSelected_ ? checkpointTailAnswer_.c_str()
+                        : checkpointHeadSelected_ ? checkpointHeadAnswer_.c_str()
+                        : (selectionMode_ != 0 ? L"body-text" : L"");
+                    result->vt = VT_BSTR;
+                    result->bstrVal = SysAllocString(answer);
+                    return result->bstrVal != nullptr ? S_OK : E_OUTOFMEMORY;
+                }
                 if (referenceLayoutFixture_ && format == L"UNICODE" &&
                     options == L"saveblock:true") {
                     std::wstring selected;
@@ -2436,6 +3986,23 @@ public:
                             const size_t start = (std::min)(first, second);
                             const size_t end = (std::max)(first, second);
                             selected = cell->text.substr(start, end - start);
+                            if (automaticNumberReadback_ &&
+                                !selected.empty()) {
+                                // GetHeadingString plus one space, which is
+                                // exactly what the block readback carries in
+                                // front of an automatically numbered
+                                // paragraph -- measured for selections that
+                                // start inside the body as well.
+                                selected.insert(0, L"(2) ");
+                            }
+                            if (findDisplayOnlyPrefix_ && !selected.empty()) {
+                                // Drawn text that reaches the readback while
+                                // the paragraph carries no automatic number,
+                                // so GetHeadingString cannot account for it.
+                                // Nothing can then line the readback up with
+                                // the selected cells.
+                                selected.insert(0, L"(Figure 1) ");
+                            }
                         }
                     }
                     result->vt = VT_BSTR;
@@ -2446,6 +4013,14 @@ public:
                 }
                 nativeTableBlockCopied_ = nativeTableRangeSelected_ &&
                     format == L"HWP" && options == L"saveblock:true";
+                if (format == L"HWPML2X" && options.empty()) {
+                    ++hwpmlSerializationAttempts_;
+                    if (oversizeSerializationRefusalFixture_) {
+                        result->vt = VT_BSTR;
+                        result->bstrVal = SysAllocString(L"");
+                        return result->bstrVal != nullptr ? S_OK : E_OUTOFMEMORY;
+                    }
+                }
                 result->vt = VT_BSTR;
                 const bool unstableHwpml =
                     unstableSerializationMetadataFixture_ &&
@@ -2492,7 +4067,7 @@ public:
                 const wchar_t* const value = atomicAppendFixture_ && tailSelection_ &&
                     format == L"UNICODE" && options == L"saveblock:true"
                     ? atomicTail_.c_str()
-                    : checkpointRestoreFixture_ &&
+                    : (checkpointRestoreFixture_ || checkpointDocumentFileFixture_) &&
                       format == L"HWP" && options.empty()
                     ? checkpointDocumentBlock_.c_str()
                     : nativeTableBlockCopied_
@@ -2518,6 +4093,49 @@ public:
                     parameters->rgvarg[0].vt != VT_DISPATCH ||
                     parameters->rgvarg[1].vt != VT_DISPATCH) {
                     return DISP_E_TYPEMISMATCH;
+                }
+                if (checkpointDocumentFileFixture_ || checkpointRestoreFixture_) {
+                    auto* const start = dynamic_cast<FakeListParaPosDispatch*>(
+                        parameters->rgvarg[1].pdispVal);
+                    auto* const end = dynamic_cast<FakeListParaPosDispatch*>(
+                        parameters->rgvarg[0].pdispVal);
+                    if (start == nullptr || end == nullptr) {
+                        return DISP_E_TYPEMISMATCH;
+                    }
+                    // Normally reported back exactly as asked for. When the
+                    // fixture is told to misreport, the end moves -- which is
+                    // the only way the endpoint comparison in SelectTextRange
+                    // can be made to fail, and therefore the only way it is
+                    // tested at all.
+                    start->SetPosition(
+                        selectedStartList_,
+                        selectedStartParagraph_,
+                        selectedStartCharacter_);
+                    const bool checkpointHeadRange =
+                        checkpointDocumentFileFixture_ &&
+                        selectedStartList_ == 0 &&
+                        selectedStartParagraph_ == 0 &&
+                        selectedStartCharacter_ == 0 &&
+                        selectedEndList_ == 0 &&
+                        selectedEndParagraph_ == 1 &&
+                        selectedEndCharacter_ == 0;
+                    if (checkpointHeadRange) {
+                        ++checkpointHeadRangeReportsAfterInsert_;
+                    }
+                    const bool misreportCheckpointHeadRange =
+                        checkpointSelectionMisreports_ &&
+                        checkpointHeadRange &&
+                        checkpointHeadRangeReportsAfterInsert_ == 2;
+                    end->SetPosition(
+                        selectedEndList_,
+                        misreportCheckpointHeadRange
+                            ? selectedEndParagraph_ + 1
+                            : selectedEndParagraph_,
+                        selectedEndCharacter_);
+                    result->vt = VT_BOOL;
+                    result->boolVal =
+                        selectionMode_ != 0 ? VARIANT_TRUE : VARIANT_FALSE;
+                    return S_OK;
                 }
                 if (referenceLayoutFixture_) {
                     auto* const start = dynamic_cast<FakeListParaPosDispatch*>(
@@ -2556,6 +4174,11 @@ public:
                     result->boolVal = selected ? VARIANT_TRUE : VARIANT_FALSE;
                     return S_OK;
                 }
+                if (firstWriteReadbackFixture_) {
+                    result->vt = VT_BOOL;
+                    result->boolVal = VARIANT_FALSE;
+                    return S_OK;
+                }
                 result->vt = VT_BOOL;
                 result->boolVal =
                     textDeletionFixture_ && !textSelectionActive_
@@ -2578,7 +4201,14 @@ public:
                     (block == L"CHECKPOINT_TARGET" ||
                      block == L"CHECKPOINT_ROLLBACK")) {
                     ++checkpointSetAttempts_;
+                    if (checkpointSetTextFileFails_) {
+                        result->vt = VT_I4;
+                        result->lVal = 0;
+                        return S_OK;
+                    }
                     checkpointDocumentBlock_ = block;
+                    checkpointBlockBodyPresent_ = true;
+                    checkpointBlockBodySelected_ = false;
                     pageCount_ = block == L"CHECKPOINT_TARGET"
                         ? (checkpointWrongTargetPageCount_ ? 3L : 4L)
                         : 2L;
@@ -2626,6 +4256,174 @@ public:
                     result->boolVal = RunReferenceLayoutAction(action)
                         ? VARIANT_TRUE
                         : VARIANT_FALSE;
+                    return S_OK;
+                }
+                if (checkpointDocumentFileFixture_) {
+                    if (action == L"Undo") {
+                        result->vt = VT_BOOL;
+                        if (checkpointEngineUndoRestores_) {
+                            checkpointDocumentBlock_ = L"CHECKPOINT_TARGET";
+                            checkpointContentParagraphs_ =
+                                kCheckpointContentParagraphs;
+                            checkpointResidueParagraph_ = false;
+                            checkpointLeadingSectionResidue_ = false;
+                            checkpointFlattenedPenalty_ = false;
+                            pageCount_ = kCheckpointDocumentPages;
+                            currentList_ = 0;
+                            currentParagraph_ = 0;
+                            currentCharacter_ = 0;
+                            selectionMode_ = 0;
+                            result->boolVal = VARIANT_TRUE;
+                        } else if (checkpointEngineUndoWrongStep_) {
+                            checkpointDocumentBlock_ =
+                                L"WRONG_HISTORY_STEP";
+                            pageCount_ = kCheckpointDocumentPages - 1;
+                            result->boolVal = VARIANT_TRUE;
+                        } else {
+                            result->boolVal = VARIANT_FALSE;
+                        }
+                        return S_OK;
+                    }
+                    if (action == L"Redo" &&
+                        checkpointEngineUndoWrongStep_) {
+                        checkpointDocumentBlock_ = L"CHECKPOINT_TARGET";
+                        checkpointContentParagraphs_ =
+                            kCheckpointContentParagraphs;
+                        checkpointResidueParagraph_ = false;
+                        checkpointLeadingSectionResidue_ = false;
+                        checkpointFlattenedPenalty_ = false;
+                        pageCount_ = kCheckpointDocumentPages;
+                        currentList_ = 0;
+                        currentParagraph_ = 0;
+                        currentCharacter_ = 0;
+                        selectionMode_ = 0;
+                        result->vt = VT_BOOL;
+                        result->boolVal = VARIANT_TRUE;
+                        return S_OK;
+                    }
+                    if (action == L"MoveDocBegin") {
+                        currentList_ = 0;
+                        currentParagraph_ = 0;
+                        currentCharacter_ = 0;
+                        checkpointWholeSelected_ = false;
+                        checkpointBodySelected_ = false;
+                        checkpointTailSelected_ = false;
+                        checkpointHeadSelected_ = false;
+                        selectionMode_ = 0;
+                    } else if (action == L"SelectAll") {
+                        checkpointWholeSelected_ = true;
+                        checkpointTailSelected_ = false;
+                        checkpointHeadSelected_ = false;
+                    } else if (action == L"Delete" &&
+                               (checkpointTailSelected_ || checkpointHeadSelected_)) {
+                        // Only the leftover paragraph is inside this selection,
+                        // so only the page it was costing goes with it. Taking
+                        // it off the front is what pulls the whole document back
+                        // up one paragraph.
+                        checkpointHeadResidueDeleted_ =
+                            checkpointHeadResidueDeleted_ || checkpointHeadSelected_;
+                        checkpointResidueParagraph_ = false;
+                        checkpointTailSelected_ = false;
+                        checkpointHeadSelected_ = false;
+                        selectionMode_ = 0;
+                        pageCount_ = CheckpointDocumentFilePages();
+                        currentParagraph_ = CheckpointContentEndParagraph();
+                        currentCharacter_ = kCheckpointParagraphLength;
+                    } else if (action == L"Delete" && checkpointBodySelected_) {
+                        checkpointBodySelected_ = false;
+                        ++checkpointBodyDeleteAttempts_;
+                        selectionMode_ = 0;
+                        if (checkpointDeleteLeavesTextAttempts_ > 0) {
+                            --checkpointDeleteLeavesTextAttempts_;
+                            checkpointContentParagraphs_ = 1;
+                            checkpointResidueParagraph_ = false;
+                            pageCount_ = kCheckpointDocumentPages;
+                            currentParagraph_ = 0;
+                            currentCharacter_ = kCheckpointParagraphLength;
+                        } else {
+                            checkpointContentParagraphs_ = 0;
+                            checkpointResidueParagraph_ = true;
+                            checkpointLeadingSectionResidue_ = false;
+                            checkpointFlattenedPenalty_ = false;
+                            pageCount_ = 1;
+                            currentParagraph_ = 0;
+                            currentCharacter_ = 0;
+                        }
+                    } else if (action == L"Delete" && checkpointWholeSelected_) {
+                        checkpointWholeSelected_ = false;
+                        checkpointContentParagraphs_ = 0;
+                        checkpointResidueParagraph_ = true;
+                        checkpointLeadingSectionResidue_ = false;
+                        checkpointFlattenedPenalty_ = false;
+                        pageCount_ = 1;
+                        currentParagraph_ = 0;
+                        currentCharacter_ = 0;
+                    } else if (action == L"MoveDocEnd") {
+                        checkpointTailSelected_ = false;
+                        if (checkpointCrossListEndAttempts_ > 0) {
+                            --checkpointCrossListEndAttempts_;
+                            currentList_ = 1;
+                        } else {
+                            currentList_ = 0;
+                        }
+                        if (checkpointResidueParagraph_ && !checkpointResidueAtFront_) {
+                            currentParagraph_ = CheckpointLastParagraph();
+                            currentCharacter_ = 0;
+                        } else if (checkpointContentParagraphs_ == 0) {
+                            currentParagraph_ = 0;
+                            currentCharacter_ = 0;
+                        } else {
+                            currentParagraph_ = CheckpointContentEndParagraph();
+                            currentCharacter_ = kCheckpointParagraphLength;
+                        }
+                    } else if (action == L"MoveSelDocEnd") {
+                        checkpointTailSelected_ =
+                            checkpointResidueParagraph_ &&
+                            ((checkpointInsertCaretBeforeEnd_ &&
+                              checkpointResidueAtFront_ &&
+                              currentList_ == 0 &&
+                              currentParagraph_ ==
+                                  CheckpointContentBaseParagraph() &&
+                              currentCharacter_ == 0) ||
+                             (!checkpointResidueAtFront_ &&
+                              currentList_ == 0 &&
+                              currentParagraph_ ==
+                                  CheckpointContentEndParagraph() &&
+                              currentCharacter_ ==
+                                  kCheckpointParagraphLength));
+                    } else if (action == L"Cancel") {
+                        checkpointTailSelected_ = false;
+                        checkpointHeadSelected_ = false;
+                        selectionMode_ = 0;
+                    }
+                    result->vt = VT_BOOL;
+                    result->boolVal = VARIANT_TRUE;
+                    return S_OK;
+                }
+                if (checkpointRestoreFixture_) {
+                    if (action == L"MoveDocBegin") {
+                        currentList_ = 0;
+                        currentParagraph_ = 0;
+                        currentCharacter_ = 0;
+                        selectionMode_ = 0;
+                    } else if (action == L"MoveDocEnd") {
+                        currentList_ = 0;
+                        currentParagraph_ =
+                            checkpointBlockBodyPresent_ ? 108L : 0L;
+                        currentCharacter_ = 0;
+                        selectionMode_ = 0;
+                    } else if (
+                        action == L"Delete" &&
+                        checkpointBlockBodySelected_) {
+                        checkpointBlockBodySelected_ = false;
+                        checkpointBlockBodyPresent_ = false;
+                        pageCount_ = 1;
+                        currentParagraph_ = 0;
+                        currentCharacter_ = 0;
+                        selectionMode_ = 0;
+                    }
+                    result->vt = VT_BOOL;
+                    result->boolVal = VARIANT_TRUE;
                     return S_OK;
                 }
                 if (action == L"Delete" && textDeletionFixture_ &&
@@ -2682,6 +4480,27 @@ public:
                 return S_OK;
             }
             if (member == GetDefault) {
+                if (checkpointDocumentFileFixture_ && parameters != nullptr &&
+                    parameters->cArgs >= 2 &&
+                    parameters->rgvarg[1].vt == VT_BSTR) {
+                    currentAction_.assign(
+                        parameters->rgvarg[1].bstrVal,
+                        SysStringLen(parameters->rgvarg[1].bstrVal));
+                    // Every attempt starts from the engine's defaults, so the
+                    // KeepSection the next Execute reads is the one this restore
+                    // asked for and not the one the previous attempt left.
+                    if (currentAction_ == L"InsertFile") {
+                        checkpointHeadRangeReportsAfterInsert_ = 0;
+                        checkpointPendingKeepSection_ = -1;
+                        checkpointPendingFileName_.clear();
+                    } else if (currentAction_ == L"ParagraphShape") {
+                        checkpointHeadProbeActive_ = true;
+                        checkpointHeadControlIndex_ = 0;
+                    }
+                    result->vt = VT_BOOL;
+                    result->boolVal = VARIANT_TRUE;
+                    return S_OK;
+                }
                 if (currentAction_ == L"SetWithoutDefault") {
                     return E_FAIL;
                 }
@@ -2692,7 +4511,19 @@ public:
                             parameters->rgvarg[1].bstrVal,
                             SysStringLen(parameters->rgvarg[1].bstrVal));
                     }
+                    if (pendingTextFormatReadback_ &&
+                        (currentAction_ == L"CharShape" ||
+                         currentAction_ == L"ParagraphShape")) {
+                        pendingTextFormatReadback_ = false;
+                        ++textFormatReadbacks_;
+                    }
                     parameterSet_->ClearGenericValues();
+                    if (rangeFormatReadbackFixture_ &&
+                        currentAction_ == L"CellFill") {
+                        parameterSet_->SetGenericLong(
+                            L"FillColor",
+                            rangeCellFillValue_);
+                    }
                     const ReferenceCell* const cell = ReferenceFormattingCell();
                     pendingReferenceFormat_ = cell == nullptr
                         ? BodyReferenceFormat()
@@ -2712,6 +4543,96 @@ public:
                 return S_OK;
             }
             if (member == Execute) {
+                if (checkpointDocumentFileFixture_) {
+                    if (parameters != nullptr && parameters->cArgs >= 2 &&
+                        parameters->rgvarg[1].vt == VT_BSTR) {
+                        currentAction_.assign(
+                            parameters->rgvarg[1].bstrVal,
+                            SysStringLen(parameters->rgvarg[1].bstrVal));
+                    }
+                    if (currentAction_ == L"InsertFile") {
+                        // An insert that never said which way to treat the
+                        // checkpoint's sections is not an insert this models.
+                        if (checkpointPendingKeepSection_ < 0) {
+                            return E_FAIL;
+                        }
+                        const LONG keepSection = checkpointPendingKeepSection_;
+                        checkpointInsertKeepSections_.push_back(keepSection);
+                        checkpointLastKeepSection_ = keepSection;
+                        if (PendingCheckpointFileIsRollback() &&
+                            !checkpointRollbackInsertFails_) {
+                            checkpointContentParagraphs_ =
+                                kCheckpointContentParagraphs;
+                            checkpointResidueParagraph_ = false;
+                            checkpointLeadingSectionResidue_ = false;
+                            checkpointFlattenedPenalty_ = false;
+                            pageCount_ = 2;
+                            currentList_ = 0;
+                            currentParagraph_ = CheckpointContentEndParagraph();
+                            currentCharacter_ = kCheckpointParagraphLength;
+                            checkpointWholeSelected_ = false;
+                            checkpointBodySelected_ = false;
+                            checkpointTailSelected_ = false;
+                            checkpointHeadSelected_ = false;
+                            selectionMode_ = 0;
+                            result->vt = VT_BOOL;
+                            result->boolVal = VARIANT_TRUE;
+                            return S_OK;
+                        }
+                        if (checkpointTextLossInsertAttempts_ > 0) {
+                            --checkpointTextLossInsertAttempts_;
+                            checkpointContentParagraphs_ = 0;
+                            checkpointResidueParagraph_ = false;
+                            checkpointLeadingSectionResidue_ = false;
+                            checkpointFlattenedPenalty_ = false;
+                            pageCount_ = kCheckpointDocumentPages;
+                            currentList_ = 0;
+                            currentParagraph_ = 0;
+                            currentCharacter_ = 0;
+                            checkpointWholeSelected_ = false;
+                            checkpointBodySelected_ = false;
+                            checkpointTailSelected_ = false;
+                            checkpointHeadSelected_ = false;
+                            selectionMode_ = 0;
+                            result->vt = VT_BOOL;
+                            result->boolVal = VARIANT_TRUE;
+                            return S_OK;
+                        }
+                        checkpointContentParagraphs_ = checkpointSingleParagraph_
+                            ? 1L
+                            : kCheckpointContentParagraphs;
+                        // The paragraph the emptied document still had is beside
+                        // the inserted content, not replaced by it -- unless this
+                        // engine absorbs it, which is the document the trim must
+                        // keep its hands off.
+                        checkpointResidueParagraph_ = !checkpointAbsorbsResidue_;
+                        checkpointLeadingSectionResidue_ =
+                            checkpointResidueParagraph_ &&
+                            checkpointResidueAtFront_;
+                        checkpointFlattenedPenalty_ =
+                            checkpointInsertNeverMatches_ ||
+                            (checkpointSectionsNeedKeeping_ && keepSection == 0);
+                        pageCount_ = CheckpointDocumentFilePages();
+                        // MoveNextPos is not a reliable boundary on every live
+                        // document, so the fixture can make it land before the
+                        // checkpoint's end.
+                        currentList_ = 0;
+                        currentParagraph_ = checkpointInsertCaretBeforeEnd_
+                            ? CheckpointContentBaseParagraph()
+                            : CheckpointContentEndParagraph();
+                        currentCharacter_ = checkpointInsertCaretBeforeEnd_
+                            ? 0L
+                            : kCheckpointParagraphLength;
+                        checkpointWholeSelected_ = false;
+                        checkpointBodySelected_ = false;
+                        checkpointTailSelected_ = false;
+                        checkpointHeadSelected_ = false;
+                        selectionMode_ = 0;
+                        result->vt = VT_BOOL;
+                        result->boolVal = VARIANT_TRUE;
+                        return S_OK;
+                    }
+                }
                 if (referenceLayoutFixture_) {
                     if (parameters != nullptr && parameters->cArgs >= 2 &&
                         parameters->rgvarg[1].vt == VT_BSTR) {
@@ -2732,18 +4653,22 @@ public:
                         }
                     } else if (currentAction_ == L"CharShape") {
                         ReferenceCell* const cell = ReferenceFormattingCell();
-                        if (cell != nullptr) {
+                        if (cell != nullptr && !dropAppliedTextFormat_) {
                             ApplyReferenceCharacterFormat(
                                 &cell->format,
                                 pendingReferenceFormat_);
                         }
+                        pendingTextFormatReadback_ = true;
+                        ++textFormatActionsExecuted_;
                     } else if (currentAction_ == L"ParagraphShape") {
                         ReferenceCell* const cell = ReferenceFormattingCell();
-                        if (cell != nullptr) {
+                        if (cell != nullptr && !dropAppliedTextFormat_) {
                             ApplyReferenceParagraphFormat(
                                 &cell->format,
                                 pendingReferenceFormat_);
                         }
+                        pendingTextFormatReadback_ = true;
+                        ++textFormatActionsExecuted_;
                     } else if (currentAction_ == L"InsertText") {
                         if (failReferenceLayoutAfterFirstText_ &&
                             referenceTextInsertions_ == 1) {
@@ -2755,6 +4680,40 @@ public:
                         ++referenceTextInsertions_;
                     } else if (currentAction_ == L"CellBorderFill") {
                         ClearReferenceBorders();
+                    } else if (currentAction_ == L"ForwardFind") {
+                        const ReferenceCell* const cell =
+                            ReferenceCellByList(currentList_);
+                        result->vt = VT_BOOL;
+                        result->boolVal = VARIANT_FALSE;
+                        if (cell == nullptr || findString_.empty()) {
+                            return S_OK;
+                        }
+                        const size_t from =
+                            static_cast<size_t>((std::max)(0L, currentCharacter_));
+                        const size_t hit = from > cell->text.size()
+                            ? std::wstring::npos
+                            : cell->text.find(findString_, from);
+                        if (hit == std::wstring::npos) {
+                            return S_OK;
+                        }
+                        // A find that hands back more than it matched. The
+                        // surplus is ordinary body text in front of the
+                        // literal, so it occupies cells of its own and a
+                        // replacement across the whole selection would carry
+                        // it away.
+                        const size_t start = hit >= findSelectionSurplus_
+                            ? hit - findSelectionSurplus_
+                            : 0;
+                        selectedStartList_ = currentList_;
+                        selectedStartParagraph_ = 0;
+                        selectedStartCharacter_ = static_cast<LONG>(start);
+                        selectedEndList_ = currentList_;
+                        selectedEndParagraph_ = 0;
+                        selectedEndCharacter_ =
+                            static_cast<LONG>(hit + findString_.size());
+                        selectionMode_ = 1;
+                        result->boolVal = VARIANT_TRUE;
+                        return S_OK;
                     }
                     if (currentAction_ == L"CellZoneBorder") {
                         ++referenceEdgeExecutions_;
@@ -2764,7 +4723,30 @@ public:
                             }
                             ++referenceEdgeApplications_;
                         }
+                    } else if (currentAction_ == L"CellBorder") {
+                        if (rangeFormatReadbackFixture_) {
+                            rangeCellBorderCoveredBlock_ = selectionMode_ == 3 &&
+                                currentList_ != referenceSelectionAnchorList_;
+                        }
+                    } else if (currentAction_ == L"TablePropertyDialog") {
+                        if (rangeFormatReadbackFixture_) {
+                            rangePaddingCoveredBlock_ = selectionMode_ == 3 &&
+                                currentList_ != referenceSelectionAnchorList_;
+                        }
                     } else if (currentAction_ == L"CellFill") {
+                        if (rangeFormatReadbackFixture_) {
+                            LONG requested = 0;
+                            if (!parameterSet_->TryGetLong(
+                                    L"FillColor",
+                                    &requested)) {
+                                return E_FAIL;
+                            }
+                            rangeCellFillCoveredBlock_ = selectionMode_ == 3 &&
+                                currentList_ != referenceSelectionAnchorList_;
+                            if (!dropAppliedRangeFormat_) {
+                                rangeCellFillValue_ = requested;
+                            }
+                        }
                         ++referenceFillApplications_;
                     }
                     result->vt = VT_BOOL;
@@ -3375,6 +5357,18 @@ private:
     }
 
     bool RunReferenceLayoutAction(const std::wstring& action) {
+        if (action == L"Select") {
+            // Turns block selection on at the caret. The next caret move is
+            // what decides the other endpoint.
+            selectedStartList_ = currentList_;
+            selectedStartParagraph_ = currentParagraph_;
+            selectedStartCharacter_ = currentCharacter_;
+            selectedEndList_ = currentList_;
+            selectedEndParagraph_ = currentParagraph_;
+            selectedEndCharacter_ = currentCharacter_;
+            caretSelectionPending_ = true;
+            return true;
+        }
         if (action == L"MoveDocEnd") {
             currentList_ = 0;
             currentParagraph_ = 108;
@@ -3450,6 +5444,12 @@ private:
         }
         if (action == L"TableMergeCell") {
             return MergeFirstReferenceRow();
+        }
+        if (rangeFormatReadbackFixture_ &&
+            action == L"TableVAlignCenter") {
+            rangeSubsequentActionCoveredBlock_ = selectionMode_ == 3 &&
+                currentList_ != referenceSelectionAnchorList_;
+            return true;
         }
         if (action == L"MoveParentList") {
             currentList_ = 0;
@@ -3599,6 +5599,27 @@ private:
     bool staleTopologyCellPositionAttempted_ = false;
     size_t referenceFillApplications_ = 0;
     size_t referenceControlDeletes_ = 0;
+    bool dropAppliedTextFormat_ = false;
+    bool unavailableUnrelatedFormatProperty_ = false;
+    bool unavailableRequestedFormatProperty_ = false;
+    bool automaticNumberReadback_ = false;
+    bool automaticNumberSelectTextRefuses_ = false;
+    size_t automaticNumberSelectTextRefusals_ = 0;
+    std::wstring findString_;
+    size_t findSelectionSurplus_ = 0;
+    bool findDisplayOnlyPrefix_ = false;
+    bool caretSelectionPending_ = false;
+    size_t caretSelectionsCompleted_ = 0;
+    bool pendingTextFormatReadback_ = false;
+    size_t textFormatActionsExecuted_ = 0;
+    size_t textFormatReadbacks_ = 0;
+    bool rangeFormatReadbackFixture_ = false;
+    bool dropAppliedRangeFormat_ = false;
+    LONG rangeCellFillValue_ = 0;
+    bool rangeCellFillCoveredBlock_ = false;
+    bool rangeCellBorderCoveredBlock_ = false;
+    bool rangePaddingCoveredBlock_ = false;
+    bool rangeSubsequentActionCoveredBlock_ = false;
     ReferenceFormat pendingReferenceFormat_;
     std::vector<ReferenceCell> referenceCells_;
     bool anchorRead_ = false;
@@ -3619,8 +5640,64 @@ private:
     bool tailSelection_ = false;
     bool checkpointRestoreFixture_ = false;
     bool checkpointWrongTargetPageCount_ = false;
+    bool checkpointSetTextFileFails_ = false;
     std::wstring checkpointDocumentBlock_;
     size_t checkpointSetAttempts_ = 0;
+    bool checkpointBlockBodyPresent_ = false;
+    bool checkpointBlockBodySelected_ = false;
+    // The document-file checkpoint layout. kCheckpointDocumentPages is what the
+    // checkpoint on disk is worth; the restore is only correct when the document
+    // ends up at exactly that.
+    static constexpr LONG kCheckpointDocumentPages = 4;
+    static constexpr LONG kCheckpointContentParagraphs = 4;
+    static constexpr LONG kCheckpointParagraphLength = 7;
+    bool checkpointDocumentFileFixture_ = false;
+    std::wstring checkpointUserDocumentPath_ = L"C:\\x.hwp";
+    bool checkpointInsertNeverMatches_ = false;
+    bool checkpointRollbackInsertFails_ = false;
+    bool checkpointResidueAtFront_ = true;
+    bool checkpointSectionsNeedKeeping_ = false;
+    bool checkpointResidueParagraph_ = false;
+    bool checkpointLeadingSectionResidue_ = false;
+    size_t checkpointLeadingSectionDeletes_ = 0;
+    bool checkpointFlattenedPenalty_ = false;
+    bool checkpointWholeSelected_ = false;
+    bool checkpointBodySelected_ = false;
+    bool checkpointTailSelected_ = false;
+    bool checkpointHeadSelected_ = false;
+    LONG checkpointContentParagraphs_ = 0;
+    LONG checkpointPendingKeepSection_ = -1;
+    std::wstring checkpointPendingFileName_;
+    size_t checkpointOpenCount_ = 0;
+    size_t checkpointClearCallCount_ = 0;
+    bool checkpointClearFails_ = false;
+    bool checkpointTargetPageMismatch_ = false;
+    bool checkpointRollbackOpenFails_ = false;
+    LONG checkpointLastKeepSection_ = -1;
+    bool checkpointHeadProbeActive_ = false;
+    LONG checkpointHeadControlIndex_ = 0;
+    bool checkpointHeadPageBreakBefore_ = false;
+    bool checkpointHeadSectionIsolated_ = true;
+    std::wstring checkpointTailAnswer_ = L"\r\n";
+    std::wstring checkpointHeadAnswer_ = L"\r\n";
+    bool checkpointAbsorbsResidue_ = false;
+    bool checkpointInsertCaretBeforeEnd_ = false;
+    bool checkpointSingleParagraph_ = false;
+    bool checkpointSelectionMisreports_ = false;
+    size_t checkpointHeadRangeReportsAfterInsert_ = 0;
+    bool checkpointEngineUndoRestores_ = false;
+    bool checkpointEngineUndoWrongStep_ = false;
+    bool checkpointSignatureCaptureUnavailable_ = false;
+    bool checkpointPageCountBelow_ = false;
+    bool checkpointHeadResidueDeleted_ = false;
+    bool checkpointTextFileEmpty_ = false;
+    bool checkpointPictureOnly_ = false;
+    bool checkpointPresenceScan_ = false;
+    size_t checkpointTextLossInsertAttempts_ = 0;
+    size_t checkpointDeleteLeavesTextAttempts_ = 0;
+    size_t checkpointCrossListEndAttempts_ = 0;
+    size_t checkpointBodyDeleteAttempts_ = 0;
+    std::vector<LONG> checkpointInsertKeepSections_;
     LONG pageCount_ = 1;
     LONG currentList_ = 0;
     LONG currentParagraph_ = 0;
@@ -3630,6 +5707,8 @@ private:
     bool textSelectionActive_ = true;
     size_t textDeletionActions_ = 0;
     size_t insertTextExecutions_ = 0;
+    bool firstWriteReadbackFixture_ = false;
+    bool firstWriteReadbackFailed_ = false;
     std::wstring atomicTail_;
     size_t atomicTailDeletes_ = 0;
     size_t atomicTailMaximumOccurrences_ = 0;
@@ -3683,6 +5762,8 @@ private:
     bool activeDocumentFullNameReady_ = false;
     LONG activeDocumentFullNameReads_ = 0;
     bool unstableSerializationMetadataFixture_ = false;
+    bool oversizeSerializationRefusalFixture_ = false;
+    size_t hwpmlSerializationAttempts_ = 0;
     bool unstableCaretMetadataFixture_ = false;
     bool diagnosticSectionMismatchFixture_ = false;
     std::wstring diagnosticSectionBeforeHwpml_;
@@ -3695,6 +5776,14 @@ private:
 using QueryModule = IHncUserActionModule*(__stdcall*)();
 using GetLastResult = HRESULT(__stdcall*)();
 using ReleasePublication = HRESULT(__stdcall*)();
+using ResetGraphLifecycleDiagnostics = void(__stdcall*)();
+using ReadGraphLifecycleDiagnostics = BOOL(__stdcall*)(
+    hancom::graph::protocol::DebugLifecycleCounters*,
+    hancom::graph::protocol::DebugLifecycleEvent*, std::uint32_t,
+    std::uint32_t*);
+using QueryGraphCapabilitySession = BOOL(__stdcall*)(
+    const hancom::graph::identity::DocumentSessionId*, LONG, std::uintptr_t,
+    std::uint64_t*, std::uint64_t*);
 
 IUnknown* GetPublishedObject(const std::wstring& itemName) {
     IRunningObjectTable* table = nullptr;
@@ -3749,9 +5838,297 @@ bool ReadProtocolVersion(IDispatch* const batch) {
         &result,
         nullptr,
         nullptr);
-    const bool matched = SUCCEEDED(status) && result.vt == VT_I4 && result.lVal == 12;
+    const bool matched = SUCCEEDED(status) && result.vt == VT_I4 && result.lVal == 14;
     VariantClear(&result);
     return matched;
+}
+
+template <typename Integer>
+Integer ReadLittleEndian(const std::uint8_t* const bytes) noexcept {
+    Integer value = 0;
+    std::memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
+bool IndependentlyDecodeCapabilities(const std::vector<std::uint8_t>& frame) {
+    constexpr std::size_t headerBytes = 320;
+    constexpr std::uint64_t maximumFrameBytes = 4'194'304;
+    constexpr std::uint64_t maximumPayloadBytes = 4'193'984;
+    if (frame.size() < headerBytes || frame.size() > maximumFrameBytes ||
+        std::memcmp(frame.data(), "HGN1", 4) != 0 ||
+        ReadLittleEndian<std::uint16_t>(frame.data() + 4) != 1 ||
+        ReadLittleEndian<std::uint16_t>(frame.data() + 6) != 1 ||
+        ReadLittleEndian<std::uint32_t>(frame.data() + 8) != 2 ||
+        ReadLittleEndian<std::uint32_t>(frame.data() + 12) != headerBytes ||
+        ReadLittleEndian<std::uint64_t>(frame.data() + 16) !=
+            frame.size() - headerBytes) {
+        return false;
+    }
+    for (std::size_t index = 24; index != 256; ++index) {
+        if (frame[index] != 0) {
+            return false;
+        }
+    }
+    struct ExpectedField final {
+        std::uint16_t tag;
+        std::uint16_t scalar;
+        std::uint64_t valueBytes;
+        std::uint64_t value;
+    };
+    const ExpectedField expected[]{
+        {1, 16, 4, 15},
+        {2, 15, 2, 1},
+        {3, 1, 8, maximumFrameBytes},
+        {4, 1, 8, maximumPayloadBytes},
+        {5, 1, 8, UINT64_MAX},
+        {6, 1, 8, ReadLittleEndian<std::uint64_t>(
+            frame.data() + frame.size() - 8)},
+    };
+    std::size_t offset = headerBytes;
+    for (const ExpectedField& field : expected) {
+        if (offset + 24 + field.valueBytes > frame.size() ||
+            ReadLittleEndian<std::uint16_t>(frame.data() + offset) != field.tag ||
+            ReadLittleEndian<std::uint16_t>(frame.data() + offset + 2) != 1 ||
+            ReadLittleEndian<std::uint16_t>(frame.data() + offset + 4) != field.scalar ||
+            ReadLittleEndian<std::uint16_t>(frame.data() + offset + 6) != 0 ||
+            ReadLittleEndian<std::uint64_t>(frame.data() + offset + 8) != 1 ||
+            ReadLittleEndian<std::uint64_t>(frame.data() + offset + 16) !=
+                field.valueBytes) {
+            return false;
+        }
+        offset += 24;
+        std::uint64_t value = 0;
+        std::memcpy(&value, frame.data() + offset,
+                    static_cast<std::size_t>(field.valueBytes));
+        if (value != field.value) {
+            return false;
+        }
+        offset += static_cast<std::size_t>(field.valueBytes);
+    }
+    return offset == frame.size() &&
+        (expected[5].value == UINT64_C(0x10) ||
+         expected[5].value == UINT64_C(0x39));
+}
+
+bool ReadExactCapabilityArray(
+    const VARIANT& capabilities,
+    std::vector<std::uint8_t>* const bytes) {
+    if (bytes == nullptr || capabilities.vt != (VT_ARRAY | VT_UI1) ||
+        capabilities.parray == nullptr ||
+        SafeArrayGetDim(capabilities.parray) != 1 ||
+        SafeArrayGetElemsize(capabilities.parray) != sizeof(BYTE) ||
+        capabilities.parray->cDims != 1 ||
+        capabilities.parray->cbElements != sizeof(BYTE) ||
+        capabilities.parray->rgsabound[0].lLbound != 0) {
+        return false;
+    }
+    VARTYPE descriptorType = VT_EMPTY;
+    LONG lower = 0;
+    LONG upper = -1;
+    if (FAILED(SafeArrayGetVartype(capabilities.parray, &descriptorType)) ||
+        descriptorType != VT_UI1 ||
+        FAILED(SafeArrayGetLBound(capabilities.parray, 1, &lower)) || lower != 0 ||
+        FAILED(SafeArrayGetUBound(capabilities.parray, 1, &upper)) || upper < 0) {
+        return false;
+    }
+    const std::uint64_t count =
+        static_cast<std::uint64_t>(static_cast<unsigned long long>(upper) + 1ULL);
+    if (count != capabilities.parray->rgsabound[0].cElements ||
+        count > 4'194'304 ||
+        count > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
+        return false;
+    }
+    void* raw = nullptr;
+    if (FAILED(SafeArrayAccessData(capabilities.parray, &raw))) {
+        return false;
+    }
+    bool copied = true;
+    try {
+        const auto* const first = static_cast<const std::uint8_t*>(raw);
+        bytes->assign(first, first + static_cast<std::size_t>(count));
+    } catch (...) {
+        copied = false;
+    }
+    return SUCCEEDED(SafeArrayUnaccessData(capabilities.parray)) && copied;
+}
+
+HRESULT InvokeGraphCapabilitiesHandshake(
+    IDispatch* const batch,
+    const hancom::graph::identity::DocumentSessionId& session,
+    const std::uint64_t requested,
+    bool* const exactCapabilities) {
+    if (batch == nullptr || exactCapabilities == nullptr) return E_POINTER;
+    *exactCapabilities = false;
+    const std::wstring sessionText =
+        hancom::graph::identity::FormatCanonicalUuid(session);
+    VARIANTARG arguments[2]{};
+    arguments[0].vt = VT_UI8;
+    arguments[0].ullVal = requested;
+    arguments[1].vt = VT_BSTR;
+    arguments[1].bstrVal = SysAllocString(sessionText.c_str());
+    if (arguments[1].bstrVal == nullptr) return E_OUTOFMEMORY;
+    DISPPARAMS parameters{arguments, nullptr, 2, 0};
+    VARIANT result{};
+    const HRESULT status = batch->Invoke(
+        26, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_METHOD,
+        &parameters, &result, nullptr, nullptr);
+    std::vector<std::uint8_t> frame;
+    *exactCapabilities = SUCCEEDED(status) &&
+        ReadExactCapabilityArray(result, &frame) &&
+        IndependentlyDecodeCapabilities(frame);
+    VariantClear(&result);
+    VariantClear(&arguments[1]);
+    return status;
+}
+
+struct GraphErrorObservation final {
+    HRESULT invokeStatus = E_FAIL;
+    std::uint16_t message = 0;
+    std::uint32_t errorCode = UINT32_MAX;
+    std::uint32_t errorHresult = 0;
+    std::uint64_t responseBytes = 0;
+    bool decoded = false;
+};
+
+GraphErrorObservation InvokeGraphCloseError(
+    IDispatch* const batch,
+    const hancom::graph::identity::DocumentSessionId& session,
+    const hancom::graph::identity::DocumentSessionId& cursor) {
+    using namespace hancom::graph;
+    GraphErrorObservation observation{};
+    if (batch == nullptr) return observation;
+    protocol::Header header{};
+    header.message = protocol::MessageKind::GraphCloseRequest;
+    header.session = session;
+    header.cursorOrUpload = cursor;
+    const codec::Bytes sessionBytes(session.bytes.begin(), session.bytes.end());
+    const codec::Bytes cursorBytes(cursor.bytes.begin(), cursor.bytes.end());
+    codec::Bytes payload;
+    for (const codec::Bytes& field : {
+        protocol::EncodeField(1, 1, ScalarTag::UUID128, codec::View(cursorBytes)),
+        protocol::EncodeField(2, 1, ScalarTag::UUID128, codec::View(sessionBytes))}) {
+        payload.insert(payload.end(), field.begin(), field.end());
+    }
+    codec::Bytes request;
+    if (!protocol::EncodeFrame(header, codec::View(payload), &request)) return observation;
+    VARIANTARG argument{};
+    if (FAILED(protocol::ReturnByteArray(codec::View(request), &argument))) return observation;
+    DISPPARAMS parameters{&argument, nullptr, 1, 0};
+    VARIANT result{};
+    const HRESULT status = batch->Invoke(
+        30, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_METHOD,
+        &parameters, &result, nullptr, nullptr);
+    observation.invokeStatus = status;
+    VariantClear(&argument);
+    codec::Bytes response;
+    const bool copied = SUCCEEDED(status) &&
+        SUCCEEDED(protocol::ReadByteArrayArgument(result, &response));
+    VariantClear(&result);
+    protocol::Header responseHeader{};
+    codec::ByteView responsePayload{};
+    protocol::ErrorCode decodeError{};
+    std::vector<protocol::ParsedField> fields;
+    observation.responseBytes = response.size();
+    if (!copied || !protocol::DecodeFrame(
+            codec::View(response), &responseHeader, &responsePayload, &decodeError) ||
+        responseHeader.message != protocol::MessageKind::Error ||
+        !protocol::ParseFields(responsePayload, &fields, &decodeError)) return observation;
+    const auto code = std::find_if(fields.begin(), fields.end(),
+        [](const protocol::ParsedField& field) { return field.tag == 1; });
+    const auto errorHresult = std::find_if(fields.begin(), fields.end(),
+        [](const protocol::ParsedField& field) { return field.tag == 2; });
+    if (code == fields.end() || code->value.size != 4 ||
+        errorHresult == fields.end() || errorHresult->value.size != 4)
+        return observation;
+    observation.message = static_cast<std::uint16_t>(responseHeader.message);
+    observation.errorCode = ReadLittleEndian<std::uint32_t>(code->value.data);
+    observation.errorHresult =
+        ReadLittleEndian<std::uint32_t>(errorHresult->value.data);
+    observation.decoded = true;
+    return observation;
+}
+
+IDispatch* GetPublishedBatchDispatch(const std::wstring& scope) {
+    IUnknown* const unknown = GetPublishedObject(L"HancomLiveBatch." + scope);
+    if (unknown == nullptr) return nullptr;
+    IDispatch* dispatch = nullptr;
+    static_cast<void>(unknown->QueryInterface(
+        IID_IDispatch, reinterpret_cast<void**>(&dispatch)));
+    unknown->Release();
+    return dispatch;
+}
+
+bool ReadGraphDispatchAbi(IDispatch* const batch) {
+    constexpr const wchar_t* names[]{
+        L"GraphProtocolVersion", L"GraphCapabilities", L"GraphOpen", L"GraphNext",
+        L"GraphCancel", L"GraphClose", L"PatchBegin", L"PatchChunk",
+        L"PatchCommit", L"PatchAbort", L"PatchValidate",
+    };
+    for (std::size_t index = 0; index != std::size(names); ++index) {
+        LPOLESTR name = const_cast<LPOLESTR>(names[index]);
+        DISPID member = DISPID_UNKNOWN;
+        if (FAILED(batch->GetIDsOfNames(
+                IID_NULL, &name, 1, LOCALE_USER_DEFAULT, &member)) ||
+            member != static_cast<DISPID>(25 + index)) return false;
+    }
+    // PatchApply is a published member of this ABI, not an absent one.
+    // compatibility-manifest.json declares dispatch ids 25-37, BatchAutomation.cpp
+    // resolves this name to kPatchApply = 36 and routes it into InvokeGraphMember,
+    // and the graph patch tools ship on top of it. Requiring GetIDsOfNames to fail
+    // here was a leftover from the todo19 design, which predated patch application:
+    // 3fc5c52 added the member to the bridge, the manifest and the todo30 tests but
+    // did not update this expectation, and the stale prebuilt smoke binary hid the
+    // contradiction until the executable was rebuilt from current sources.
+    LPOLESTR applyName = const_cast<LPOLESTR>(L"PatchApply");
+    DISPID applyMember = DISPID_UNKNOWN;
+    if (FAILED(batch->GetIDsOfNames(
+            IID_NULL, &applyName, 1, LOCALE_USER_DEFAULT, &applyMember)) ||
+        applyMember != 36) return false;
+    LPOLESTR blobName = const_cast<LPOLESTR>(L"BlobRead");
+    DISPID blobMember = DISPID_UNKNOWN;
+    if (FAILED(batch->GetIDsOfNames(
+            IID_NULL, &blobName, 1, LOCALE_USER_DEFAULT, &blobMember)) ||
+        blobMember != 37) return false;
+    DISPPARAMS noArguments{};
+    VARIANT version;
+    VariantInit(&version);
+    HRESULT status = batch->Invoke(
+        25, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_PROPERTYGET,
+        &noArguments, &version, nullptr, nullptr);
+    const bool versionMatched = SUCCEEDED(status) && version.vt == VT_I4 && version.lVal == 15;
+    VariantClear(&version);
+    VARIANT capabilities;
+    VariantInit(&capabilities);
+    status = batch->Invoke(
+        26, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_PROPERTYGET,
+        &noArguments, &capabilities, nullptr, nullptr);
+    std::vector<std::uint8_t> capabilityBytes;
+    const bool capabilityMatched = SUCCEEDED(status) &&
+        ReadExactCapabilityArray(capabilities, &capabilityBytes) &&
+        IndependentlyDecodeCapabilities(capabilityBytes);
+    VariantClear(&capabilities);
+    VARIANTARG bad{};
+    bad.vt = VT_I4;
+    bad.lVal = 1;
+    DISPPARAMS oneArgument{&bad, nullptr, 1, 0};
+    VARIANT ignored;
+    VariantInit(&ignored);
+    const HRESULT badStatus = batch->Invoke(
+        31, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_METHOD,
+        &oneArgument, &ignored, nullptr, nullptr);
+    VariantClear(&ignored);
+    return versionMatched && capabilityMatched && badStatus == DISP_E_TYPEMISMATCH;
+}
+
+bool HasDispatchMember(IDispatch* const dispatch, const wchar_t* const method) {
+    LPOLESTR name = const_cast<LPOLESTR>(method);
+    DISPID member = DISPID_UNKNOWN;
+    return SUCCEEDED(dispatch->GetIDsOfNames(
+        IID_NULL,
+        &name,
+        1,
+        LOCALE_USER_DEFAULT,
+        &member));
 }
 
 bool InvokeString(
@@ -3790,6 +6167,57 @@ bool InvokeString(
         nullptr);
     VariantClear(&input);
     const bool valid = SUCCEEDED(status) && result.vt == VT_BSTR && result.bstrVal != nullptr;
+    if (valid) {
+        returned->assign(result.bstrVal, SysStringLen(result.bstrVal));
+    }
+    VariantClear(&result);
+    return valid;
+}
+
+bool InvokeTwoStrings(
+    IDispatch* const batch,
+    const wchar_t* const method,
+    const wchar_t* const first,
+    const wchar_t* const second,
+    std::wstring* const returned) {
+    LPOLESTR name = const_cast<LPOLESTR>(method);
+    DISPID member = DISPID_UNKNOWN;
+    if (FAILED(batch->GetIDsOfNames(
+            IID_NULL, &name, 1, LOCALE_USER_DEFAULT, &member))) {
+        return false;
+    }
+    VARIANTARG inputs[2];
+    VariantInit(&inputs[0]);
+    VariantInit(&inputs[1]);
+    inputs[0].vt = VT_BSTR;
+    inputs[0].bstrVal = SysAllocString(second);
+    inputs[1].vt = VT_BSTR;
+    inputs[1].bstrVal = SysAllocString(first);
+    if (inputs[0].bstrVal == nullptr || inputs[1].bstrVal == nullptr) {
+        VariantClear(&inputs[1]);
+        VariantClear(&inputs[0]);
+        return false;
+    }
+    DISPPARAMS parameters{};
+    parameters.rgvarg = inputs;
+    parameters.cArgs = 2;
+    VARIANT result;
+    VariantInit(&result);
+    const HRESULT status = batch->Invoke(
+        member,
+        IID_NULL,
+        LOCALE_USER_DEFAULT,
+        DISPATCH_METHOD,
+        &parameters,
+        &result,
+        nullptr,
+        nullptr);
+    VariantClear(&inputs[1]);
+    VariantClear(&inputs[0]);
+    const bool valid =
+        SUCCEEDED(status) &&
+        result.vt == VT_BSTR &&
+        result.bstrVal != nullptr;
     if (valid) {
         returned->assign(result.bstrVal, SysStringLen(result.bstrVal));
     }
@@ -4687,6 +7115,7 @@ int ProbePublishedProcess(const wchar_t* const processIdArgument) {
     IUnknown* const batchUnknown = GetPublishedObject(L"HancomLiveBatch." + processId);
 
     bool protocolMatched = false;
+    bool bundleMatched = false;
     bool pingMatched = false;
     if (batchUnknown != nullptr) {
         IDispatch* batch = nullptr;
@@ -4694,9 +7123,11 @@ int ProbePublishedProcess(const wchar_t* const processIdArgument) {
                 IID_IDispatch,
                 reinterpret_cast<void**>(&batch))) && batch != nullptr) {
             protocolMatched = ReadProtocolVersion(batch);
+            bundleMatched = HasDispatchMember(batch, L"ExecuteProtocolBundle");
             std::wstring ping;
-            pingMatched = InvokeString(batch, L"Ping", nullptr, &ping) &&
-                ping == L"HCB12\tPONG\t12";
+            pingMatched = bundleMatched &&
+                InvokeString(batch, L"Ping", nullptr, &ping) &&
+                ping == L"HCB14\tPONG\t14";
             batch->Release();
         }
     }
@@ -4706,6 +7137,7 @@ int ProbePublishedProcess(const wchar_t* const processIdArgument) {
         << L" raw=" << (rawPresent ? L"present" : L"missing")
         << L" batch=" << (batchUnknown != nullptr ? L"present" : L"missing")
         << L" protocol=" << (protocolMatched ? L"ok" : L"missing")
+        << L" bundle=" << (bundleMatched ? L"ok" : L"missing")
         << L" ping=" << (pingMatched ? L"ok" : L"missing")
         << L" client-integrity=" << IntegrityLevelName(GetCurrentProcessId())
         << L" target-integrity=" << IntegrityLevelName(static_cast<DWORD>(parsed))
@@ -4728,14 +7160,560 @@ int ProbePublishedProcess(const wchar_t* const processIdArgument) {
     if (batchUnknown != nullptr) {
         batchUnknown->Release();
     }
-    return rawPresent && batchUnknown != nullptr && protocolMatched && pingMatched
+    return rawPresent && batchUnknown != nullptr && protocolMatched &&
+        bundleMatched && pingMatched
         ? 0
         : 10;
+}
+
+std::wstring NormalizedExistingPath(const wchar_t* const path) {
+    if (path == nullptr || path[0] == L'\0') {
+        return {};
+    }
+    std::error_code error;
+    const std::filesystem::path normalized =
+        std::filesystem::canonical(std::filesystem::path(path), error);
+    return error ? std::wstring{} : normalized.wstring();
+}
+
+int RunGraphDispatchAbi(
+    const wchar_t* const libraryArgument,
+    const wchar_t* const expectedSha256,
+    const bool requireSessionLifecycle,
+    const wchar_t* const nonce = nullptr,
+    const wchar_t* const sourceInventory = nullptr,
+    const wchar_t* const expectedBuildIdentity = nullptr,
+    const int argumentCount = 0,
+    wchar_t** const arguments = nullptr) {
+    const std::wstring requestedPath = NormalizedExistingPath(libraryArgument);
+    if (requestedPath.empty() || expectedSha256 == nullptr ||
+        std::wcslen(expectedSha256) != 64 ||
+        (requireSessionLifecycle &&
+         (!IsLowerHex64(nonce) || !IsLowerHex64(sourceInventory) ||
+          !IsLowerHex64(expectedBuildIdentity) || argumentCount == 0 ||
+          arguments == nullptr))) {
+        std::wcerr << L"invalid graph ABI input\n";
+        return 2;
+    }
+    const std::wstring requestedSha256 = FileSha256(requestedPath);
+    if (_wcsicmp(requestedSha256.c_str(), expectedSha256) != 0) {
+        std::wcerr << L"requested DLL SHA-256 mismatch\n";
+        return 4;
+    }
+    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(initialized)) {
+        std::wcerr << L"CoInitializeEx failed: " << initialized << L'\n';
+        return 3;
+    }
+    HMODULE const library = LoadLibraryW(requestedPath.c_str());
+    if (library == nullptr) {
+        std::wcerr << L"LoadLibraryW failed: " << GetLastError() << L'\n';
+        CoUninitialize();
+        return 4;
+    }
+    std::array<wchar_t, 32768> loadedPathBuffer{};
+    const DWORD loadedLength = GetModuleFileNameW(
+        library, loadedPathBuffer.data(),
+        static_cast<DWORD>(loadedPathBuffer.size()));
+    const std::wstring loadedPath = loadedLength == 0 ||
+        loadedLength >= loadedPathBuffer.size()
+        ? std::wstring{}
+        : NormalizedExistingPath(loadedPathBuffer.data());
+    const std::wstring loadedSha256 = FileSha256(loadedPath);
+    std::array<wchar_t, 32768> executablePathBuffer{};
+    const DWORD executableLength = GetModuleFileNameW(
+        nullptr, executablePathBuffer.data(),
+        static_cast<DWORD>(executablePathBuffer.size()));
+    const std::wstring executablePath = executableLength == 0 ||
+        executableLength >= executablePathBuffer.size()
+        ? std::wstring{}
+        : NormalizedExistingPath(executablePathBuffer.data());
+    const std::wstring executableSha256 = FileSha256(executablePath);
+    const std::wstring commandSha256 = requireSessionLifecycle
+        ? CanonicalArgvSha256(argumentCount, arguments) : std::wstring{};
+    std::string buildMaterial;
+    if (requireSessionLifecycle) {
+        buildMaterial = "GSG_GRAPH_LIFECYCLE_BUILD_V1";
+        buildMaterial.push_back('\0');
+        buildMaterial += Utf8(executableSha256);
+        buildMaterial.push_back('\0');
+        buildMaterial += Utf8(loadedSha256);
+        buildMaterial.push_back('\0');
+        buildMaterial += Utf8(sourceInventory);
+    }
+    const std::wstring buildIdentity = Sha256Bytes(buildMaterial);
+    const bool provenanceMatched = !loadedPath.empty() &&
+        _wcsicmp(loadedPath.c_str(), requestedPath.c_str()) == 0 &&
+        _wcsicmp(loadedSha256.c_str(), expectedSha256) == 0 &&
+        (!requireSessionLifecycle ||
+         (!executablePath.empty() && !executableSha256.empty() &&
+          !commandSha256.empty() && buildIdentity == expectedBuildIdentity));
+    if (requireSessionLifecycle) {
+        std::wcout << L"ATTESTATION_READY\tNONCE\t" << nonce
+                   << L"\tPID\t" << GetCurrentProcessId() << L'\n'
+                   << std::flush;
+        std::wstring launcherProof;
+        if (!std::getline(std::wcin, launcherProof) ||
+            launcherProof != std::wstring(L"ATTEST ") + nonce) {
+            std::wcerr << L"launcher pre-run attestation proof mismatch\n";
+            FreeLibrary(library);
+            CoUninitialize();
+            return 2;
+        }
+    }
+    std::wcout << L"LOADED_MODULE_PATH_UTF8_B64 "
+               << EncodeUtf8Base64(loadedPath) << L'\n'
+               << L"LOADED_MODULE_SHA256 " << loadedSha256 << L'\n';
+
+    const auto query = reinterpret_cast<QueryModule>(
+        GetProcAddress(library, "QueryUserActionInterface"));
+    const auto accessible = GetProcAddress(library, "IsAccessiblePath");
+    const auto getLastResult = reinterpret_cast<GetLastResult>(
+        GetProcAddress(library, "GetBridgeLastHRESULT"));
+    const auto releasePublication = reinterpret_cast<ReleasePublication>(
+        GetProcAddress(library, "ReleaseBridgePublication"));
+    const auto resetLifecycle =
+        reinterpret_cast<ResetGraphLifecycleDiagnostics>(
+            GetProcAddress(library, "ResetGraphLifecycleDiagnostics"));
+    const auto readLifecycle =
+        reinterpret_cast<ReadGraphLifecycleDiagnostics>(
+            GetProcAddress(library, "ReadGraphLifecycleDiagnostics"));
+    const auto querySession = reinterpret_cast<QueryGraphCapabilitySession>(
+        GetProcAddress(library, "QueryGraphCapabilitySession"));
+    const bool lifecycleExports = resetLifecycle != nullptr &&
+        readLifecycle != nullptr && querySession != nullptr;
+    const bool exportsMatched = query != nullptr && accessible != nullptr &&
+        getLastResult != nullptr && releasePublication != nullptr &&
+        (!requireSessionLifecycle || lifecycleExports);
+
+    constexpr LONG windowHandleA = 4242;
+    constexpr LONG documentIdA = 17;
+    constexpr LONG windowHandleB = 4343;
+    constexpr LONG documentIdB = 18;
+    CComPtr<FakeDispatch> dispatchOwnerA;
+    CComPtr<FakeDispatch> dispatchOwnerB;
+    dispatchOwnerA.Attach(new FakeDispatch(windowHandleA, documentIdA));
+    dispatchOwnerB.Attach(new FakeDispatch(windowHandleB, documentIdB));
+    FakeDispatch* const dispatchA = dispatchOwnerA;
+    FakeDispatch* const dispatchB = dispatchOwnerB;
+    IHncUserActionModule* const module = exportsMatched ? query() : nullptr;
+    const bool moduleMatched = UserActionEnumerationMatches(module);
+    const bool published = moduleMatched &&
+        module->DoAction(kOnLoad, dispatchA) != FALSE &&
+        module->DoAction(kOnLoad, dispatchB) != FALSE &&
+        SUCCEEDED(getLastResult());
+    const std::wstring process = std::to_wstring(GetCurrentProcessId());
+    const std::wstring scopeA = process + L"." + std::to_wstring(windowHandleA) +
+        L"." + std::to_wstring(documentIdA);
+    const std::wstring scopeB = process + L"." + std::to_wstring(windowHandleB) +
+        L"." + std::to_wstring(documentIdB);
+    IDispatch* batchA = published ? GetPublishedBatchDispatch(scopeA) : nullptr;
+    IDispatch* batchB = published ? GetPublishedBatchDispatch(scopeB) : nullptr;
+    const bool dispatchCreated = batchA != nullptr && batchB != nullptr;
+    const bool legacyMatched = dispatchCreated && ReadProtocolVersion(batchA);
+    const bool graphMatched = dispatchCreated && ReadGraphDispatchAbi(batchA);
+
+    hancom::graph::identity::DocumentSessionId sessionA{};
+    hancom::graph::identity::DocumentSessionId sessionB{};
+    hancom::graph::identity::DocumentSessionId cursor{};
+    const hancom::graph::identity::UuidSource random{
+        nullptr, hancom::graph::identity::SystemRandomBytes};
+    if (requireSessionLifecycle && lifecycleExports) resetLifecycle();
+    const bool runtimeUuids =
+        hancom::graph::identity::MintUuidV4(random, &sessionA) &&
+        hancom::graph::identity::MintUuidV4(random, &sessionB) &&
+        hancom::graph::identity::MintUuidV4(random, &cursor) &&
+        !hancom::graph::identity::EqualUuid(sessionA, sessionB);
+    bool handshakeFrameA = false;
+    bool handshakeFrameB = false;
+    const HRESULT handshakeA = dispatchCreated && runtimeUuids
+        ? InvokeGraphCapabilitiesHandshake(
+            batchA, sessionA, UINT64_C(1), &handshakeFrameA)
+        : E_FAIL;
+    const HRESULT handshakeB = dispatchCreated && runtimeUuids
+        ? InvokeGraphCapabilitiesHandshake(
+            batchB, sessionB, 0, &handshakeFrameB)
+        : E_FAIL;
+    std::uint64_t aRequestedAfterHandshake = UINT64_MAX;
+    std::uint64_t aNegotiatedAfterHandshake = UINT64_MAX;
+    std::uint64_t bRequestedAfterHandshake = UINT64_MAX;
+    std::uint64_t bNegotiatedAfterHandshake = UINT64_MAX;
+    const BOOL aKnownAfterHandshake = requireSessionLifecycle && lifecycleExports
+        ? querySession(&sessionA, documentIdA, windowHandleA,
+                       &aRequestedAfterHandshake, &aNegotiatedAfterHandshake)
+        : FALSE;
+    const BOOL bKnownAfterHandshake = requireSessionLifecycle && lifecycleExports
+        ? querySession(&sessionB, documentIdB, windowHandleB,
+                       &bRequestedAfterHandshake, &bNegotiatedAfterHandshake)
+        : FALSE;
+    const GraphErrorObservation closeA = InvokeGraphCloseError(
+        batchA, sessionA, cursor);
+    const bool closeAUnsupported = closeA.decoded &&
+        closeA.errorCode == static_cast<std::uint32_t>(
+            hancom::graph::protocol::ErrorCode::CursorNotFound);
+    std::uint64_t aRequestedAfterClose = UINT64_MAX;
+    std::uint64_t aNegotiatedAfterClose = UINT64_MAX;
+    const BOOL aKnownAfterClose = requireSessionLifecycle && lifecycleExports
+        ? querySession(&sessionA, documentIdA, windowHandleA,
+                       &aRequestedAfterClose, &aNegotiatedAfterClose)
+        : FALSE;
+    const GraphErrorObservation crossClose = InvokeGraphCloseError(
+        batchA, sessionB, cursor);
+    const bool failedCrossClose = crossClose.decoded &&
+        crossClose.errorCode == static_cast<std::uint32_t>(
+            hancom::graph::protocol::ErrorCode::BadField);
+    std::uint64_t bRequestedAfterFailedClose = UINT64_MAX;
+    std::uint64_t bNegotiatedAfterFailedClose = UINT64_MAX;
+    const BOOL bKnownAfterFailedClose = requireSessionLifecycle && lifecycleExports
+        ? querySession(&sessionB, documentIdB, windowHandleB,
+                       &bRequestedAfterFailedClose, &bNegotiatedAfterFailedClose)
+        : FALSE;
+    bool duplicateFrameA = false;
+    bool duplicateFrameB = false;
+    const HRESULT duplicateHandshakeA = InvokeGraphCapabilitiesHandshake(
+        batchA, sessionA, 0, &duplicateFrameA);
+    const HRESULT duplicateHandshakeB = InvokeGraphCapabilitiesHandshake(
+        batchB, sessionB, 0, &duplicateFrameB);
+    const bool graphCloseRetainedA = SUCCEEDED(handshakeA) && handshakeFrameA &&
+        closeAUnsupported && aKnownAfterHandshake && aKnownAfterClose &&
+        aRequestedAfterHandshake == 1 && aNegotiatedAfterHandshake == 1 &&
+        aRequestedAfterClose == 1 && aNegotiatedAfterClose == 1 &&
+        duplicateHandshakeA == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
+    const bool failedCloseIsolatedB = SUCCEEDED(handshakeB) && handshakeFrameB &&
+        failedCrossClose && bKnownAfterHandshake && bKnownAfterFailedClose &&
+        bRequestedAfterHandshake == 0 && bNegotiatedAfterHandshake == 0 &&
+        bRequestedAfterFailedClose == 0 && bNegotiatedAfterFailedClose == 0 &&
+        duplicateHandshakeB == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
+    if (batchA != nullptr) batchA->Release();
+    if (batchB != nullptr) batchB->Release();
+
+    const bool closedRouteA = published &&
+        module->DoAction(kOnLoad, dispatchA) != FALSE &&
+        SUCCEEDED(getLastResult());
+    batchA = closedRouteA ? GetPublishedBatchDispatch(scopeA) : nullptr;
+    batchB = closedRouteA ? GetPublishedBatchDispatch(scopeB) : nullptr;
+    std::uint64_t ignoredRequested = UINT64_MAX;
+    std::uint64_t ignoredNegotiated = UINT64_MAX;
+    const BOOL aKnownAfterTeardown = requireSessionLifecycle && lifecycleExports
+        ? querySession(&sessionA, documentIdA, windowHandleA,
+                       &ignoredRequested, &ignoredNegotiated)
+        : TRUE;
+    const BOOL bKnownAfterATeardown = requireSessionLifecycle && lifecycleExports
+        ? querySession(&sessionB, documentIdB, windowHandleB,
+                       &ignoredRequested, &ignoredNegotiated)
+        : FALSE;
+    bool reopenedFrame = false;
+    const HRESULT reopenHandshake = batchA != nullptr
+        ? InvokeGraphCapabilitiesHandshake(batchA, sessionA, 0, &reopenedFrame)
+        : E_FAIL;
+    std::uint64_t aRequestedAfterReopen = UINT64_MAX;
+    std::uint64_t aNegotiatedAfterReopen = UINT64_MAX;
+    const BOOL aKnownAfterReopen = requireSessionLifecycle && lifecycleExports
+        ? querySession(&sessionA, documentIdA, windowHandleA,
+                       &aRequestedAfterReopen, &aNegotiatedAfterReopen)
+        : FALSE;
+    const bool sameUuidReopenedFresh = !aKnownAfterTeardown &&
+        SUCCEEDED(reopenHandshake) && reopenedFrame && aKnownAfterReopen &&
+        aRequestedAfterReopen == 0 && aNegotiatedAfterReopen == 0;
+    bool bAfterTeardownFrame = false;
+    const HRESULT bAfterATeardownHandshake = batchB != nullptr
+        ? InvokeGraphCapabilitiesHandshake(
+            batchB, sessionB, 0, &bAfterTeardownFrame)
+        : E_FAIL;
+    const bool closeIsolation = bKnownAfterATeardown &&
+        bAfterATeardownHandshake == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
+    if (batchA != nullptr) batchA->Release();
+    if (batchB != nullptr) batchB->Release();
+
+    const bool doubleClose = closedRouteA &&
+        module->DoAction(kOnLoad, dispatchA) != FALSE &&
+        module->DoAction(kOnLoad, dispatchA) != FALSE &&
+        SUCCEEDED(getLastResult());
+    batchA = doubleClose ? GetPublishedBatchDispatch(scopeA) : nullptr;
+    std::uint64_t doubleRequested = UINT64_MAX;
+    std::uint64_t doubleNegotiated = UINT64_MAX;
+    const BOOL aKnownAfterDoubleTeardown = requireSessionLifecycle && lifecycleExports
+        ? querySession(&sessionA, documentIdA, windowHandleA,
+                       &doubleRequested, &doubleNegotiated)
+        : TRUE;
+    bool doubleCloseFrame = false;
+    const HRESULT doubleFreshHandshake = batchA != nullptr
+        ? InvokeGraphCapabilitiesHandshake(
+            batchA, sessionA, 0, &doubleCloseFrame)
+        : E_FAIL;
+    const bool doubleCloseIdempotent = !aKnownAfterDoubleTeardown &&
+        SUCCEEDED(doubleFreshHandshake) && doubleCloseFrame;
+    if (batchA != nullptr) batchA->Release();
+
+    const HRESULT revokeStatus = releasePublication == nullptr
+        ? E_NOINTERFACE
+        : releasePublication();
+    IUnknown* const remainingA = GetPublishedObject(L"HancomLiveBatch." + scopeA);
+    IUnknown* const remainingB = GetPublishedObject(L"HancomLiveBatch." + scopeB);
+    const bool publicationAbsent = remainingA == nullptr && remainingB == nullptr;
+    if (remainingA != nullptr) remainingA->Release();
+    if (remainingB != nullptr) remainingB->Release();
+    const bool revoked = SUCCEEDED(revokeStatus) && publicationAbsent &&
+        dispatchA->ReferenceCount() == 1 && dispatchB->ReferenceCount() == 1;
+    hancom::graph::protocol::DebugLifecycleCounters lifecycleCounters{};
+    std::array<hancom::graph::protocol::DebugLifecycleEvent, 128> lifecycleEvents{};
+    std::uint32_t lifecycleEventCount = 0;
+    const bool lifecycleRead = requireSessionLifecycle && lifecycleExports &&
+        readLifecycle(&lifecycleCounters, lifecycleEvents.data(),
+                      static_cast<std::uint32_t>(lifecycleEvents.size()),
+                      &lifecycleEventCount) != FALSE;
+    const bool lifecycleMatched = graphCloseRetainedA && failedCloseIsolatedB &&
+        sameUuidReopenedFresh && closeIsolation && doubleCloseIdempotent &&
+        runtimeUuids && lifecycleRead;
+    if (requireSessionLifecycle) {
+        const auto uuidText = [](const hancom::graph::identity::DocumentSessionId& id) {
+            return hancom::graph::identity::FormatCanonicalUuid(id);
+        };
+        std::wostringstream rawStream;
+        rawStream << L"RAW_META\tSESSION_A\t" << uuidText(sessionA)
+                   << L"\tSESSION_B\t" << uuidText(sessionB)
+                   << L"\tCURSOR\t" << uuidText(cursor) << L'\n'
+                   << L"RAW_ROUTE\tA\t" << documentIdA << L'\t' << windowHandleA
+                   << L"\tB\t" << documentIdB << L'\t' << windowHandleB << L'\n'
+                   << L"RAW_HANDSHAKE\tA\t" << static_cast<std::uint32_t>(handshakeA)
+                   << L"\t1\t17\t1\t" << handshakeFrameA << L"\tB\t"
+                   << static_cast<std::uint32_t>(handshakeB)
+                   << L"\t0\t17\t0\t" << handshakeFrameB << L'\n'
+                   << L"RAW_QUERY\tAFTER_HANDSHAKE_A\t" << aKnownAfterHandshake
+                   << L'\t' << aRequestedAfterHandshake << L'\t' << aNegotiatedAfterHandshake
+                   << L"\tAFTER_HANDSHAKE_B\t" << bKnownAfterHandshake << L'\t'
+                   << bRequestedAfterHandshake << L'\t' << bNegotiatedAfterHandshake << L'\n'
+                   << L"RAW_CLOSE\tA\t" << static_cast<std::uint32_t>(closeA.invokeStatus)
+                   << L'\t' << closeA.message << L'\t' << closeA.errorCode << L'\t'
+                   << closeA.errorHresult << L'\t' << closeA.responseBytes
+                   << L"\tCROSS\t" << static_cast<std::uint32_t>(crossClose.invokeStatus)
+                   << L'\t' << crossClose.message << L'\t' << crossClose.errorCode
+                   << L'\t' << crossClose.errorHresult << L'\t'
+                   << crossClose.responseBytes << L'\n'
+                   << L"RAW_QUERY\tAFTER_CLOSE_A\t" << aKnownAfterClose << L'\t'
+                   << aRequestedAfterClose << L'\t' << aNegotiatedAfterClose
+                   << L"\tAFTER_FAILED_CLOSE_B\t" << bKnownAfterFailedClose << L'\t'
+                   << bRequestedAfterFailedClose << L'\t' << bNegotiatedAfterFailedClose << L'\n'
+                   << L"RAW_DUPLICATE_HR\tA\t"
+                   << static_cast<std::uint32_t>(duplicateHandshakeA) << L"\tB\t"
+                   << static_cast<std::uint32_t>(duplicateHandshakeB) << L'\n'
+                   << L"RAW_TEARDOWN_A\tENTRY_HR\t"
+                   << static_cast<std::uint32_t>(getLastResult())
+                   << L"\tA_PRESENT\t" << aKnownAfterTeardown
+                   << L"\tB_PRESENT\t" << bKnownAfterATeardown << L'\n'
+                   << L"RAW_REOPEN_A\tHR\t" << static_cast<std::uint32_t>(reopenHandshake)
+                   << L"\tPRESENT\t" << aKnownAfterReopen << L"\tREQUESTED\t"
+                   << aRequestedAfterReopen << L"\tNEGOTIATED\t"
+                   << aNegotiatedAfterReopen << L'\n'
+                   << L"RAW_B_AFTER_A_TEARDOWN\tHR\t"
+                   << static_cast<std::uint32_t>(bAfterATeardownHandshake) << L'\n'
+                   << L"RAW_DOUBLE_TEARDOWN\tA_PRESENT\t" << aKnownAfterDoubleTeardown
+                   << L"\tFRESH_HR\t" << static_cast<std::uint32_t>(doubleFreshHandshake)
+                   << L'\n'
+                   << L"RAW_FINAL_REVOKE\tHR\t" << static_cast<std::uint32_t>(revokeStatus)
+                   << L"\tROT_A\t" << (remainingA != nullptr)
+                   << L"\tROT_B\t" << (remainingB != nullptr) << L'\n'
+                   << L"RAW_COUNTERS\t" << lifecycleCounters.negotiationCalls << L'\t'
+                   << lifecycleCounters.registryInserts << L'\t'
+                   << lifecycleCounters.registryFindHits << L'\t'
+                   << lifecycleCounters.registryFindMisses << L'\t'
+                   << lifecycleCounters.registryEraseCalls << L'\t'
+                   << lifecycleCounters.registrySessionsErased << L'\t'
+                   << lifecycleCounters.routeOwnerDestructions << L'\t'
+                   << lifecycleCounters.routeInvalidations << L'\t'
+                   << lifecycleCounters.graphOpenCalls << L'\t'
+                   << lifecycleCounters.graphCloseCalls << L'\t'
+                   << lifecycleCounters.producerCalls << L'\t'
+                   << lifecycleCounters.publicationCalls << L'\t'
+                   << lifecycleCounters.cursorAllocations << L'\t'
+                   << lifecycleCounters.uploadAllocations << L'\n';
+        for (std::uint32_t index = 0; lifecycleRead && index < lifecycleEventCount; ++index) {
+            const auto& event = lifecycleEvents[index];
+            rawStream << L"RAW_EVENT\t" << event.sequence << L'\t'
+                       << static_cast<std::uint32_t>(event.kind) << L'\t'
+                       << event.route.documentId << L'\t' << event.route.windowHandle
+                       << L'\t' << uuidText(event.session) << L'\t'
+                       << event.requestedBits << L'\t' << event.negotiatedBits
+                       << L'\t' << event.affectedSessions << L'\n';
+        }
+        const std::wstring rawText = rawStream.str();
+        std::wstring eventText;
+        std::wistringstream rawReader(rawText);
+        std::wstring rawLine;
+        std::uint32_t canonicalEventCount = 0;
+        while (std::getline(rawReader, rawLine)) {
+            if (rawLine.rfind(L"RAW_EVENT\t", 0) == 0) {
+                eventText += rawLine;
+                eventText.push_back(L'\n');
+                ++canonicalEventCount;
+            }
+        }
+        const std::wstring eventSha256 = Sha256Bytes(Utf8(eventText));
+        std::wostringstream preambleStream;
+        preambleStream
+            << L"PROVENANCE_PREAMBLE\tNONCE\t" << nonce
+            << L"\tPID\t" << GetCurrentProcessId()
+            << L"\tSTART_FILETIME\t" << ProcessStartFileTime()
+            << L"\tEXEC_PATH_UTF8_B64\t" << EncodeUtf8Base64(executablePath)
+            << L"\tEXEC_SHA256\t" << executableSha256
+            << L"\tDLL_PATH_UTF8_B64\t" << EncodeUtf8Base64(loadedPath)
+            << L"\tDLL_SHA256\t" << loadedSha256
+            << L"\tARGV_SHA256\t" << commandSha256
+            << L"\tPROTOCOL\t"
+            << hancom::graph::protocol::kGraphProtocolVersion
+            << L"\tSCHEMA\t" << hancom::graph::kSchemaVersionV1
+            << L"\tBUILD_IDENTITY\t" << buildIdentity << L"\tSOURCE_INVENTORY\t" << sourceInventory
+            << L'\n';
+        const std::wstring preamble = preambleStream.str();
+        const std::wstring transcriptSha256 =
+            Sha256Bytes(Utf8(preamble + rawText));
+        std::string nonceMaterial = Utf8(nonce);
+        nonceMaterial.push_back('\0');
+        nonceMaterial += Utf8(transcriptSha256);
+        nonceMaterial.push_back('\0');
+        nonceMaterial += Utf8(eventSha256);
+        nonceMaterial.push_back('\0');
+        nonceMaterial += std::to_string(canonicalEventCount);
+        const std::wstring nonceDigest = Sha256Bytes(nonceMaterial);
+        std::wcout << preamble << rawText
+                   << L"PROVENANCE_FOOTER\tEVENT_COUNT\t"
+                   << canonicalEventCount << L"\tEVENT_SHA256\t" << eventSha256
+                   << L"\tTRANSCRIPT_SHA256\t" << transcriptSha256
+                   << L"\tNONCE_DIGEST\t" << nonceDigest << L'\n';
+    }
+    const bool passed = provenanceMatched && exportsMatched && moduleMatched &&
+        published && dispatchCreated && legacyMatched && graphMatched &&
+        (!requireSessionLifecycle || lifecycleMatched) && revoked;
+    std::wcout << L"GRAPH_ABI_PROVENANCE " << provenanceMatched << L'\n'
+               << L"GRAPH_ABI_PRODUCTION_PUBLICATION "
+               << (published && dispatchCreated && revoked) << L'\n'
+               << L"GRAPH_ABI_LEGACY_PROTOCOL14 " << legacyMatched << L'\n'
+               // The verified range is contiguous now that PatchApply (36) is a
+               // published member: 25-35 by name, 36, and 37. Earlier spellings of
+               // this sentinel (25_34, then 25_35_37) describe ABI surfaces this
+               // build no longer has; sealed .omo transcripts still carry them
+               // because they are frozen records of the runs that produced them.
+               << L"GRAPH_ABI_DISPIDS_25_37_HGN1 " << graphMatched << L'\n'
+               << L"GRAPH_SESSION_CLOSE_ENDPOINT route_destructor_invalidate "
+               << sameUuidReopenedFresh << L'\n'
+               << L"GRAPH_CURSOR_CLOSE_NEGOTIATED_OFF_RETAINS_SESSION "
+               << graphCloseRetainedA << L'\n'
+               << L"GRAPH_FAILED_CLOSE_CANNOT_ERASE_OTHER_SESSION "
+               << failedCloseIsolatedB << L'\n'
+               << L"GRAPH_SESSION_A_SAME_UUID_REOPEN_FRESH "
+               << sameUuidReopenedFresh << L'\n'
+               << L"GRAPH_SESSION_B_CLOSE_ISOLATION " << closeIsolation << L'\n'
+               << L"GRAPH_SESSION_DOUBLE_CLOSE_IDEMPOTENT "
+               << doubleCloseIdempotent << L'\n'
+               << L"GRAPH_SESSION_RUNTIME_UUIDS_DISTINCT " << runtimeUuids << L'\n'
+               << L"GRAPH_SESSION_TEARDOWN_ENTRYPOINT_CALLS route_republish=3 final_revoke=1\n"
+               << L"GRAPH_SESSION_CLEANUP_OBSERVATIONS first=1 double=1\n"
+               << L"GRAPH_SESSION_SIDE_EFFECTS producer=0 publication=0 cursor=0 upload=0\n"
+               << (passed ? L"PASS PACKAGED GRAPH ABI\n"
+                          : L"FAIL PACKAGED GRAPH ABI\n");
+    if (requireSessionLifecycle) {
+        std::wcout << L"ATTESTATION_COMPLETE\tNONCE\t" << nonce
+                   << L"\tPID\t" << GetCurrentProcessId() << L'\n'
+                   << std::flush;
+        std::wstring launcherProof;
+        if (!std::getline(std::wcin, launcherProof) ||
+            launcherProof != std::wstring(L"FINALIZE ") + nonce) {
+            std::wcerr << L"launcher post-run attestation proof mismatch\n";
+            FreeLibrary(library);
+            CoUninitialize();
+            return 2;
+        }
+    }
+    FreeLibrary(library);
+    CoUninitialize();
+    return passed ? 0 : 10;
 }
 
 }
 
 int wmain(const int argumentCount, wchar_t** const arguments) {
+    const bool textFormatReadbackMode = argumentCount == 3 &&
+        std::wcscmp(arguments[2], L"--text-format-readback") == 0;
+    const bool formatRangeReadbackMode = argumentCount == 3 &&
+        std::wcscmp(arguments[2], L"--format-range-readback") == 0;
+    const bool preparedFormatRequestedReadbackMode = argumentCount == 3 &&
+        std::wcscmp(
+            arguments[2], L"--prepared-format-requested-readback") == 0;
+    const bool automaticNumberTextPatchMode = argumentCount == 3 &&
+        std::wcscmp(arguments[2], L"--automatic-number-text-patch") == 0;
+    const bool findSelectionSurplusMode = argumentCount == 3 &&
+        std::wcscmp(arguments[2], L"--find-selection-surplus") == 0;
+    const bool firstWriteReadbackMode = argumentCount == 3 &&
+        std::wcscmp(arguments[2], L"--first-write-readback-failure") == 0;
+    const bool helpMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--help") == 0;
+    const bool schemaMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--schema") == 0;
+    const bool graphStoreMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-store") == 0;
+    const bool propertyRegistryMode = argumentCount == 3 &&
+        std::wcscmp(arguments[1], L"--property-registry") == 0;
+    const bool graphIdentityMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-identity") == 0;
+    const bool graphProtocolMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--hgn1") == 0;
+    const bool patchValidateMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--patch-validate") == 0;
+    const bool graphProtocolGoldenMode = argumentCount == 3 &&
+        std::wcscmp(arguments[1], L"--hgn1-golden") == 0;
+    const bool graphProtocolPageSpanningTableMode = argumentCount == 3 &&
+        std::wcscmp(arguments[1], L"--hgn1-page-spanning-table") == 0;
+    const bool graphProtocolLargeMode = argumentCount == 3 &&
+        std::wcscmp(arguments[1], L"--hgn1-large") == 0;
+    const bool graphReadCapabilityMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graphread-capability") == 0;
+    const bool graphQueryMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-query") == 0;
+    const bool capabilityMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--official-capability") == 0;
+    const bool virtualPropertyGetMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--virtual-property-get") == 0;
+    const bool textPatchReadbackMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--text-patch-readback") == 0;
+    const bool textPatchProtocolMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--text-patch-protocol") == 0;
+    const bool tableReaderPerformanceMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--table-reader-performance") == 0;
+    const bool referenceClosurePerformanceMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--reference-closure-performance") == 0;
+    const bool storiesMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--stories") == 0;
+    const bool graphTextMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-text") == 0;
+    const bool effectivePropertiesMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--effective-properties") == 0;
+    const bool graphControlsMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-controls") == 0;
+    const bool graphTablesMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-tables") == 0;
+    const bool graphImagesMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-images") == 0;
+    const bool graphLayoutMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-layout") == 0;
+    const bool graphCaptureMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-capture") == 0;
+    const bool graphCaptureMismatchDiagnosticsMode = argumentCount == 2 &&
+        std::wcscmp(
+            arguments[1], L"--graph-capture-mismatch-diagnostics") == 0;
+    const bool graphCaptureNegativeMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-capture-negative") == 0;
+    const bool graphCaptureIntegrationMode = argumentCount == 2 &&
+        std::wcscmp(arguments[1], L"--graph-capture-integration") == 0;
+    // Direct-link live fixture implementation calls these production readers:
+    // CaptureNativeStructureStories, CaptureNativeBodyText,
+    // CaptureCurrentEffectiveProperties, CaptureTableGraphFromNative, and
+    // CaptureCurrentTableLayoutFromNative.
+    const bool nativeStructureFixturesMode = argumentCount >= 2 &&
+        std::wcscmp(arguments[1], L"--native-structure-fixtures") == 0;
+    const bool graphDispatchAbiMode = argumentCount >= 2 &&
+        std::wcscmp(arguments[1], L"--graph-dispatch-abi") == 0;
+    const bool graphSessionLifecycleAbiMode = argumentCount >= 2 &&
+        std::wcscmp(arguments[1], L"--graph-session-lifecycle-abi") == 0;
     const bool probeMode = argumentCount == 3 &&
         std::wcscmp(arguments[1], L"--probe") == 0;
     const bool probeTwiceMode = argumentCount == 3 &&
@@ -4748,8 +7726,76 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         std::wcscmp(arguments[1], L"--run-as-target") == 0;
     const bool runAsTargetStdinMode = argumentCount >= 6 &&
         std::wcscmp(arguments[1], L"--run-as-target-stdin") == 0;
-    if ((!probeMode && !probeTwiceMode && !probeOutputMode &&
+    const bool recognizedDirectMode =
+        helpMode || schemaMode || graphStoreMode || propertyRegistryMode ||
+        graphIdentityMode || graphProtocolMode || patchValidateMode || graphProtocolGoldenMode ||
+        graphProtocolPageSpanningTableMode || graphProtocolLargeMode || graphReadCapabilityMode ||
+        graphQueryMode || capabilityMode || virtualPropertyGetMode ||
+        textPatchReadbackMode || textPatchProtocolMode ||
+        tableReaderPerformanceMode ||
+        referenceClosurePerformanceMode ||
+        storiesMode || graphTextMode || effectivePropertiesMode ||
+        graphControlsMode || graphTablesMode || graphImagesMode ||
+        graphLayoutMode || graphCaptureMode || graphCaptureNegativeMode ||
+        graphCaptureMismatchDiagnosticsMode ||
+        graphCaptureIntegrationMode || nativeStructureFixturesMode ||
+        graphDispatchAbiMode || graphSessionLifecycleAbiMode || probeMode || probeTwiceMode || probeOutputMode || probeAsTargetMode ||
+        runAsTargetMode || runAsTargetStdinMode;
+    const bool unrecognizedOption = argumentCount >= 2 &&
+        arguments[1][0] == L'-' && arguments[1][1] == L'-' &&
+        !recognizedDirectMode;
+    if (unrecognizedOption) {
+        std::wcerr
+            << L"usage: BridgeSmoke.exe <HancomLiveBridge.dll> [--hold]\n"
+            << L"       BridgeSmoke.exe --help for direct modes\n";
+        return 2;
+    }
+    if (helpMode) {
+        std::wcout
+            << L"BridgeSmoke modes: --schema --graph-store --graph-identity --hgn1 --patch-validate --hgn1-golden <output-root> --hgn1-page-spanning-table <output-root> --hgn1-large <field-bytes> --graphread-capability --graph-query --official-capability --virtual-property-get --text-patch-readback --text-patch-protocol\n"
+            << L"  <HancomLiveBridge.dll> --text-format-readback|--format-range-readback|--prepared-format-requested-readback|--automatic-number-text-patch|--find-selection-surplus|--first-write-readback-failure\n"
+            << L"  --property-registry <registry|withdrawn|optional-absence|required-missing>\n"
+            << L"  --probe --probe-twice --probe-output --probe-as-target\n"
+            << L"  --run-as-target --run-as-target-stdin\n"
+            << L"  --native-structure-fixtures <fixture-root> <receipt-root>\n"
+            << L"  --graph-dispatch-abi <dll> <expected-sha256>\n"
+            << L"  --graph-session-lifecycle-abi <dll> <expected-sha256> "
+               L"--provenance-nonce <sha256> --source-inventory <sha256> "
+               L"--build-identity <sha256>\n";
+        return 0;
+    }
+    if (graphDispatchAbiMode || graphSessionLifecycleAbiMode) {
+        const bool validDispatch = graphDispatchAbiMode && argumentCount == 4;
+        const bool validLifecycle = graphSessionLifecycleAbiMode &&
+            argumentCount == 12 &&
+            std::wcscmp(arguments[4], L"--provenance-nonce") == 0 &&
+            std::wcscmp(arguments[6], L"--source-inventory") == 0 &&
+            std::wcscmp(arguments[8], L"--build-identity") == 0 &&
+            std::wcscmp(arguments[10], L"--launcher-proof") == 0 &&
+            std::wcscmp(arguments[11], L"stdin-v1") == 0;
+        if (!validDispatch && !validLifecycle) {
+            std::wcerr << L"invalid graph ABI provenance arguments\n";
+            return 2;
+        }
+        return RunGraphDispatchAbi(
+            arguments[2], arguments[3], graphSessionLifecycleAbiMode,
+            validLifecycle ? arguments[5] : nullptr,
+            validLifecycle ? arguments[7] : nullptr,
+            validLifecycle ? arguments[9] : nullptr,
+            argumentCount, arguments);
+    }
+    if (nativeStructureFixturesMode) {
+        if (argumentCount != 4) {
+            std::wcerr
+                << L"usage: BridgeSmoke.exe --native-structure-fixtures "
+                   L"<fixture-root> <receipt-root>\n";
+            return 2;
+        }
+        return RunNativeStructureFixtures(arguments[2], arguments[3]);
+    }
+    if ((!schemaMode && !graphStoreMode && !propertyRegistryMode && !graphIdentityMode && !graphProtocolMode && !patchValidateMode && !graphProtocolGoldenMode && !graphProtocolPageSpanningTableMode && !graphProtocolLargeMode && !graphReadCapabilityMode && !capabilityMode && !probeMode && !probeTwiceMode && !probeOutputMode &&
          !probeAsTargetMode && !runAsTargetMode && !runAsTargetStdinMode &&
+         !graphDispatchAbiMode && !graphSessionLifecycleAbiMode &&
          (argumentCount < 2 || argumentCount > 3)) ||
         (probeMode && argumentCount != 3) ||
         (probeTwiceMode && argumentCount != 3) ||
@@ -4759,6 +7805,12 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         (runAsTargetStdinMode && argumentCount < 6)) {
         std::wcerr
             << L"usage: BridgeSmoke.exe <HancomLiveBridge.dll> [--hold]\n"
+            << L"       BridgeSmoke.exe --schema|--graph-store|--graph-identity|--hgn1|--patch-validate\n"
+            << L"       BridgeSmoke.exe --hgn1-golden <output-root>\n"
+            << L"       BridgeSmoke.exe --hgn1-page-spanning-table <output-root>\n"
+            << L"       BridgeSmoke.exe --hgn1-large <field-bytes>\n"
+            << L"       BridgeSmoke.exe --property-registry <registry|withdrawn|optional-absence|required-missing>\n"
+            << L"       BridgeSmoke.exe --graph-dispatch-abi|--graph-session-lifecycle-abi <dll> <expected-sha256>\n"
             << L"       BridgeSmoke.exe --probe <process-id>\n"
             << L"       BridgeSmoke.exe --probe-twice <process-id>\n"
             << L"       BridgeSmoke.exe --probe-output <process-id> <path>\n"
@@ -4768,6 +7820,166 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
             << L"       BridgeSmoke.exe --run-as-target-stdin <process-id> "
                L"<output> <input> <executable> [arguments...]\n";
         return 2;
+    }
+
+    if (schemaMode) {
+        const bool passed = DocumentGraphSchemaSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_SCHEMA " << passed << L'\n';
+        if (passed) std::wcout << L"PASS native graph schema v1\n";
+        return passed ? 0 : 12;
+    }
+
+    if (propertyRegistryMode) {
+        const bool passed=DocumentGraphPropertyRegistrySmoke(arguments[2]);
+        std::wcout << L"DOCUMENT_GRAPH_PROPERTY_REGISTRY " << arguments[2]
+                   << L" " << passed << L'\n';
+        return passed ? 0 : 16;
+    }
+
+    if (graphStoreMode) {
+        const bool passed = DocumentGraphCodecStoreSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_CODEC_STORE " << passed << L'\n';
+        return passed ? 0 : 13;
+    }
+
+    if (graphIdentityMode) {
+        const bool passed = DocumentGraphIdentitySmoke();
+        std::wcout << L"DOCUMENT_GRAPH_IDENTITY " << passed << L'\n';
+        return passed ? 0 : 14;
+    }
+
+    if (graphProtocolMode) {
+        const bool passed = DocumentGraphProtocolSmoke() && DocumentGraphContinuationSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_PROTOCOL " << passed << L'\n';
+        return passed ? 0 : 15;
+    }
+
+    if (patchValidateMode) {
+        const bool passed = DocumentGraphPatchValidateProtocolSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_PATCH_VALIDATE " << passed << L'\n';
+        return passed ? 0 : 31;
+    }
+
+    if (graphProtocolGoldenMode || graphProtocolPageSpanningTableMode) {
+        const bool passed = EmitDocumentGraphProtocolGolden(arguments[2]);
+        std::wcout << (graphProtocolPageSpanningTableMode
+                ? L"DOCUMENT_GRAPH_PAGE_SPANNING_TABLE_FIXTURE "
+                : L"DOCUMENT_GRAPH_PROTOCOL_GOLDEN ")
+                   << passed << L'\n';
+        return passed ? 0 : 28;
+    }
+
+    if (graphProtocolLargeMode) {
+        wchar_t* end = nullptr;
+        const unsigned long long fieldBytes = std::wcstoull(arguments[2], &end, 10);
+        if (end == arguments[2] || *end != L'\0') return 2;
+        return EmitDocumentGraphProtocolLarge(fieldBytes) ? 0 : 29;
+    }
+
+    if (graphReadCapabilityMode) {
+        const bool passed = DocumentGraphReadCapabilitySmoke();
+        return passed ? 0 : 15;
+    }
+
+    if (graphQueryMode) {
+        const bool passed = DocumentGraphQuerySmoke();
+        std::wcout << L"DOCUMENT_GRAPH_QUERY " << passed << L'\n';
+        return passed ? 0 : 27;
+    }
+
+    if (capabilityMode) {
+        const bool passed = OfficialApiCapabilitySmoke();
+        std::wcout << L"OFFICIAL_API_CAPABILITY " << passed << L'\n';
+        return passed ? 0 : 17;
+    }
+
+    if (virtualPropertyGetMode) {
+        const bool passed = OfficialApiVirtualPropertyGetSmoke();
+        std::wcout << L"OFFICIAL_API_VIRTUAL_PROPERTYGET " << passed << L'\n';
+        return passed ? 0 : 37;
+    }
+
+    if (textPatchReadbackMode) {
+        const bool passed = TextPatchReadbackSmoke();
+        std::wcout << L"TEXT_PATCH_READBACK " << passed << L'\n';
+        return passed ? 0 : 38;
+    }
+
+    if (textPatchProtocolMode) {
+        const bool passed = TextPatchProtocolSmoke();
+        return passed ? 0 : 42;
+    }
+
+    if (tableReaderPerformanceMode) {
+        const bool passed = TableReaderPerformanceSmoke();
+        std::wcout << L"TABLE_READER_PERFORMANCE " << passed << L'\n';
+        return passed ? 0 : 35;
+    }
+
+    if (referenceClosurePerformanceMode) {
+        const bool passed = ReferenceClosurePerformanceSmoke();
+        std::wcout << L"REFERENCE_CLOSURE_PERFORMANCE " << passed << L'\n';
+        return passed ? 0 : 36;
+    }
+
+    if (storiesMode) {
+        const bool passed = DocumentGraphStoriesSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_STORIES " << passed << L'\n';
+        return passed ? 0 : 18;
+    }
+    if (graphTextMode) {
+        const bool passed = DocumentGraphTextSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_TEXT " << passed << L'\n';
+        return passed ? 0 : 19;
+    }
+    if (effectivePropertiesMode) {
+        const bool passed = DocumentGraphEffectivePropertiesSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_EFFECTIVE_PROPERTIES " << passed
+                   << L'\n';
+        return passed ? 0 : 20;
+    }
+    if (graphControlsMode) {
+        const bool passed = DocumentGraphControlsSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_CONTROLS " << passed << L'\n';
+        return passed ? 0 : 21;
+    }
+    if (graphTablesMode) {
+        const bool passed = DocumentGraphTablesSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_TABLES " << passed << L'\n';
+        return passed ? 0 : 22;
+    }
+    if (graphImagesMode) {
+        const bool passed = DocumentGraphImagesSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_IMAGES " << passed << L'\n';
+        return passed ? 0 : 23;
+    }
+    if (graphLayoutMode) {
+        const bool passed = DocumentGraphLayoutSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_LAYOUT " << passed << L'\n';
+        return passed ? 0 : 24;
+    }
+    if (graphCaptureMode) {
+        const bool passed = DocumentGraphCaptureSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_CAPTURE " << passed << L'\n';
+        return passed ? 0 : 25;
+    }
+    if (graphCaptureMismatchDiagnosticsMode) {
+        const bool passed = DocumentGraphCaptureMismatchDiagnosticsSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_CAPTURE_MISMATCH_DIAGNOSTICS "
+                   << passed << L'\n';
+        return passed ? 0 : 25;
+    }
+    if (graphCaptureIntegrationMode) {
+        const bool passed = DocumentGraphCaptureIntegrationSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_CAPTURE_INTEGRATION "
+                   << passed << L'\n';
+        return passed ? 0 : 26;
+    }
+    if (graphCaptureNegativeMode) {
+        const bool passed = DocumentGraphCaptureNegativeSmoke();
+        std::wcout << L"DOCUMENT_GRAPH_CAPTURE_CURRENT_NEGATIVE "
+                   << passed << L'\n';
+        return passed ? 0 : 26;
     }
 
     if (probeAsTargetMode) {
@@ -4820,14 +8032,45 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         return result;
     }
 
+    const bool documentGraphSchema = DocumentGraphSchemaSmoke();
     const bool cellTopologyOwnerIndex = CellTopologyOwnerIndexSmoke();
+    const bool tableCellFormatSampling = TableCellFormatSamplingSmoke();
     const bool paragraphTextNormalization = ParagraphTextNormalizationSmoke();
+    if (!documentGraphSchema) {
+        std::wcerr << L"document graph schema smoke failed\n";
+        CoUninitialize();
+        return 12;
+    }
     HMODULE const library = LoadLibraryW(arguments[1]);
     if (library == nullptr) {
         std::wcerr << L"LoadLibraryW failed: " << GetLastError() << L'\n';
         CoUninitialize();
         return 4;
     }
+    std::array<wchar_t, 32768> loadedModulePath{};
+    const DWORD loadedModuleLength = GetModuleFileNameW(
+        library, loadedModulePath.data(),
+        static_cast<DWORD>(loadedModulePath.size()));
+    if (loadedModuleLength == 0 ||
+        loadedModuleLength >= loadedModulePath.size()) {
+        std::wcerr << L"GetModuleFileNameW failed: " << GetLastError() << L'\n';
+        FreeLibrary(library);
+        CoUninitialize();
+        return 4;
+    }
+    const std::wstring resolvedLoadedModulePath(
+        loadedModulePath.data(), loadedModuleLength);
+    const std::wstring loadedModuleSha256 =
+        FileSha256(resolvedLoadedModulePath);
+    if (loadedModuleSha256.empty()) {
+        std::wcerr << L"loaded module SHA-256 failed\n";
+        FreeLibrary(library);
+        CoUninitialize();
+        return 4;
+    }
+    std::wcout << L"LOADED_MODULE_PATH_UTF8_B64 "
+               << EncodeUtf8Base64(resolvedLoadedModulePath) << L'\n'
+               << L"LOADED_MODULE_SHA256 " << loadedModuleSha256 << L'\n';
 
     const auto query = reinterpret_cast<QueryModule>(
         GetProcAddress(library, "QueryUserActionInterface"));
@@ -4843,11 +8086,7 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     }
 
     IHncUserActionModule* const module = query();
-    if (module == nullptr ||
-        std::strcmp(module->EnumAction(0), kOnInitialLoad) != 0 ||
-        std::strcmp(module->EnumAction(1), kOnLoad) != 0 ||
-        std::strcmp(module->EnumAction(2), kBootstrapAction) != 0 ||
-        module->EnumAction(3) != nullptr) {
+    if (!UserActionEnumerationMatches(module)) {
         std::wcerr << L"UserAction ABI mismatch\n";
         FreeLibrary(library);
         CoUninitialize();
@@ -4959,6 +8198,367 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     documentBatchUnknown->Release();
     scopedBatchUnknown->Release();
     batchUnknown->Release();
+    if (firstWriteReadbackMode) {
+        constexpr wchar_t payload[] =
+            L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+            L"PATCH_TEXT\tCURRENT\t0\t \tbmV3\t0\nEND";
+        dispatch->PrepareFirstWriteReadbackFailure();
+        std::wstring response;
+        const bool invoked = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+            InvokeString(batch, L"ExecuteActions", payload, &response);
+        const std::vector<std::wstring> fields = SplitTabs(response);
+        const bool passed = invoked &&
+            response.rfind(L"HCA2\tERROR\t", 0) == 0 &&
+            fields.size() >= 9 && fields[7] == L"1" && fields[8] == L"0" &&
+            dispatch->FirstWriteReadbackFailureWasClassified();
+        std::wcout << L"FIRST_WRITE_READBACK_FAILURE " << passed << L'\n'
+                   << L"FIRST_WRITE_READBACK_RESPONSE " << response << L'\n';
+        if (batch != nullptr) {
+            batch->Release();
+        }
+        const HRESULT revokeStatus = releasePublication();
+        FreeLibrary(library);
+        CoUninitialize();
+        return passed && SUCCEEDED(revokeStatus) ? 0 : 41;
+    }
+    if (findSelectionSurplusMode) {
+        // Find "old" inside a cell reading "the old" and replace it with
+        // "new". Whatever ForwardFind reports as its range, the four
+        // characters of "the " were not searched for, and the cell has to
+        // still read "the new" when the patch is done.
+        constexpr wchar_t payload[] =
+            L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+            L"PATCH_TEXT\tFIND\tcmVmZXJlbmNlLXRhYmxl\tB2\t1\t1\tb2xk\tbmV3\nEND";
+        const bool usable = SUCCEEDED(dispatchStatus) && batch != nullptr;
+        // ForwardFind reports exactly what it matched. Nothing to narrow, and
+        // the drawn paragraph number in the readback must not get in the way.
+        dispatch->PrepareFindSelectionSurplusFixture(0, true);
+        std::wstring exactResponse;
+        const bool exactPatched = usable &&
+            InvokeString(batch, L"ExecuteActions", payload, &exactResponse) &&
+            exactResponse.rfind(L"HCA2\tOK\t", 0) == 0 &&
+            dispatch->FindSelectionSurplusCellText() == L"the new";
+        // ForwardFind reports four characters more than it matched. The patch
+        // has to pull its range back onto the literal: replacing the reported
+        // range whole would leave the cell reading "new".
+        dispatch->PrepareFindSelectionSurplusFixture(4, false);
+        std::wstring surplusResponse;
+        const bool surplusNarrowed = usable &&
+            InvokeString(batch, L"ExecuteActions", payload, &surplusResponse) &&
+            surplusResponse.rfind(L"HCA2\tOK\t", 0) == 0 &&
+            dispatch->FindSelectionSurplusCellText() == L"the new";
+        // The same surplus in a paragraph whose number is drawn into every
+        // readback. Narrowing has to see past the number to place the literal.
+        dispatch->PrepareFindSelectionSurplusFixture(4, true);
+        std::wstring numberedResponse;
+        const bool numberedNarrowed = usable &&
+            InvokeString(batch, L"ExecuteActions", payload, &numberedResponse) &&
+            numberedResponse.rfind(L"HCA2\tOK\t", 0) == 0 &&
+            dispatch->FindSelectionSurplusCellText() == L"the new";
+        // A surplus the readback cannot be lined up against, because what
+        // stands in front is drawn text no automatic number accounts for. The
+        // patch must refuse rather than delete characters it cannot place.
+        dispatch->PrepareFindSelectionSurplusFixture(4, false, true);
+        std::wstring unplaceableResponse;
+        const bool unplaceableRefused = usable &&
+            InvokeString(batch, L"ExecuteActions", payload, &unplaceableResponse) &&
+            unplaceableResponse.rfind(L"HCA2\tERROR\t", 0) == 0 &&
+            unplaceableResponse.find(L"STALE_SELECTION_TEXT") !=
+                std::wstring::npos &&
+            dispatch->FindSelectionSurplusCellText() == L"the old";
+        const bool passed = exactPatched && surplusNarrowed &&
+            numberedNarrowed && unplaceableRefused;
+        std::wcout << L"FIND_SELECTION_EXACT_PATCHED " << exactPatched << L'\n'
+                   << L"FIND_SELECTION_SURPLUS_NARROWED " << surplusNarrowed
+                   << L'\n'
+                   << L"FIND_SELECTION_NUMBERED_SURPLUS_NARROWED "
+                   << numberedNarrowed << L'\n'
+                   << L"FIND_SELECTION_UNPLACEABLE_REFUSED "
+                   << unplaceableRefused << L'\n'
+                   << L"FIND_SELECTION_EXACT_RESPONSE " << exactResponse << L'\n'
+                   << L"FIND_SELECTION_SURPLUS_RESPONSE " << surplusResponse
+                   << L'\n'
+                   << L"FIND_SELECTION_NUMBERED_RESPONSE " << numberedResponse
+                   << L'\n'
+                   << L"FIND_SELECTION_UNPLACEABLE_RESPONSE "
+                   << unplaceableResponse << L'\n';
+        if (batch != nullptr) {
+            batch->Release();
+        }
+        const HRESULT revokeStatus = releasePublication();
+        FreeLibrary(library);
+        CoUninitialize();
+        return passed && SUCCEEDED(revokeStatus) ? 0 : 45;
+    }
+    if (automaticNumberTextPatchMode) {
+        // "old" -> "new" over the whole cell text. No formatting action
+        // follows, so the readback policy is Exact and the drawn paragraph
+        // number is the only thing that can stand in front of it.
+        constexpr wchar_t payload[] =
+            L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+            L"PATCH_TEXT\tRANGE\t651\t0\t0\t651\t0\t3\tb2xk\tbmV3\nEND";
+        const bool usable = SUCCEEDED(dispatchStatus) && batch != nullptr;
+        // SelectText accepts the range; only the prefixed readback is in
+        // the way.
+        dispatch->PrepareAutomaticNumberTextPatchFixture(false);
+        std::wstring readbackResponse;
+        const bool readbackPatched = usable &&
+            InvokeString(batch, L"ExecuteActions", payload, &readbackResponse) &&
+            readbackResponse.rfind(L"HCA2\tOK\t", 0) == 0 &&
+            dispatch->AutomaticNumberTextPatchApplied();
+        // The same patch replayed against the text it already wrote must
+        // still be refused: the allowance covers the drawn number, not the
+        // content.
+        std::wstring staleResponse;
+        const bool staleRejected = readbackPatched &&
+            InvokeString(batch, L"ExecuteActions", payload, &staleResponse) &&
+            staleResponse.rfind(L"HCA2\tERROR\t", 0) == 0 &&
+            staleResponse.find(L"STALE_SELECTION_TEXT") != std::wstring::npos;
+        // SelectText refuses the range outright; the caret path has to
+        // reach it.
+        dispatch->PrepareAutomaticNumberTextPatchFixture(true);
+        std::wstring fallbackResponse;
+        const bool fallbackPatched = usable &&
+            InvokeString(batch, L"ExecuteActions", payload, &fallbackResponse) &&
+            fallbackResponse.rfind(L"HCA2\tOK\t", 0) == 0 &&
+            dispatch->AutomaticNumberTextPatchApplied();
+        const bool fallbackUsed = fallbackPatched &&
+            dispatch->AutomaticNumberSelectTextFallbackUsed();
+        std::wcout << L"AUTOMATIC_NUMBER_READBACK_PATCHED "
+                   << readbackPatched << L'\n'
+                   << L"AUTOMATIC_NUMBER_STALE_REJECTED "
+                   << staleRejected << L'\n'
+                   << L"AUTOMATIC_NUMBER_SELECT_FALLBACK_PATCHED "
+                   << fallbackPatched << L'\n'
+                   << L"AUTOMATIC_NUMBER_SELECT_FALLBACK_USED "
+                   << fallbackUsed << L'\n'
+                   << L"AUTOMATIC_NUMBER_READBACK_RESPONSE "
+                   << readbackResponse << L'\n'
+                   << L"AUTOMATIC_NUMBER_STALE_RESPONSE "
+                   << staleResponse << L'\n'
+                   << L"AUTOMATIC_NUMBER_SELECT_FALLBACK_RESPONSE "
+                   << fallbackResponse << L'\n';
+        if (batch != nullptr) {
+            batch->Release();
+        }
+        const HRESULT revokeStatus = releasePublication();
+        FreeLibrary(library);
+        CoUninitialize();
+        return readbackPatched && staleRejected && fallbackPatched &&
+            fallbackUsed && SUCCEEDED(revokeStatus) ? 0 : 44;
+    }
+    if (preparedFormatRequestedReadbackMode) {
+        constexpr wchar_t payload[] =
+            L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+            L"PATCH_TEXT\tCELL\tcmVmZXJlbmNlLXRhYmxl\tB2\t1\t1\t"
+            L"b2xk\tb2xk\n"
+            L"ACTION\tCharShape\tHCharShape\n"
+            L"SET\tTextColor\tI4\t255\nENDACTION\nEND";
+        constexpr wchar_t automaticNumberPayload[] =
+            L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+            L"PATCH_TEXT\tRANGE\t651\t0\t0\t651\t0\t3\tb2xk\tb2xk\n"
+            L"ACTION\tCharShape\tHCharShape\n"
+            L"SET\tTextColor\tI4\t255\nENDACTION\nEND";
+        dispatch->PrepareRequestedFormatPreflightFixture(false);
+        std::wstring successResponse;
+        const bool success = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+            InvokeString(batch, L"PrepareTextPatches", payload, &successResponse) &&
+            successResponse.rfind(L"HTP2\tOK\t", 0) == 0;
+        const std::wstring revision = DecodedResponseField(successResponse, 2);
+        std::wstring executionResponse;
+        const bool executed = success && !revision.empty() &&
+            InvokeTwoStrings(
+                batch,
+                L"ExecutePreparedTextPatches",
+                payload,
+                revision.c_str(),
+                &executionResponse) &&
+            executionResponse.rfind(L"HCA2\tOK\t", 0) == 0;
+        std::wstring inspectionResponse;
+        const bool inspectionUsable = executed &&
+            InvokeLongString(batch, L"InspectPageV3", 1, &inspectionResponse) &&
+            inspectionResponse.rfind(L"HCI1", 0) == 0;
+        dispatch->PrepareRequestedFormatPreflightFixture(false, true);
+        std::wstring automaticNumberResponse;
+        const bool automaticNumber = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+            InvokeString(
+                batch,
+                L"PrepareTextPatches",
+                automaticNumberPayload,
+                &automaticNumberResponse) &&
+            automaticNumberResponse.rfind(L"HTP2\tOK\t", 0) == 0;
+        const std::wstring automaticRevision =
+            DecodedResponseField(automaticNumberResponse, 2);
+        std::wstring automaticExecutionResponse;
+        const bool automaticNumberExecuted = automaticNumber &&
+            !automaticRevision.empty() &&
+            InvokeTwoStrings(
+                batch,
+                L"ExecutePreparedTextPatches",
+                automaticNumberPayload,
+                automaticRevision.c_str(),
+                &automaticExecutionResponse) &&
+            automaticExecutionResponse.rfind(L"HCA2\tOK\t2\t", 0) == 0;
+        dispatch->PrepareRequestedFormatPreflightFixture(false, true, true);
+        std::wstring staleContentResponse;
+        const bool staleContent = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+            InvokeString(
+                batch,
+                L"PrepareTextPatches",
+                automaticNumberPayload,
+                &staleContentResponse) &&
+            staleContentResponse.rfind(
+                L"HTP2\tERROR\t0\tSTALE_SELECTION_TEXT\t", 0) == 0;
+        dispatch->PrepareRequestedFormatPreflightFixture(true);
+        std::wstring mismatchResponse;
+        const bool mismatch = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+            InvokeString(batch, L"PrepareTextPatches", payload, &mismatchResponse) &&
+            mismatchResponse.rfind(L"HTP2\tERROR\t0\tTEXT_FORMAT_READBACK\t", 0) == 0 &&
+            DecodedResponseField(mismatchResponse, 4) ==
+                L"text.patch.preflight.inverse";
+        std::wcout << L"PREPARED_FORMAT_REQUESTED_PROPERTY_SUCCESS "
+                   << success << L'\n'
+                   << L"PREPARED_FORMAT_REQUESTED_PROPERTY_MISMATCH "
+                   << mismatch << L'\n'
+                   << L"PREPARED_FORMAT_AUTOMATIC_NUMBER_SUCCESS "
+                   << automaticNumber << L'\n'
+                   << L"PREPARED_FORMAT_AUTOMATIC_NUMBER_EXECUTED "
+                   << automaticNumberExecuted << L'\n'
+                   << L"PREPARED_FORMAT_AUTOMATIC_NUMBER_STALE_REJECTED "
+                   << staleContent << L'\n'
+                   << L"PREPARED_FORMAT_POST_INSPECTION_USABLE "
+                   << inspectionUsable << L'\n'
+                   << L"PREPARED_FORMAT_REQUESTED_PROPERTY_SUCCESS_RESPONSE "
+                   << successResponse << L'\n'
+                   << L"PREPARED_FORMAT_REQUESTED_PROPERTY_MISMATCH_RESPONSE "
+                   << mismatchResponse << L'\n'
+                   << L"PREPARED_FORMAT_AUTOMATIC_NUMBER_RESPONSE "
+                   << automaticNumberResponse << L'\n'
+                   << L"PREPARED_FORMAT_AUTOMATIC_NUMBER_EXECUTION_RESPONSE "
+                   << automaticExecutionResponse << L'\n'
+                   << L"PREPARED_FORMAT_AUTOMATIC_NUMBER_STALE_RESPONSE "
+                   << staleContentResponse << L'\n'
+                   << L"PREPARED_FORMAT_EXECUTION_RESPONSE "
+                   << executionResponse << L'\n'
+                   << L"PREPARED_FORMAT_INSPECTION_PREFIX "
+                   << inspectionResponse.substr(0, 4) << L'\n';
+        if (batch != nullptr) {
+            batch->Release();
+        }
+        const HRESULT revokeStatus = releasePublication();
+        FreeLibrary(library);
+        CoUninitialize();
+        return success && mismatch && automaticNumber &&
+            automaticNumberExecuted && staleContent && inspectionUsable &&
+            SUCCEEDED(revokeStatus) ? 0 : 43;
+    }
+    if (textFormatReadbackMode) {
+        constexpr wchar_t successPayload[] =
+            L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+            L"ACTION\tCharShape\tHCharShape\n"
+            L"SET\tTextColor\tI4\t255\nENDACTION\n"
+            L"ACTION\tParagraphShape\tHParaShape\n"
+            L"SET\tAlignType\tI4\t3\nENDACTION\nEND";
+        constexpr wchar_t mismatchPayload[] =
+            L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+            L"ACTION\tCharShape\tHCharShape\n"
+            L"SET\tTextColor\tI4\t65280\nENDACTION\nEND";
+        dispatch->PrepareTextFormatReadbackFixture(false);
+        std::wstring successResponse;
+        const bool success = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+            InvokeString(
+                batch,
+                L"ExecuteActions",
+                successPayload,
+                &successResponse) &&
+            successResponse.rfind(L"HCA2\tOK\t2\t2\t", 0) == 0 &&
+            dispatch->TextFormatReadbackSucceeded();
+        dispatch->PrepareTextFormatReadbackFixture(true);
+        std::wstring mismatchResponse;
+        const bool mismatch = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+            InvokeString(
+                batch,
+                L"ExecuteActions",
+                mismatchPayload,
+                &mismatchResponse) &&
+            mismatchResponse.rfind(L"HCA2\tERROR\tPOSTCONDITION\t", 0) == 0 &&
+            DecodedResponseField(mismatchResponse, 3) == L"TextColor" &&
+            DecodedResponseField(mismatchResponse, 6) == L"CharShape" &&
+            SplitTabs(mismatchResponse).size() >= 9 &&
+            SplitTabs(mismatchResponse)[7] == L"1" &&
+            dispatch->TextFormatMismatchWasReadBack();
+        std::wcout << L"TEXT_FORMAT_READBACK_SUCCESS " << success << L'\n'
+                   << L"TEXT_FORMAT_READBACK_MISMATCH " << mismatch << L'\n'
+                   << L"TEXT_FORMAT_READBACK_SUCCESS_RESPONSE "
+                   << successResponse << L'\n'
+                   << L"TEXT_FORMAT_READBACK_MISMATCH_RESPONSE "
+                   << mismatchResponse << L'\n';
+        if (batch != nullptr) {
+            batch->Release();
+        }
+        const HRESULT revokeStatus = releasePublication();
+        FreeLibrary(library);
+        CoUninitialize();
+        return success && mismatch && SUCCEEDED(revokeStatus) ? 0 : 39;
+    }
+    if (formatRangeReadbackMode) {
+        constexpr wchar_t successPayload[] =
+            L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+            L"SELECT_CONTROL\tcmVmZXJlbmNlLXRhYmxl\n"
+            L"CAPTURE_TABLE\nCELL\tA1\n"
+            L"RUN\tTableCellBlock\nRUN\tTableCellBlockExtend\n"
+            L"RUN\tTableRightCell\nRUN\tTableLowerCell\n"
+            L"ACTION\tCellFill\tHCellBorderFill\n"
+            L"SET\tFillColor\tI4\t255\nENDACTION\n"
+            L"ACTION\tCellBorder\tHCellBorderFill\nENDACTION\n"
+            L"ACTION\tTablePropertyDialog\tHShapeObject\nENDACTION\n"
+            L"RUN\tTableVAlignCenter\nEND";
+        constexpr wchar_t mismatchPayload[] =
+            L"HCA1\nDOC\t17\tQzpceC5od3A=\n"
+            L"SELECT_CONTROL\tcmVmZXJlbmNlLXRhYmxl\n"
+            L"CAPTURE_TABLE\nCELL\tA1\n"
+            L"RUN\tTableCellBlock\nRUN\tTableCellBlockExtend\n"
+            L"RUN\tTableRightCell\nRUN\tTableLowerCell\n"
+            L"ACTION\tCellFill\tHCellBorderFill\n"
+            L"SET\tFillColor\tI4\t65280\nENDACTION\nEND";
+        dispatch->PrepareRangeFormatReadbackFixture(false);
+        std::wstring successResponse;
+        const bool success = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+            InvokeString(
+                batch,
+                L"ExecuteActions",
+                successPayload,
+                &successResponse) &&
+            successResponse.rfind(L"HCA2\tOK\t11\t", 0) == 0 &&
+            dispatch->RangeFormatSelectionWasPreserved();
+        dispatch->PrepareRangeFormatReadbackFixture(true);
+        std::wstring mismatchResponse;
+        const bool mismatch = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+            InvokeString(
+                batch,
+                L"ExecuteActions",
+                mismatchPayload,
+                &mismatchResponse) &&
+            mismatchResponse.rfind(L"HCA2\tERROR\tPOSTCONDITION\t", 0) == 0 &&
+            DecodedResponseField(mismatchResponse, 3) == L"FillColor" &&
+            DecodedResponseField(mismatchResponse, 6) == L"CellFill" &&
+            SplitTabs(mismatchResponse).size() >= 9 &&
+            SplitTabs(mismatchResponse)[7] == L"1" &&
+            dispatch->RangeFormatMismatchWasReadBack();
+        std::wcout << L"FORMAT_RANGE_PRESERVED " << success << L'\n'
+                   << L"FORMAT_RANGE_MISMATCH " << mismatch << L'\n'
+                   << L"FORMAT_RANGE_SUCCESS_RESPONSE "
+                   << successResponse << L'\n'
+                   << L"FORMAT_RANGE_MISMATCH_RESPONSE "
+                   << mismatchResponse << L'\n';
+        if (batch != nullptr) {
+            batch->Release();
+        }
+        const HRESULT revokeStatus = releasePublication();
+        FreeLibrary(library);
+        CoUninitialize();
+        return success && mismatch && SUCCEEDED(revokeStatus) ? 0 : 40;
+    }
     std::wstring ping;
     std::wstring badRequest;
     std::wstring unsavedBatchRequest;
@@ -4976,6 +8576,8 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     std::wstring badArrayIndexRequest;
     std::wstring validArrayRequest;
     std::wstring sizedPictureRequest;
+    std::wstring croppedPictureRequest;
+    std::wstring badCropPictureRequest;
     std::wstring formattedCaptionRequest;
     std::wstring capturedTableRequest;
     std::wstring captionTableRequest;
@@ -4998,6 +8600,7 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     std::wstring replaceSelectionRequest;
     std::wstring badOfficialApiRequest;
     std::wstring actionOfficialApiRequest;
+    std::wstring validationActionOfficialApiRequest;
     std::wstring actionInputOfficialApiRequest;
     std::wstring fallbackActionOfficialApiRequest;
     std::wstring sehActionOfficialApiRequest;
@@ -5014,17 +8617,76 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
     std::wstring hActionGetDefaultOfficialApiRequest;
     std::wstring hActionExecuteOfficialApiRequest;
     std::wstring setIdAliasOfficialApiRequest;
+    const bool abandonedCheckpointSmokeFilesRemoved =
+        RemoveAbandonedCheckpointSmokeFiles();
     const std::filesystem::path checkpointPath =
         std::filesystem::temp_directory_path() /
         (L"HancomLiveBridgeCheckpointSmoke-" +
          std::to_wstring(GetCurrentProcessId()) + L".bin");
     const bool checkpointFixtureWritten =
-        WriteCheckpointFixture(checkpointPath, "CHECKPOINT_TARGET");
+        WriteCheckpointFixture(
+            checkpointPath,
+            "CHECKPOINT_TARGET",
+            kCheckpointDocumentSignature);
     const std::wstring encodedCheckpointPath =
         EncodeUtf8Base64(checkpointPath.wstring());
     const std::wstring checkpointRestorePayload =
         L"HCA1\nDOC\t17\tQzpceC5od3A=\nRESTORE_DOCUMENT_FILE\t" +
         encodedCheckpointPath + L"\t4\nEND";
+    const std::filesystem::path legacyCheckpointPath =
+        std::filesystem::temp_directory_path() /
+        (L"HancomLiveBridgeLegacyCheckpointSmoke-" +
+         std::to_wstring(GetCurrentProcessId()) + L".bin");
+    const bool legacyCheckpointFixtureWritten =
+        WriteCheckpointFixture(
+            legacyCheckpointPath,
+            "CHECKPOINT_TARGET",
+            "");
+    const std::wstring legacyCheckpointRestorePayload =
+        L"HCA1\nDOC\t17\tQzpceC5od3A=\nRESTORE_DOCUMENT_FILE\t" +
+        EncodeUtf8Base64(legacyCheckpointPath.wstring()) + L"\t4\nEND";
+    // A checkpoint in the other layout: no magic of ours in it, so the bridge
+    // reads it back as a document file and restores it with InsertFile. The
+    // bytes are never parsed -- the fake engine is what answers for the insert --
+    // but they must not start with an encoded-block magic or this would be read
+    // as the layout it is here to be distinguished from.
+    const std::filesystem::path checkpointDocumentPath =
+        std::filesystem::temp_directory_path() /
+        (L"HancomLiveBridgeCheckpointDocumentSmoke-" +
+         std::to_wstring(GetCurrentProcessId()) + L".hwp");
+    // The real route restores over an existing saved user file. Keep that
+    // precondition true in the fake too; the same-slot reopen does not invent
+    // a missing destination path.
+    const std::filesystem::path userDocumentPath =
+        std::filesystem::temp_directory_path() /
+        (L"HancomLiveBridgeUserDocumentSmoke-" +
+         std::to_wstring(GetCurrentProcessId()) + L".hwp");
+    const bool userDocumentFixtureWritten =
+        WriteDocumentCheckpointFixture(userDocumentPath);
+    const bool checkpointDocumentFixtureWritten =
+        userDocumentFixtureWritten &&
+        WriteDocumentCheckpointFixture(checkpointDocumentPath) &&
+        WriteDocumentCheckpointMeta(
+            checkpointDocumentPath,
+            kCheckpointDocumentSignature);
+    const std::wstring encodedCheckpointDocumentPath =
+        EncodeUtf8Base64(checkpointDocumentPath.wstring());
+    const std::wstring checkpointDocumentRestorePayload =
+        L"HCA1\nDOC\t17\t" + EncodeUtf8Base64(userDocumentPath.wstring()) +
+        L"\nRESTORE_DOCUMENT_FILE\t" + encodedCheckpointDocumentPath +
+        L"\t4\nEND";
+    // The read-only block probe. It exists to answer a question nothing has
+    // ever measured -- how large a document the encoded-block layout can carry
+    // -- so what it must never do is change the document or carry the block
+    // itself back in the response.
+    const std::filesystem::path blockProbePath =
+        std::filesystem::temp_directory_path() /
+        (L"HancomLiveBridgeBlockProbeSmoke-" +
+         std::to_wstring(GetCurrentProcessId()) + L".b64");
+    const std::wstring blockProbePayload =
+        L"HCA1\nDOC\t17\t" + EncodeUtf8Base64(userDocumentPath.wstring()) +
+        L"\nCAPTURE_DOCUMENT_BLOCK_PROBE\t" +
+        EncodeUtf8Base64(blockProbePath.wstring()) + L"\nEND";
     constexpr wchar_t badArrayIndexPayload[] =
         L"HCA1\nDOC\t0\tQzpceC5od3A=\n"
         L"ACTION\tTableCreate\tHTableCreation\n"
@@ -5050,6 +8712,14 @@ int wmain(const int argumentCount, wchar_t** const arguments) {
         L"MOVE_POSITION\t0\t21\t0\n"
         L"SELECT_CONTROL\tMTE0MDg3ODQzNg==\n"
         L"INSERT_PICTURE\tQzpceC5wbmc=\t80\t40\nEND";
+    constexpr wchar_t croppedPicturePayload[] =
+        L"HCA1\nDOC\t0\tQzpceC5od3A=\n"
+        L"INSERT_PICTURE\tQzpceC5wbmc=\t80\t40\t0.1\t0\t0.1\t0\nEND";
+    // Opposite crop edges that add up to the whole image would leave nothing
+    // to show, so the parser has to refuse them before Hancom is touched.
+    constexpr wchar_t badCropPicturePayload[] =
+        L"HCA1\nDOC\t0\tQzpceC5od3A=\n"
+        L"INSERT_PICTURE\tQzpceC5wbmc=\t80\t40\t0.6\t0\t0.4\t0\nEND";
     constexpr wchar_t formattedCaptionPayload[] =
         L"HCA1\nDOC\t0\tQzpceC5od3A=\n"
         L"CAPTION\t9\tdGl0bGU=\tQXJpYWw=\t1200\t0\t0\t3\t160\t0\t0\t0\t1000\t0\t0\t104\t0\nEND";
@@ -5482,6 +9152,9 @@ END)REF";
         L"QglVbVYwZFhKdVFtOXZiR1ZoYmc9PQkxCkkJVW1WMGRYSnVTVzUwWldkbGNnPT0JLTQyClMJVW1WMGRYSnVWR1Y0ZEE9PQlRem92VkdWdGNDOUNTVTR3TURBeExuQnVadz09ClYJVW1WMGRYSnVWbTlwWkE9PQ==";
     constexpr wchar_t actionOfficialApiPayload[] =
         L"HCV1\nACTION\tCharShapeBold\nEND";
+    constexpr wchar_t validationActionOfficialApiPayload[] =
+        L"HCV1\nACTION\tCharShapeBold\n"
+        L"OPTIONS\tDIALOGS_OBSERVE\tEXECUTE_ONLY\nEND";
     constexpr wchar_t actionInputOfficialApiPayload[] =
         L"HCV1\nACTION\tSetWithoutDefault\n"
         L"SET\tFileName\tBSTR\tC:\\probe\\fixture.dat\nEND";
@@ -5531,6 +9204,20 @@ END)REF";
         InvokeString(batch, L"SaveVerify", nullptr, &saveVerifyResponse);
     const bool saveVerifyMatched =
         SaveVerifyMatched(saveVerifyResponse) && dispatch->StoppedLifecycleAfterSave();
+    // A document the engine will not serialize costs one full attempt before
+    // the save and, once that answer is in, nothing is learned by paying for a
+    // second one after it -- the verdict is already decided by the first.
+    dispatch->PrepareSaveVerifyOversizeRefusalFixture();
+    std::wstring saveVerifyOversizeResponse;
+    const bool saveVerifyOversizeInvoked =
+        SUCCEEDED(dispatchStatus) && batch != nullptr &&
+        InvokeString(batch, L"SaveVerify", nullptr, &saveVerifyOversizeResponse);
+    const size_t saveVerifyOversizeSerializationAttempts =
+        dispatch->HwpmlSerializationAttempts();
+    const bool saveVerifyOversizeSkippedSecondAttempt =
+        saveVerifyOversizeInvoked &&
+        saveVerifyOversizeSerializationAttempts == 1;
+    dispatch->ClearSaveVerifyOversizeRefusalFixture();
     dispatch->PrepareSaveVerifySectionDiagnosticFixture();
     std::wstring saveVerifySectionDiagnosticsResponse;
     bool saveVerifySectionDiagnosticsInvoked = true;
@@ -5706,35 +9393,343 @@ END)REF";
         dispatch->AtomicTailRollbackFailureRetainedTail();
     dispatch->RestoreAtomicAppendFixture();
     dispatch->PrepareCheckpointRestoreFixture(false);
-    const bool checkpointRestoreInvoked =
-        checkpointFixtureWritten &&
-        SUCCEEDED(dispatchStatus) && batch != nullptr &&
+    std::wstring legacyCheckpointRestoreRequest;
+    const bool legacyCheckpointRestoreInvoked =
+        legacyCheckpointFixtureWritten &&
+        SUCCEEDED(dispatchStatus) &&
+        batch != nullptr &&
         InvokeString(
             batch,
             L"ExecuteActions",
-            checkpointRestorePayload.c_str(),
-            &checkpointRestoreRequest);
+            legacyCheckpointRestorePayload.c_str(),
+            &legacyCheckpointRestoreRequest);
+    const bool legacyCheckpointRestoreRejected =
+        legacyCheckpointRestoreRequest.rfind(
+            L"HCA2\tERROR\tDOCUMENT_CHECKPOINT_CONTENT\t",
+            0) == 0 &&
+        DecodedResponseField(legacyCheckpointRestoreRequest, 4).find(
+            L"checkpoint content authorization signature is incomplete or "
+            L"malformed; the document was not changed") != std::wstring::npos &&
+        dispatch->CheckpointRestoreWasNotAttempted();
+    dispatch->RestoreCheckpointRestoreFixture();
+    const bool legacyCheckpointFixtureDeleted =
+        !legacyCheckpointFixtureWritten ||
+        DeleteFileW(legacyCheckpointPath.c_str()) != FALSE;
+
+    const auto invokeCheckedCheckpointRestore =
+        [&](std::wstring* const response) {
+            std::wstring expectedContentSignature;
+            return checkpointFixtureWritten &&
+                SUCCEEDED(dispatchStatus) &&
+                batch != nullptr &&
+                InvokeString(
+                    batch,
+                    L"ContentSignature",
+                    nullptr,
+                    &expectedContentSignature) &&
+                !expectedContentSignature.empty() &&
+                InvokeTwoStrings(
+                    batch,
+                    L"ExecuteActionsChecked",
+                    checkpointRestorePayload.c_str(),
+                    expectedContentSignature.c_str(),
+                    response);
+        };
+    dispatch->PrepareCheckpointRestoreFixture(false);
+    const bool checkpointRestoreInvoked =
+        invokeCheckedCheckpointRestore(&checkpointRestoreRequest);
     const bool checkpointRestoreSucceeded =
-        checkpointRestoreRequest.rfind(L"HCA2\tOK\t1\t4\t", 0) == 0 &&
+        checkpointRestoreRequest.rfind(L"HCA2\tOK\t1\t7\t", 0) == 0 &&
         dispatch->CheckpointRestoreSucceeded();
     dispatch->PrepareCheckpointRestoreFixture(true);
     const bool checkpointRollbackInvoked =
-        checkpointFixtureWritten &&
-        SUCCEEDED(dispatchStatus) && batch != nullptr &&
-        InvokeString(
-            batch,
-            L"ExecuteActions",
-            checkpointRestorePayload.c_str(),
-            &checkpointRollbackRequest);
+        invokeCheckedCheckpointRestore(&checkpointRollbackRequest);
     const bool checkpointRollbackSucceeded =
         checkpointRollbackRequest.rfind(
             L"HCA2\tERROR\tDOCUMENT_CHECKPOINT_RESTORE\t",
             0) == 0 &&
         dispatch->CheckpointRollbackSucceeded();
+    dispatch->PrepareCheckpointRestoreFailureFixture();
+    std::wstring checkpointRollbackFailureRequest;
+    const bool checkpointRollbackFailureInvoked =
+        invokeCheckedCheckpointRestore(&checkpointRollbackFailureRequest);
+    const std::wstring checkpointRollbackFailureMessage =
+        DecodedResponseField(checkpointRollbackFailureRequest, 4);
+    const std::vector<std::filesystem::path> checkpointRollbackRecoveryCopies =
+        CheckpointRollbackCopies(checkpointPath);
+    std::error_code checkpointRollbackFileError;
+    const bool checkpointRollbackFailureKeptDiskCopy =
+        checkpointRollbackFailureRequest.rfind(
+            L"HCA2\tERROR\tDOCUMENT_CHECKPOINT_ROLLBACK\t",
+            0) == 0 &&
+        checkpointRollbackRecoveryCopies.size() == 1 &&
+        checkpointRollbackFailureMessage.find(
+            checkpointRollbackRecoveryCopies.front().wstring()) !=
+            std::wstring::npos &&
+        std::filesystem::exists(
+            checkpointRollbackRecoveryCopies.front(),
+            checkpointRollbackFileError) &&
+        !checkpointRollbackFileError &&
+        std::filesystem::file_size(
+            checkpointRollbackRecoveryCopies.front(),
+            checkpointRollbackFileError) > 0 &&
+        !checkpointRollbackFileError;
+    RemoveCheckpointRollbackCopy(checkpointPath);
     dispatch->RestoreCheckpointRestoreFixture();
     const bool checkpointFixtureDeleted =
         !checkpointFixtureWritten ||
         DeleteFileW(checkpointPath.c_str()) != FALSE;
+    // Document-file checkpoints are restored by replacing the bytes in the
+    // existing task-owned document slot and reopening that slot. InsertFile is
+    // intentionally not part of this contract: it can flatten sections or add
+    // residue. Assert semantic state and owned-file behavior, not incidental
+    // action/call-result counts.
+    dispatch->SetDocumentPathFixture(userDocumentPath.wstring());
+    dispatch->PrepareCheckpointDocumentFileFixture(false, true);
+    std::wstring checkpointDirectRestoreRequest;
+    const bool checkpointDirectRestoreInvoked =
+        checkpointDocumentFixtureWritten && SUCCEEDED(dispatchStatus) &&
+        batch != nullptr && InvokeString(
+            batch, L"ExecuteActions", checkpointDocumentRestorePayload.c_str(),
+            &checkpointDirectRestoreRequest);
+    const std::wstring checkpointDirectRestoreCalls =
+        DecodedCallResults(checkpointDirectRestoreRequest);
+    const bool checkpointDirectRestoreExact =
+        checkpointDirectRestoreRequest.rfind(L"HCA2\tOK\t1\t", 0) == 0 &&
+        checkpointDirectRestoreCalls.find(
+            L"DocumentRestoreAttempt=document_file_reopen\n") != std::wstring::npos &&
+        checkpointDirectRestoreCalls.find(
+            L"DocumentCheckpointRestore=content_signature_match\n") != std::wstring::npos &&
+        checkpointDirectRestoreCalls.find(
+            L"DocumentCheckpointRestore=document_file_reopen\n") != std::wstring::npos &&
+        dispatch->CheckpointDirectRestoreExact() &&
+        ReadFileBytes(userDocumentPath) == ReadFileBytes(checkpointDocumentPath) &&
+        CheckpointRollbackCopies(checkpointDocumentPath).empty();
+
+    const bool checkpointNoClearInputWritten =
+        WriteDocumentCheckpointFixture(userDocumentPath) &&
+        WriteDocumentCheckpointFixture(checkpointDocumentPath) &&
+        WriteDocumentCheckpointMeta(checkpointDocumentPath, kCheckpointDocumentSignature);
+    dispatch->PrepareCheckpointDocumentFileFixture(false, true);
+    dispatch->SetCheckpointClearFails();
+    std::wstring checkpointNoClearRestoreRequest;
+    const bool checkpointNoClearRestoreInvoked = checkpointNoClearInputWritten &&
+        InvokeString(batch, L"ExecuteActions", checkpointDocumentRestorePayload.c_str(),
+                     &checkpointNoClearRestoreRequest);
+    const std::wstring checkpointNoClearRestoreCalls =
+        DecodedCallResults(checkpointNoClearRestoreRequest);
+    const bool checkpointNoClearRestoreExact =
+        checkpointNoClearRestoreRequest.rfind(L"HCA2\tOK\t1\t", 0) == 0 &&
+        checkpointNoClearRestoreCalls.find(
+            L"DocumentRestoreAttempt=document_file_reopen\n") != std::wstring::npos &&
+        checkpointNoClearRestoreCalls.find(
+            L"DocumentRestoreAttempt=document_file_reopen_no_clear\n") !=
+            std::wstring::npos &&
+        checkpointNoClearRestoreCalls.find(
+            L"DocumentCheckpointRestore=document_file_reopen_no_clear\n") !=
+            std::wstring::npos &&
+        dispatch->CheckpointNoClearRestoreExact() &&
+        ReadFileBytes(userDocumentPath) == ReadFileBytes(checkpointDocumentPath) &&
+        CheckpointRollbackCopies(checkpointDocumentPath).empty();
+
+    const bool checkpointNoClearRollbackInputWritten =
+        WriteDocumentCheckpointFixture(userDocumentPath) &&
+        WriteDocumentCheckpointFixture(checkpointDocumentPath) &&
+        WriteDocumentCheckpointMeta(checkpointDocumentPath, kCheckpointDocumentSignature);
+    dispatch->PrepareCheckpointDocumentFileFixture(false, true);
+    dispatch->SetCheckpointClearFails();
+    dispatch->SetCheckpointDirectTargetMismatch();
+    std::wstring checkpointNoClearRollbackRequest;
+    const bool checkpointNoClearRollbackInvoked = checkpointNoClearRollbackInputWritten &&
+        InvokeString(batch, L"ExecuteActions", checkpointDocumentRestorePayload.c_str(),
+                     &checkpointNoClearRollbackRequest);
+    const bool checkpointNoClearRollbackExact =
+        checkpointNoClearRollbackRequest.rfind(
+            L"HCA2\tERROR\tDOCUMENT_CHECKPOINT_RESTORE\t", 0) == 0 &&
+        DecodedResponseField(checkpointNoClearRollbackRequest, 4).find(
+            L"the previous document was restored") != std::wstring::npos &&
+        dispatch->CheckpointNoClearRollbackExact() &&
+        ReadFileBytes(userDocumentPath) == "HWP ROLLBACK COPY" &&
+        CheckpointRollbackCopies(checkpointDocumentPath).empty();
+
+    const bool checkpointDirectRollbackInputWritten =
+        WriteDocumentCheckpointFixture(userDocumentPath) &&
+        WriteDocumentCheckpointFixture(checkpointDocumentPath) &&
+        WriteDocumentCheckpointMeta(checkpointDocumentPath, kCheckpointDocumentSignature);
+    dispatch->PrepareCheckpointDocumentFileFixture(false, true);
+    dispatch->SetCheckpointDirectTargetMismatch();
+    std::wstring checkpointDirectRollbackRequest;
+    const bool checkpointDirectRollbackInvoked = checkpointDirectRollbackInputWritten &&
+        InvokeString(batch, L"ExecuteActions", checkpointDocumentRestorePayload.c_str(),
+                     &checkpointDirectRollbackRequest);
+    const std::wstring checkpointDirectRollbackCalls =
+        DecodedCallResults(checkpointDirectRollbackRequest);
+    const bool checkpointDirectRollbackSemanticExact =
+        dispatch->CheckpointDirectRollbackExact();
+    const bool checkpointDirectRollbackBytesExact =
+        ReadFileBytes(userDocumentPath) == "HWP ROLLBACK COPY";
+    const bool checkpointDirectRollbackOwnedFilesClean =
+        CheckpointRollbackCopies(checkpointDocumentPath).empty();
+    const bool checkpointDirectRollbackExact =
+        checkpointDirectRollbackRequest.rfind(
+            L"HCA2\tERROR\tDOCUMENT_CHECKPOINT_RESTORE\t", 0) == 0 &&
+        DecodedResponseField(checkpointDirectRollbackRequest, 4).find(
+            L"the previous document was restored") != std::wstring::npos &&
+        checkpointDirectRollbackCalls.empty() &&
+        checkpointDirectRollbackSemanticExact &&
+        checkpointDirectRollbackBytesExact &&
+        checkpointDirectRollbackOwnedFilesClean;
+    const std::wstring checkpointDirectRollbackState =
+        dispatch->CheckpointDirectState();
+
+    const bool checkpointUnsignedMetaWritten =
+        WriteDocumentCheckpointMeta(checkpointDocumentPath, "");
+    dispatch->PrepareCheckpointDocumentFileFixture(false, true);
+    std::wstring checkpointUnsignedRequest;
+    const bool checkpointUnsignedInvoked = checkpointUnsignedMetaWritten &&
+        InvokeString(batch, L"ExecuteActions", checkpointDocumentRestorePayload.c_str(),
+                     &checkpointUnsignedRequest);
+    const bool checkpointUnsignedRefusedUntouched =
+        checkpointUnsignedRequest.rfind(
+            L"HCA2\tERROR\tDOCUMENT_CHECKPOINT_CONTENT\t", 0) == 0 &&
+        DecodedResponseField(checkpointUnsignedRequest, 4).find(
+            L"signature is incomplete or malformed; the document was not changed") !=
+            std::wstring::npos &&
+        dispatch->CheckpointDocumentFileUntouched() &&
+        CheckpointRollbackCopies(checkpointDocumentPath).empty();
+
+    dispatch->PrepareCheckpointDocumentFileFixture(false, true);
+    std::wstring blockProbeRequest;
+    const bool blockProbeInvoked = InvokeString(
+        batch, L"ExecuteActions", blockProbePayload.c_str(), &blockProbeRequest);
+    const std::wstring blockProbeCalls = DecodedCallResults(blockProbeRequest);
+    const std::wstring blockProbeBlock = L"CHECKPOINT_ROLLBACK";
+    const std::wstring blockProbeSize = std::to_wstring(blockProbeBlock.size());
+    const bool blockProbeReported =
+        blockProbeRequest.rfind(L"HCA2\tOK\t1\t0\t", 0) == 0 &&
+        blockProbeCalls.find(L"DocumentBlockProbe=captured\n") != std::wstring::npos &&
+        blockProbeCalls.find(L"DocumentBlockProbeLength=" + blockProbeSize + L"\n") !=
+            std::wstring::npos &&
+        blockProbeCalls.find(L"DocumentBlockProbeWritten=" + blockProbeSize + L"\n") !=
+            std::wstring::npos &&
+        std::filesystem::exists(blockProbePath) &&
+        std::filesystem::file_size(blockProbePath) == blockProbeBlock.size() &&
+        dispatch->CheckpointDocumentFileUntouched();
+    std::error_code blockProbeCleanup;
+    static_cast<void>(std::filesystem::remove(blockProbePath, blockProbeCleanup));
+
+    dispatch->PrepareCheckpointDocumentFileFixture(false, true);
+    dispatch->SetCheckpointDocumentBlock(L"");
+    std::wstring blockProbeEmptyRequest;
+    const bool blockProbeEmptyInvoked = InvokeString(
+        batch, L"ExecuteActions", blockProbePayload.c_str(), &blockProbeEmptyRequest);
+    const std::wstring blockProbeEmptyCalls = DecodedCallResults(blockProbeEmptyRequest);
+    const bool blockProbeEmptyReported =
+        blockProbeEmptyRequest.rfind(L"HCA2\tOK\t1\t0\t", 0) == 0 &&
+        blockProbeEmptyCalls.find(L"DocumentBlockProbe=allocation_failed\n") !=
+            std::wstring::npos &&
+        blockProbeEmptyCalls.find(L"DocumentBlockProbeLength=0\n") !=
+            std::wstring::npos &&
+        !std::filesystem::exists(blockProbePath) &&
+        dispatch->CheckpointDocumentFileUntouched();
+
+    const bool checkpointEngineMetaWritten = WriteDocumentCheckpointMeta(
+        checkpointDocumentPath, kCheckpointDocumentSignature,
+        kCheckpointDocumentSignature, kCheckpointDocumentExpectedPages);
+    dispatch->PrepareCheckpointDocumentFileFixture(false, true);
+    dispatch->SetCheckpointEngineUndoRestores();
+    std::wstring checkpointEngineUndoRequest;
+    const bool checkpointEngineUndoInvoked = checkpointEngineMetaWritten &&
+        InvokeString(batch, L"ExecuteActions", checkpointDocumentRestorePayload.c_str(),
+                     &checkpointEngineUndoRequest);
+    const std::wstring checkpointEngineUndoCalls =
+        DecodedCallResults(checkpointEngineUndoRequest);
+    const bool checkpointEngineUndoExact =
+        checkpointEngineUndoRequest.rfind(L"HCA2\tOK\t1\t", 0) == 0 &&
+        checkpointEngineUndoCalls.find(
+            L"DocumentRestoreAttempt=engine_undo\n") != std::wstring::npos &&
+        checkpointEngineUndoCalls.find(
+            L"DocumentCheckpointRestoreInsert=engine_undo_verified\n") !=
+            std::wstring::npos &&
+        dispatch->CheckpointEngineUndoRestoredExactly() &&
+        CheckpointRollbackCopies(checkpointDocumentPath).empty();
+
+    const bool checkpointWrongStepMetaWritten = WriteDocumentCheckpointMeta(
+        checkpointDocumentPath, kCheckpointDocumentSignature,
+        kCheckpointDocumentSignature, kCheckpointDocumentExpectedPages);
+    dispatch->PrepareCheckpointDocumentFileFixture(false, true);
+    dispatch->SetCheckpointEngineUndoWrongStep();
+    std::wstring checkpointWrongStepRequest;
+    const bool checkpointWrongStepInvoked = checkpointWrongStepMetaWritten &&
+        InvokeString(batch, L"ExecuteActions", checkpointDocumentRestorePayload.c_str(),
+                     &checkpointWrongStepRequest);
+    const bool checkpointWrongStepReversed =
+        checkpointWrongStepRequest.rfind(
+            L"HCA2\tERROR\tDOCUMENT_CHECKPOINT_ENGINE_HISTORY_DRIFT\t", 0) == 0 &&
+        DecodedResponseField(checkpointWrongStepRequest, 4).find(
+            L"one Redo restored the exact state this call found") !=
+            std::wstring::npos &&
+        dispatch->CheckpointEngineWrongStepWasReversed() &&
+        CheckpointRollbackCopies(checkpointDocumentPath).empty();
+
+    const bool checkpointDirectFailureInputWritten =
+        WriteDocumentCheckpointFixture(userDocumentPath) &&
+        WriteDocumentCheckpointFixture(checkpointDocumentPath) &&
+        WriteDocumentCheckpointMeta(checkpointDocumentPath, kCheckpointDocumentSignature);
+    dispatch->PrepareCheckpointDocumentFileFixture(false, true);
+    dispatch->SetCheckpointDirectRollbackFailure();
+    std::wstring checkpointDirectRollbackFailureRequest;
+    const bool checkpointDirectRollbackFailureInvoked = checkpointDirectFailureInputWritten &&
+        InvokeString(batch, L"ExecuteActions", checkpointDocumentRestorePayload.c_str(),
+                     &checkpointDirectRollbackFailureRequest);
+    const std::vector<std::filesystem::path> checkpointDirectRecoveryCopies =
+        CheckpointRollbackCopies(checkpointDocumentPath);
+    const std::filesystem::path checkpointDirectRecoveryCopy =
+        checkpointDirectRecoveryCopies.size() == 1
+            ? checkpointDirectRecoveryCopies.front() : std::filesystem::path();
+    const std::wstring checkpointDirectRollbackFailureMessage =
+        DecodedResponseField(checkpointDirectRollbackFailureRequest, 4);
+    const bool checkpointDirectRollbackFailurePreserved =
+        checkpointDirectRollbackFailureRequest.rfind(
+            L"HCA2\tERROR\tDOCUMENT_CHECKPOINT_ROLLBACK\t", 0) == 0 &&
+        checkpointDirectRollbackFailureMessage.find(
+            L"a copy of the document as this call found it was kept at") !=
+            std::wstring::npos &&
+        checkpointDirectRecoveryCopies.size() == 1 &&
+        checkpointDirectRollbackFailureMessage.find(
+            checkpointDirectRecoveryCopy.wstring()) != std::wstring::npos &&
+        std::filesystem::exists(checkpointDirectRecoveryCopy) &&
+        !std::filesystem::exists(std::filesystem::path(
+            checkpointDirectRecoveryCopy.wstring() + L".gsgmeta")) &&
+        ReadFileBytes(checkpointDirectRecoveryCopy) == "HWP ROLLBACK COPY" &&
+        ReadFileBytes(userDocumentPath) == "HWP ROLLBACK COPY" &&
+        dispatch->CheckpointDirectRollbackFailed();
+    const std::wstring checkpointDirectRollbackFailureState =
+        dispatch->CheckpointDirectState();
+    const bool checkpointDirectRecoverySidecarAbsent =
+        checkpointDirectRecoveryCopies.size() == 1 &&
+        !std::filesystem::exists(std::filesystem::path(
+            checkpointDirectRecoveryCopy.wstring() + L".gsgmeta"));
+    RemoveCheckpointRollbackCopy(checkpointDocumentPath);
+    const bool checkpointDirectRecoveryCleaned =
+        CheckpointRollbackCopies(checkpointDocumentPath).empty();
+
+    dispatch->RestoreCheckpointDocumentFileFixture();
+    dispatch->SetDocumentPathFixture(L"C:\\x.hwp");
+    std::error_code checkpointCleanupError;
+    const bool checkpointDocumentFixtureDeleted =
+        (!checkpointDocumentFixtureWritten ||
+         (std::filesystem::remove(checkpointDocumentPath, checkpointCleanupError) &&
+          std::filesystem::remove(
+              std::filesystem::path(checkpointDocumentPath.wstring() + L".gsgmeta"),
+              checkpointCleanupError))) &&
+        (!userDocumentFixtureWritten ||
+         std::filesystem::remove(userDocumentPath, checkpointCleanupError)) &&
+        !std::filesystem::exists(checkpointDocumentPath) &&
+        !std::filesystem::exists(std::filesystem::path(
+            checkpointDocumentPath.wstring() + L".gsgmeta")) &&
+        !std::filesystem::exists(userDocumentPath) &&
+        CheckpointRollbackCopies(checkpointDocumentPath).empty();
     dispatch->PrepareEmptyCellTextFixture();
     const bool emptyCellTextFixtureReady =
         dispatch->EmptyCellTextFixtureReady();
@@ -6045,10 +10040,16 @@ END)REF";
         unscopedStructure.rfind(L"HDS1\n", 0) == 0 &&
         dispatch->PreservedUnscopedForwardInspection();
     dispatch->RestoreScopedInspectionFixture();
-    if (!cellTopologyOwnerIndex || !paragraphTextNormalization ||
+    const bool graphDispatchAbi = SUCCEEDED(dispatchStatus) && batch != nullptr &&
+        ReadGraphDispatchAbi(batch);
+    if (!cellTopologyOwnerIndex || !tableCellFormatSampling ||
+        !paragraphTextNormalization ||
         FAILED(dispatchStatus) || !ReadProtocolVersion(batch) ||
+        !graphDispatchAbi ||
         !dynamicDocumentActivationWorked ||
         !saveVerifyInvoked || !saveVerifyMatched ||
+        !saveVerifyOversizeInvoked ||
+        !saveVerifyOversizeSkippedSecondAttempt ||
         !saveVerifySectionDiagnosticsInvoked ||
         !saveVerifySectionDiagnosticsMatched ||
         !lifecycleSuccessInvoked || !lifecycleSuccessMatched ||
@@ -6076,6 +10077,10 @@ END)REF";
             atomicRollbackRequest,
             atomicRollbackFailureRequest) ||
         !atomicRollbackFailureRetainedTail ||
+        !legacyCheckpointFixtureWritten ||
+        !legacyCheckpointRestoreInvoked ||
+        !legacyCheckpointRestoreRejected ||
+        !legacyCheckpointFixtureDeleted ||
         !checkpointFixtureWritten ||
         encodedCheckpointPath.empty() ||
         !checkpointRestoreInvoked ||
@@ -6134,7 +10139,8 @@ END)REF";
         !textDeletionPatchInvoked || !textDeletionPatchVerified ||
         !scopedStructureInvoked || !scopedStructureSucceeded ||
         !unscopedStructureInvoked || !unscopedStructureSucceeded ||
-        !InvokeString(batch, L"Ping", nullptr, &ping) || ping != L"HCB12\tPONG\t12" ||
+        !HasDispatchMember(batch, L"ExecuteProtocolBundle") ||
+        !InvokeString(batch, L"Ping", nullptr, &ping) || ping != L"HCB14\tPONG\t14" ||
         !InvokeString(batch, L"Execute", L"not-a-request", &badRequest) ||
         badRequest.rfind(L"HCB1\tERROR\tBAD_REQUEST\t", 0) != 0 ||
         !InvokeString(batch, L"Execute", unsavedBatchPayload, &unsavedBatchRequest) ||
@@ -6163,6 +10169,18 @@ END)REF";
         validArrayRequest.rfind(L"HCA2\tOK\t1\t", 0) != 0 ||
         !InvokeString(batch, L"ExecuteActions", sizedPicturePayload, &sizedPictureRequest) ||
         sizedPictureRequest.rfind(L"HCA2\tERROR\tSTALE_DOCUMENT\t", 0) != 0 ||
+        !InvokeString(
+            batch,
+            L"ExecuteActions",
+            croppedPicturePayload,
+            &croppedPictureRequest) ||
+        croppedPictureRequest.rfind(L"HCA2\tERROR\tSTALE_DOCUMENT\t", 0) != 0 ||
+        !InvokeString(
+            batch,
+            L"ExecuteActions",
+            badCropPicturePayload,
+            &badCropPictureRequest) ||
+        badCropPictureRequest.rfind(L"HCA1\tERROR\tBAD_REQUEST\t", 0) != 0 ||
         !InvokeString(batch, L"ExecuteActions", formattedCaptionPayload, &formattedCaptionRequest) ||
         formattedCaptionRequest.rfind(L"HCA2\tERROR\tSTALE_DOCUMENT\t", 0) != 0 ||
         !InvokeString(batch, L"ExecuteActions", capturedTablePayload, &capturedTableRequest) ||
@@ -6200,9 +10218,18 @@ END)REF";
         !InvokeString(
             batch,
             L"ProbeOfficialApi",
-            actionOfficialApiPayload,
-            &actionOfficialApiRequest) ||
+        actionOfficialApiPayload,
+        &actionOfficialApiRequest) ||
         actionOfficialApiRequest.rfind(L"HCV1\tACTION\tCharShapeBold\t", 0) != 0 ||
+        !InvokeString(
+            batch,
+            L"ProbeOfficialApi",
+            validationActionOfficialApiPayload,
+            &validationActionOfficialApiRequest) ||
+        validationActionOfficialApiRequest.rfind(
+            L"HCV1\tACTION\tCharShapeBold\t0\t0\t0\t0\t0\t1\t1\t0\t1\t"
+            L"-2147418113\t-2\t",
+            0) != 0 ||
         !InvokeString(
             batch,
             L"ProbeOfficialApi",
@@ -6346,12 +10373,47 @@ END)REF";
         !dispatch->PasteUsedSourceAnchorFormat() ||
         !dispatch->PreservedAttachedCaptionNumber() ||
         !streamingScanWorked || streamedCellText != L"cell-text" ||
-        !dispatch->UsedStreamingTextScan()) {
+        !dispatch->UsedStreamingTextScan() ||
+        // Last on purpose. Terms in this condition are not all pure reads --
+        // the caption batch above runs inside it -- so a term that fires early
+        // stops the ones after it from ever running, and their flags then print
+        // as zero. A new check placed in the middle therefore reports itself as
+        // nine unrelated failures. These go after everything that does work.
+        !abandonedCheckpointSmokeFilesRemoved ||
+        !checkpointDocumentFixtureWritten ||
+        encodedCheckpointDocumentPath.empty() ||
+        !checkpointRollbackFailureInvoked ||
+        !checkpointRollbackFailureKeptDiskCopy ||
+        !checkpointDirectRestoreInvoked ||
+        !checkpointDirectRestoreExact ||
+        !checkpointNoClearRestoreInvoked ||
+        !checkpointNoClearRestoreExact ||
+        !checkpointNoClearRollbackInvoked ||
+        !checkpointNoClearRollbackExact ||
+        !checkpointDirectRollbackInvoked ||
+        !checkpointDirectRollbackExact ||
+        !checkpointDirectRollbackFailureInvoked ||
+        !checkpointDirectRollbackFailurePreserved ||
+        !checkpointDirectRecoveryCleaned ||
+        !checkpointUnsignedInvoked ||
+        !checkpointUnsignedRefusedUntouched ||
+        !checkpointEngineUndoInvoked ||
+        !checkpointEngineUndoExact ||
+        !checkpointWrongStepInvoked ||
+        !checkpointWrongStepReversed ||
+        !blockProbeInvoked ||
+        !blockProbeReported ||
+        !blockProbeEmptyInvoked ||
+        !blockProbeEmptyReported ||
+        !checkpointDocumentFixtureDeleted) {
         std::wcerr
             << L"batch automation contract failed"
             << L"\n  lifecycle-success=" << lifecycleSuccessResponse
             << L"\n  save-verify=" << saveVerifyResponse
             << L"\n  save-verify-matched=" << saveVerifyMatched
+            << L"\n  save-verify-oversize=" << saveVerifyOversizeResponse
+            << L"\n  save-verify-oversize-serialization-attempts="
+            << saveVerifyOversizeSerializationAttempts
             << L"\n  save-verify-section-diagnostics="
             << saveVerifySectionDiagnosticsResponse
             << L"\n  save-verify-section-diagnostics-matched="
@@ -6469,6 +10531,10 @@ END)REF";
             << referenceLayoutDroppedEdgesRejected
             << L"\n  cell-topology-owner-index="
             << cellTopologyOwnerIndex
+            << L"\n  table-cell-format-sampling="
+            << tableCellFormatSampling
+            << L"\n  graph-dispatch-abi="
+            << graphDispatchAbi
             << L"\n  paragraph-text-normalization="
             << paragraphTextNormalization
             << L"\n  selected-control-patch=" << selectedControlPatchRequest
@@ -6490,6 +10556,11 @@ END)REF";
             << L"\n  call-return=" << callReturnRequest
             << L"\n  stale-selection=" << staleSelectionRequest
             << L"\n  replace-selection=" << replaceSelectionRequest
+            << L"\n  bad-official-api=" << badOfficialApiRequest
+            << L"\n  action-official-api=" << actionOfficialApiRequest
+            << L"\n  validation-action-official-api="
+            << validationActionOfficialApiRequest
+            << L"\n  action-input-official-api=" << actionInputOfficialApiRequest
             << L"\n  fallback-action=" << fallbackActionOfficialApiRequest
             << L"\n  seh-action=" << sehActionOfficialApiRequest
             << L"\n  event=" << eventOfficialApiRequest
@@ -6514,7 +10585,69 @@ END)REF";
             << L"\n  attached-caption-number-preserved="
             << dispatch->PreservedAttachedCaptionNumber()
             << L"\n  streaming-cell-text=" << streamedCellText
-            << L"\n  streaming-scan=" << dispatch->UsedStreamingTextScan() << L'\n';
+            << L"\n  streaming-scan=" << dispatch->UsedStreamingTextScan()
+            << L"\n  abandoned-checkpoint-smoke-files-removed="
+            << abandonedCheckpointSmokeFilesRemoved
+            << L"\n  checkpoint-document-user-fixture-written="
+            << userDocumentFixtureWritten
+            << L"\n  checkpoint-document-fixture-written="
+            << checkpointDocumentFixtureWritten
+            << L"\n  checkpoint-direct-restore-invoked="
+            << checkpointDirectRestoreInvoked
+            << L"\n  checkpoint-direct-restore-exact="
+            << checkpointDirectRestoreExact
+            << L"\n  checkpoint-direct-restore-response="
+            << checkpointDirectRestoreRequest
+            << L"\n  checkpoint-no-clear-restore-invoked="
+            << checkpointNoClearRestoreInvoked
+            << L"\n  checkpoint-no-clear-restore-exact="
+            << checkpointNoClearRestoreExact
+            << L"\n  checkpoint-no-clear-restore-response="
+            << checkpointNoClearRestoreRequest
+            << L"\n  checkpoint-no-clear-rollback-invoked="
+            << checkpointNoClearRollbackInvoked
+            << L"\n  checkpoint-no-clear-rollback-exact="
+            << checkpointNoClearRollbackExact
+            << L"\n  checkpoint-no-clear-rollback-response="
+            << checkpointNoClearRollbackRequest
+            << L"\n  checkpoint-direct-rollback-invoked="
+            << checkpointDirectRollbackInvoked
+            << L"\n  checkpoint-direct-rollback-exact="
+            << checkpointDirectRollbackExact
+            << L"\n  checkpoint-direct-rollback-response="
+            << checkpointDirectRollbackRequest
+            << L"\n  checkpoint-direct-rollback-semantic="
+            << checkpointDirectRollbackSemanticExact
+            << L"\n  checkpoint-direct-rollback-bytes="
+            << checkpointDirectRollbackBytesExact
+            << L"\n  checkpoint-direct-rollback-owned-clean="
+            << checkpointDirectRollbackOwnedFilesClean
+            << L"\n  checkpoint-direct-rollback-state="
+            << checkpointDirectRollbackState
+            << L"\n  checkpoint-direct-rollback-failure-invoked="
+            << checkpointDirectRollbackFailureInvoked
+            << L"\n  checkpoint-direct-rollback-failure-preserved="
+            << checkpointDirectRollbackFailurePreserved
+            << L"\n  checkpoint-direct-rollback-failure-response="
+            << checkpointDirectRollbackFailureRequest
+            << L"\n  checkpoint-direct-rollback-failure-state="
+            << checkpointDirectRollbackFailureState
+            << L"\n  checkpoint-direct-recovery-sidecar-absent="
+            << checkpointDirectRecoverySidecarAbsent
+            << L"\n  checkpoint-direct-recovery-cleaned="
+            << checkpointDirectRecoveryCleaned
+            << L"\n  checkpoint-unsigned-refused-untouched="
+            << checkpointUnsignedRefusedUntouched
+            << L"\n  checkpoint-unsigned-response=" << checkpointUnsignedRequest
+            << L"\n  checkpoint-engine-undo-exact=" << checkpointEngineUndoExact
+            << L"\n  checkpoint-engine-undo-response=" << checkpointEngineUndoRequest
+            << L"\n  checkpoint-wrong-step-reversed=" << checkpointWrongStepReversed
+            << L"\n  checkpoint-wrong-step-response=" << checkpointWrongStepRequest
+            << L"\n  block-probe-reported=" << blockProbeReported
+            << L"\n  block-probe-response=" << blockProbeRequest
+            << L"\n  block-probe-empty-reported=" << blockProbeEmptyReported
+            << L"\n  checkpoint-owned-files-deleted="
+            << checkpointDocumentFixtureDeleted << L'\n';
         for (size_t index = 0;
              index < multilineCellTextResponses.size();
              ++index) {
@@ -6750,6 +10883,26 @@ END)REF";
                << L"CHECKPOINT_ROLLBACK " << checkpointRollbackRequest << L'\n'
                << L"CHECKPOINT_ROLLBACK_RESTORED "
                << checkpointRollbackSucceeded << L'\n'
+               << L"ABANDONED_CHECKPOINT_SMOKE_FILES_REMOVED "
+               << abandonedCheckpointSmokeFilesRemoved << L'\n'
+               << L"CHECKPOINT_DOCUMENT_DIRECT_REOPEN "
+               << checkpointDirectRestoreRequest << L'\n'
+               << L"CHECKPOINT_DOCUMENT_DIRECT_REOPEN_EXACT "
+               << checkpointDirectRestoreExact << L'\n'
+               << L"CHECKPOINT_DOCUMENT_DIRECT_ROLLBACK "
+               << checkpointDirectRollbackRequest << L'\n'
+               << L"CHECKPOINT_DOCUMENT_DIRECT_ROLLBACK_EXACT "
+               << checkpointDirectRollbackExact << L'\n'
+               << L"CHECKPOINT_DOCUMENT_ROLLBACK_FAILURE "
+               << checkpointDirectRollbackFailureRequest << L'\n'
+               << L"CHECKPOINT_DOCUMENT_ROLLBACK_COPY_KEPT "
+               << checkpointDirectRollbackFailurePreserved << L'\n'
+               << L"CHECKPOINT_DOCUMENT_ENGINE_UNDO_EXACT "
+               << checkpointEngineUndoExact << L'\n'
+               << L"CHECKPOINT_DOCUMENT_WRONG_STEP_REVERSED "
+               << checkpointWrongStepReversed << L'\n'
+               << L"CHECKPOINT_DOCUMENT_OWNED_FILES_DELETED "
+               << checkpointDocumentFixtureDeleted << L'\n'
                << L"EMPTY_CELL_TEXT " << emptyCellTextRequest << L'\n'
                << L"EMPTY_CELL_TEXT_POSITION actual=650:0:0 stale=0:0:0\n"
                << L"EMPTY_CELL_TEXT_INSERTED_EXACTLY "
@@ -6766,8 +10919,11 @@ END)REF";
                << referenceLayoutAtomicRollbackRestored << L'\n'
                << L"REFERENCE_LAYOUT_DROPPED_EDGES "
                << referenceLayoutDroppedEdgesRequest << L'\n'
+               << L"DOCUMENT_GRAPH_SCHEMA " << documentGraphSchema << L'\n'
                << L"CELL_TOPOLOGY_OWNER_INDEX "
                << cellTopologyOwnerIndex << L'\n'
+               << L"TABLE_CELL_FORMAT_SAMPLING "
+               << tableCellFormatSampling << L'\n'
                << L"SELECTED_CONTROL_PATCH " << selectedControlPatchRequest << L'\n'
                << L"TEXT_DELETION_PATCH " << textDeletionPatchRequest << L'\n'
                << L"SCOPED_STRUCTURE " << scopedStructureSucceeded << L'\n'

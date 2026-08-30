@@ -10,6 +10,7 @@ installed from each exact pinned PyPI release.
 | Package | License | Verification |
 |---|---|---|
 | [`mcp==1.26.0`](https://pypi.org/project/mcp/1.26.0/) | MIT | Wheel metadata and `LICENSE` |
+| [`jsonschema==4.26.0`](https://pypi.org/project/jsonschema/4.26.0/) | MIT | `License-Expression` and `COPYING` |
 | [`pdfplumber==0.11.9`](https://pypi.org/project/pdfplumber/0.11.9/) | MIT | Wheel classifier and `LICENSE.txt` |
 | [`pydantic==2.12.5`](https://pypi.org/project/pydantic/2.12.5/) | MIT | `License-Expression` and `LICENSE` |
 | [`pyhwpx==1.6.6`](https://pypi.org/project/pyhwpx/1.6.6/) | MIT | Wheel `license.txt` (MIT permission text) |

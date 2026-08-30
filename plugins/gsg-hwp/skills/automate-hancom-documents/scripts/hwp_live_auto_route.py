@@ -145,7 +145,10 @@ def automatic_atomic_selection(
     if resolution.candidates[0].operation_id != operation.operation_id:
         return None
     executable = certified_atomic_action(operation) is not None
-    diagnostic_only = operation.latest_live_status == "known_failure" or operation.execution_policy in {"blocked", "catalog_only"}
+    diagnostic_only = (
+        operation.latest_live_status == "known_failure"
+        or operation.execution_policy in {"blocked", "catalog_only"}
+    )
     if not executable and not diagnostic_only:
         return None
     return AutomaticOperationSelection(
@@ -172,20 +175,19 @@ def resolve_conservative_route(
 
 
 def automatic_workflow(route: NaturalWorkflowRoute) -> HwpWorkflowId | None:
-    if not _is_deterministic(route.source):
-        return None
     resolution = route.resolution
     if resolution.status != "resolved" or resolution.workflow_id is None:
         return None
     if not resolution.candidates:
         return None
-    if resolution.candidates[0].workflow_id != resolution.workflow_id:
+    candidate = resolution.candidates[0]
+    if candidate.workflow_id != resolution.workflow_id:
         return None
-    return (
-        resolution.workflow_id
-        if certified_recipe(resolution.workflow_id) is not None
-        else None
-    )
+    if certified_recipe(resolution.workflow_id) is None:
+        return None
+    if _is_deterministic(route.source) or candidate.execution == "recipe":
+        return resolution.workflow_id
+    return None
 
 
 def route_candidate_result(
@@ -197,26 +199,38 @@ def route_candidate_result(
     resolution = route.resolution
     match resolution.status:  # noqa: MATCH_OK
         case "resolved":
-            return complete_natural_route(workflow_result(
-                resolution,
-                "needs_input",
-                "자동 실행 조건을 충족하지 않았습니다. 반환된 operation을 inputs.operation에 전달하세요",
-                required_inputs=("inputs.operation",),
-            ), route, None)
+            return complete_natural_route(
+                workflow_result(
+                    resolution,
+                    "needs_input",
+                    "자동 실행 조건을 충족하지 않았습니다. 반환된 operation을 inputs.operation에 전달하세요",
+                    required_inputs=("inputs.operation",),
+                ),
+                route,
+                None,
+            )
         case "ambiguous":
-            return complete_natural_route(workflow_result(
-                resolution,
-                "ambiguous",
-                "후보가 근접하여 자동 실행하지 않았습니다. operation을 지정하세요",
-            ), route, None)
+            return complete_natural_route(
+                workflow_result(
+                    resolution,
+                    "ambiguous",
+                    "후보가 근접하여 자동 실행하지 않았습니다. operation을 지정하세요",
+                ),
+                route,
+                None,
+            )
         case "not_found":
             return None
         case "schema_conflict":
-            return complete_natural_route(workflow_result(
-                resolution,
-                "schema_conflict",
-                "구조화된 라우팅 필드가 서로 충돌합니다",
-            ), route, None)
+            return complete_natural_route(
+                workflow_result(
+                    resolution,
+                    "schema_conflict",
+                    "구조화된 라우팅 필드가 서로 충돌합니다",
+                ),
+                route,
+                None,
+            )
     assert_never(resolution.status)
 
 
@@ -254,7 +268,11 @@ def complete_natural_route(
 ) -> OperationResult:
     if route is None:
         return result
-    selected = selection.operation_id if result.status == "executed" and selection and selection.executable else None
+    selected = (
+        selection.operation_id
+        if result.status == "executed" and selection and selection.executable
+        else None
+    )
     return result.model_copy(
         update={
             "route_source": route.source if selection is None else selection.source,
@@ -287,5 +305,9 @@ def prepare_natural_route(
         return PreparedNaturalRoute(route, None, None, None)
     selection = AutomaticOperationSelection(workflow, route.source)
     preflight = explicit_workflow_preflight(route.resolution, inputs)
-    blocked_result = None if preflight is None else complete_natural_route(preflight, route, selection)
+    blocked_result = (
+        None
+        if preflight is None
+        else complete_natural_route(preflight, route, selection)
+    )
     return PreparedNaturalRoute(route, workflow, selection, blocked_result)

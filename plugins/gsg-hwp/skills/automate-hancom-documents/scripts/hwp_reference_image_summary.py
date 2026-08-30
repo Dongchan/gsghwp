@@ -1,20 +1,39 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import re
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal, cast, final
+from typing import Final, Literal, cast, final
 
 from pydantic import Field, JsonValue
 
 from hwp_live_values import ContractModel, Rgb
 from hwp_reference_image_analyzer import default_artifact_root
+from hwp_reference_image_budget import ReferenceAnalysisStopReason
 from hwp_reference_image_contract import (
     NormalizedBox,
+    ReferenceBreakpointCandidate,
     ReferenceImageAnalysis,
     ReferenceImageObject,
     ReferenceImageSegment,
+    ReferenceImageTile,
+    ReferenceProtectedGap,
+)
+from hwp_reference_image_grouping import (
+    FILL_MERGE_DISTANCE,
+    ReferenceObjectSample,
+    ReferenceSwatchRun,
+    ReferenceTextAnchorSample,
+    annotate_object,
+    color_distance,
+    detect_swatch_runs,
+    merge_text_fragments,
+    merged_text_anchor,
+    merged_text_box,
 )
 from hwp_reference_image_layout_bridge import align_reference_layout_to_analysis
 from hwp_reference_layout_contract import (
@@ -42,6 +61,22 @@ ReferenceArtifactKind = Literal[
     "contact_sheet",
     "tile",
     "text_crop",
+]
+# compact 응답이 실어 보내는 관측 축이다. detail section 과 이름이 겹치지만
+# 같은 것이 아니다 — `fills` 는 objects 에서 집계한 파생 축이라 자기 section 이
+# 없고, `draft_reference_layout`·`artifacts` 는 축이자 section 이다. 그래서
+# 누락 보고는 축 이름과 되받을 section 을 따로 적는다.
+ReferenceEvidenceAxis = Literal[
+    "fills",
+    "swatch_runs",
+    "objects",
+    "text_regions",
+    "protected_gaps",
+    "breakpoint_candidates",
+    "tiles",
+    "visible_segments",
+    "draft_reference_layout",
+    "artifacts",
 ]
 
 
@@ -73,10 +108,66 @@ class ReferenceArtifact(ContractModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class ReferenceFillTally(ContractModel):
+    """관측한 채움색 하나와 그 색이 차지한 몫이다.
+
+    objects 를 다 싣지 못해도 이 표는 전량 집계에서 나오므로, 잘린 표본만 보고
+    스와치를 세다가 색을 빠뜨리는 일이 없다.
+
+    가까운 계조는 한 줄로 접어서 낸다(FILL_MERGE_DISTANCE). 접지 않으면
+    안티에일리어싱이 만든 흰색·회색 계조가 상위권을 다 차지해 정작 디자인이
+    쓴 색이 밀려난다 — 실사례에서 149종 가운데 상위 8종이 전부 그런 잡티였고
+    먼셀 스와치 6색은 응답에 실리지 못했다.
+    """
+
+    fill: Rgb
+    object_count: int = Field(ge=1)
+    area_ratio: float = Field(ge=0, le=1)
+    merged_fill_count: int = Field(default=1, ge=1)
+    """이 줄이 흡수한 관측 색의 수(자기 자신 포함).
+
+    1보다 크면 인접 계조를 접은 것이다. `fill` 은 접은 것들의 평균이 아니라
+    그중 넓이가 가장 큰 실제 관측색이라, 여기 적힌 색은 언제나 그림에 실제로
+    있던 색이다.
+    """
+
+
+class ReferenceEvidenceSample(ContractModel):
+    """예산 안에서 실제로 실어 보낸 관측이다.
+
+    비어 있는 축은 "관측이 없다"가 아니라 "이 응답에 싣지 않았다"일 수 있다 —
+    어느 쪽인지는 counts 와 omissions 가 말한다.
+
+    `objects`·`text_regions`·`fills`·`swatch_runs` 는 순위로 골라 실은 표본이라
+    section 의 앞부분과 같지 않다. 그래서 이 축들의 누락 신고에는 이어받을
+    `next_offset` 이 없고(None), 전량이 필요하면 section 을 처음부터 받는다.
+    """
+
+    fills: tuple[ReferenceFillTally, ...] = ()
+    swatch_runs: tuple[ReferenceSwatchRun, ...] = ()
+    objects: tuple[ReferenceObjectSample, ...] = ()
+    text_regions: tuple[ReferenceTextAnchorSample, ...] = ()
+    protected_gaps: tuple[ReferenceProtectedGap, ...] = ()
+    breakpoint_candidates: tuple[ReferenceBreakpointCandidate, ...] = ()
+    tiles: tuple[ReferenceImageTile, ...] = ()
+    visible_segments: tuple[ReferenceImageSegment, ...] = ()
+
+
 class ReferenceCompactOmission(ContractModel):
     section: ReferenceDetailSection
     omitted_count: int = Field(ge=1)
     reason: Literal["utf8_byte_budget"] = "utf8_byte_budget"
+    # 축 이름과 되받을 자리. next_offset 이 있으면
+    # hwp_get_reference_image_analysis_section(section=..., offset=next_offset)
+    # 가 이어지는 항목을 그대로 돌려준다.
+    #
+    # None 인 경우가 두 가지다. 하나는 fills·swatch_runs 처럼 objects 에서
+    # 파생된 축이라 원본 주소가 없는 것이고, 다른 하나는 objects·text_regions
+    # 처럼 순위로 골라 실어서 인라인 표본이 section 의 앞부분이 아닌 것이다.
+    # 둘 다 이어받을 offset 이 없으니 section 을 offset=0 부터 받아야 한다.
+    # 골라 실은 축에 kept 를 적으면 "그 자리부터 나머지"라는 거짓말이 된다.
+    axis: ReferenceEvidenceAxis | None = None
+    next_offset: int | None = Field(default=None, ge=0)
 
 
 class CompactReferenceImageAnalysis(ContractModel):
@@ -93,14 +184,54 @@ class CompactReferenceImageAnalysis(ContractModel):
     structure: ReferenceStructureSummary
     recommended_execution_mode: ReferenceExecutionMode
     reason_codes: tuple[str, ...]
+    # ReferenceExecutionMode literal 은 그대로 둔다 — 기존 소비자가 두 값만
+    # 받도록 좁게 쓰고 있어서 값을 늘리면 깨진다. 조기 종료는 별도 필드로
+    # 말하고 추천 모드는 ordinary_layout(모델이 직접 판독) 으로 낸다.
+    analysis_complete: bool = True
+    # 조기 종료한 분석은 캐시에 남지 않으므로 위 analysis_id 로는 아무것도 다시
+    # 집을 수 없다. analysis_id 자체를 빼지 않는 이유는 그 필드가 필수라 소비자를
+    # 깨뜨리기 때문이고, 대신 재사용 불가를 여기서 명시한다. 이 표가 없으면
+    # 소비자가 그 id 를 쓰기 호출에 붙이고 → 쓰기 쪽이 "캐시에 없다"로 거절하고
+    # → 같은 분석을 다시 불러 같은 id 로 또 조기 종료하는 맴돌이가 생긴다.
+    analysis_id_reusable: bool = True
+    stop_reason: ReferenceAnalysisStopReason | None = None
+    predicted_seconds: float | None = Field(default=None, ge=0)
+    time_budget_seconds: float | None = Field(default=None, gt=0)
     row_breakpoints: tuple[float, ...] = Field(min_length=2, max_length=51)
     column_breakpoints: tuple[float, ...] = Field(min_length=2, max_length=51)
     draft_reference_layout: ReferenceLayoutBlock | None = None
+    # draft 를 내지 않는 응답(ordinary_layout)은 예산이 통째로 남는다. 그 자리를
+    # 비워 두면 소비자는 좌표 증거가 아예 없는 줄 알고 눈대중으로 그림을 자른다
+    # (실측: objects 254·text_regions 89 를 재 놓고 3,896 바이트만 보냈고,
+    # 소비자는 section 을 한 번도 부르지 않았다). 잰 값을 우선순위대로 여기에
+    # 채워 보낸다.
+    evidence: ReferenceEvidenceSample = Field(default_factory=ReferenceEvidenceSample)
     detail_sections: tuple[ReferenceDetailSection, ...]
     analysis_result_path: Path | None
     artifacts: tuple[ReferenceArtifact, ...]
     response_budget_bytes: int = Field(default=100_000, ge=1)
     response_size_bytes: int = Field(default=0, ge=0)
+    response_tokens_estimate: int = Field(default=0, ge=0)
+    """이 응답을 2-space pretty-print 했을 때의 대략적인 토큰 수.
+
+    이름이 estimate 인 것은 정말 어림이기 때문이다 — 실제 토크나이저를 돌리지
+    않고 UTF-8 바이트를 3으로 나눈다(정확한 토크나이저는 의존성을 늘린다).
+    실측에서 이 어림은 실제보다 큰 쪽으로 어긋난다(174,395바이트 응답의 실제
+    토큰이 43,585인데 어림은 58,131이었다). 예산을 지키는 쪽으로 틀리므로
+    이 값이 상한 아래면 실제도 아래다.
+
+    쓰는 법: 호출자 하네스의 출력 상한과 견줘 보면 된다. 이 값이 상한을 넘으면
+    응답이 잘려서 꼬리가 아예 닿지 않는다 — 실사례에서 43,585 토큰짜리 응답이
+    10,000 토큰 상한에 잘려 objects 254개와 text_regions 89개가 통째로
+    사라졌는데, 잘렸다는 사실 자체가 응답 안에 없어서 아무도 몰랐다.
+    """
+    paging_required: bool = False
+    """이 응답이 잰 것을 다 싣지 못했으니 section 을 불러야 한다는 표시.
+
+    omissions 가 비어 있지 않다는 말과 같지만, 불리언 하나로 두면 모델이
+    누락 목록을 훑지 않고도 기계적으로 판단할 수 있다. False 면 이 응답이
+    관측 전량이고 더 부를 것이 없다.
+    """
     omissions: tuple[ReferenceCompactOmission, ...] = ()
 
 
@@ -114,23 +245,521 @@ class ReferenceAnalysisDetail(ContractModel):
     items: tuple[JsonValue, ...]
 
 
+def _pretty_bytes(payload: JsonValue) -> int:
+    return len(
+        json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
+    )
+
+
+def _token_estimate(pretty_bytes: int) -> int:
+    # 올림한다. 어림이 예산을 지키는 쪽으로 틀리게 두는 편이 낫다.
+    return math.ceil(pretty_bytes / _BYTES_PER_TOKEN)
+
+
 def _with_response_size(
     result: CompactReferenceImageAnalysis,
 ) -> CompactReferenceImageAnalysis:
+    """자기 자신을 세는 보고 필드를 실제 값에 수렴시킨다.
+
+    response_size_bytes·response_tokens_estimate 는 응답 안에 적히는 값이라
+    자릿수가 늘면 응답도 커진다(3,896 → 99,412 는 한 자리). paging_required 도
+    "true"/"false" 로 길이가 다르다. 그래서 한 번에 맞지 않고, 값을 적고 다시
+    재기를 되풀이해 고정점을 찾는다.
+    """
     sized = result
     for _ in range(4):
-        encoded_size = len(sized.model_dump_json().encode("utf-8"))
-        if sized.response_size_bytes == encoded_size:
+        encoded = sized.model_dump_json()
+        encoded_size = len(encoded.encode("utf-8"))
+        tokens = _token_estimate(
+            _pretty_bytes(cast(JsonValue, json.loads(encoded)))
+        )
+        paging = bool(sized.omissions)
+        if (
+            sized.response_size_bytes == encoded_size
+            and sized.response_tokens_estimate == tokens
+            and sized.paging_required == paging
+        ):
             return sized
-        sized = sized.model_copy(update={"response_size_bytes": encoded_size})
+        sized = sized.model_copy(
+            update={
+                "response_size_bytes": encoded_size,
+                "response_tokens_estimate": tokens,
+                "paging_required": paging,
+            }
+        )
     return sized
+
+
+# 축을 싣는 차례와 각 축이 받는 예산 몫(천분율)이다.
+#
+# 예전에는 몫 없이 앞선 축부터 예산을 다 쓰고 처음 잘린 축에서 멈췄다. 예산이
+# 100,000바이트일 때는 그래도 뒤쪽까지 닿았지만, 토큰 예산으로 조이고 나면 앞의
+# 한 축이 전부를 먹고 뒤가 통째로 0이 된다. 그건 고치려던 실패 그 자체다 —
+# 실사례에서 objects 254개가 응답을 채우고 text_regions 89개가 하나도 실리지
+# 못했다. 그래서 축마다 제 몫을 먼저 떼어 준다.
+#
+# 앞 축이 제 몫을 다 쓰지 않으면 남은 만큼 뒤로 넘긴다. 그래서 몫은 상한이
+# 아니라 "최소한 이만큼은 이 축 것"이라는 바닥이고, 예산이 남으면 순서대로
+# 더 실린다. 어느 축이 왜 잘렸는지는 축마다 제 몫 안에서 잘리므로 여전히
+# omissions 하나로 답할 수 있다.
+#
+# 각 항목은 (축 이름, 그 축을 되받을 section, 천분율 몫) 이다.
+_EvidenceOrder = tuple[
+    tuple[ReferenceEvidenceAxis, ReferenceDetailSection, int], ...
+]
+_EVIDENCE_PRIORITY: Final[_EvidenceOrder] = (
+    # 팔레트가 먼저다. 접은 뒤라 줄 수가 적고, 색은 다른 축으로 대신 알 수 없다.
+    ("fills", "objects", 220),
+    # 스와치 배열은 fills 가 말하지 못하는 "몇 행 몇 열"을 준다. 낱개 면적으로는
+    # 순위에서 밀리는 칸들이라 묶음으로 실어야 닿는다.
+    #
+    # 몫을 170 에서 올린 것은 글자 띠에서 끊는 규칙이 들어오면서 한 배열이 두
+    # 조각으로 나뉘기 때문이다. 실사례에서 통짜 6칸(1,259+1,998=3,257바이트)이
+    # 2칸 선반과 4칸 선반이 되었는데, 170 이면 앞 조각만 실리고 정작 색이 네
+    # 개인 뒤 조각이 잘려 나간다 — 끊어 놓고 한쪽만 보내면 끊은 값어치가 없다.
+    #
+    # 크게 떼어도 손해가 없는 축이라 넉넉히 준다. 배열은 한 페이지에 많아야
+    # 서너 묶음이고(실사례 3), 남긴 몫은 곧바로 다음 축인 objects 로 넘어간다.
+    # 배열이 아예 없는 문서에서는 이 몫이 통째로 objects 것이 되어, 예전보다
+    # 오히려 더 많은 objects 가 실린다.
+    ("swatch_runs", "objects", 300),
+    # objects 는 254개 가운데 아홉 개를 싣던 축이라(3.5%) 몫을 내주어도 "표본"
+    # 이라는 성격이 달라지지 않는다. 크롭 후보는 몫과 무관하게 앞으로 당겨져
+    # 있어(_ranked_objects) 여기서 먼저 잘리는 것은 넓이 상위 몇 개다.
+    ("objects", "objects", 170),
+    ("text_regions", "text_regions", 190),
+    ("protected_gaps", "protected_gaps", 60),
+    # 타일은 24개 남짓인데 분석기가 실제로 잘라 둔 그림 경로를 준다. 모델이
+    # 스스로 눈대중 크롭을 뜨지 않게 하는 축이라, 1443개짜리 분할점 목록의
+    # 앞 6%보다 먼저 싣는다.
+    ("tiles", "tiles", 60),
+    # 몫이 0이라고 못 싣는 것은 아니다 — 앞 축이 남긴 자리를 넘겨받는다. 다만
+    # 1443개 중 5개, 535개 중 1개를 싣자고 큰 판을 밀어낼 값어치가 없어서 제
+    # 몫을 따로 떼지 않는다. 두 축 다 section 으로 온전히 받을 수 있다.
+    ("breakpoint_candidates", "breakpoint_candidates", 0),
+    ("visible_segments", "visible_segments", 0),
+)
+# 순위로 골라 싣는 축. 인라인 표본이 section 의 앞부분이 아니라서 이어받을
+# offset 주소가 없다(ReferenceCompactOmission.next_offset 참고).
+_RANKED_AXES: Final[frozenset[ReferenceEvidenceAxis]] = frozenset(
+    {"fills", "swatch_runs", "objects", "text_regions"}
+)
+# response_size_bytes 는 자기 자신을 세는 값이라 자릿수가 늘면 응답도 커진다
+# (3,896 → 99,412 은 한 자리). 그 되먹임이 예산을 넘기지 않게 남겨 두는 몫이다.
+# 토큰 어림과 paging_required 도 같은 되먹임이 있어 넉넉히 잡는다.
+_RESPONSE_SIZE_MARGIN: Final = 64
+# compact 응답의 진짜 상한. 호출자 하네스가 출력을 토큰으로 자르기 때문에
+# 바이트가 아니라 토큰이 구속조건이다(실측: 10,000 토큰 상한에 5회 잘렸다).
+# 9,000 으로 둔 것은 상한에 바싹 붙이면 하네스가 덧붙이는 머리말 몇 백 토큰에
+# 다시 잘리기 때문이다. 아래 나눗수가 실제 밀도보다 보수적이라 이 값은 곧
+# "실제 토큰도 9,000 을 넘지 않는다" 는 보장이 된다.
+_RESPONSE_TOKEN_BUDGET: Final = 9_000
+# 토큰 어림의 나눗수. 정확한 토크나이저를 쓰지 않는 대신 실측한 밀도보다 낮게
+# 잡아, 어림이 언제나 실제보다 크게(예산을 지키는 쪽으로) 틀리게 만든다.
+#
+# 3 이던 값을 내린 것은 그 어림이 낙관 쪽으로 틀렸기 때문이다. 실측 두 건:
+#
+#   - ria-574527d96dd1f8a8: pretty 174,395바이트 = 실제 43,585토큰 → 4.00 B/tok
+#   - ria-d2397ba31511fce3: pretty  23,778바이트 = 실제 10,294토큰 → 2.31 B/tok
+#
+# 두 번째 응답은 스스로 7,926토큰이라 신고하고도 하네스의 10,000 상한에 잘렸다.
+# 3 은 관측된 밀도의 아래쪽(2.31)보다 커서 어림이 실제를 과소평가한다. 2.1 은
+# 그 아래쪽보다 9% 더 낮아, 밀도가 관측 최저치보다 더 빽빽해져도 어림이 먼저
+# 걸린다. 예산 9,000 과 짝지으면 실제 토큰은 9,000 을 넘지 못한다.
+_BYTES_PER_TOKEN: Final = 2.1
+# pretty-print 에서 evidence 항목이 놓이는 깊이(root → evidence → 축 배열 →
+# 항목). 항목의 모든 줄이 이만큼 더 들여쓰인다.
+_EVIDENCE_INDENT_DEPTH: Final = 3
+# 글자 덩어리가 색견본 배열에 "붙어 있다" 고 볼 세로 여유(제 높이 대비).
+# 실사례에서 소제목은 배열 바로 위에 있어 제 상자만으로도 배열에 닿는다. 이
+# 여유는 라벨과 배열 사이에 한 줄 간격이 있는 흔한 배치까지 담으려는 것이다.
+_LABEL_RUN_MARGIN_RATIO: Final = 0.5
+# 라벨이 배열 위에 "얹혀 있다" 고 볼 가로 겹침(제 폭 대비).
+_LABEL_RUN_COVERAGE_RATIO: Final = 0.5
+# 인라인에 실어 보낼 크롭 경로의 총 개수. 한 건이 pretty-print 로 110바이트쯤
+# 되어서, 97개에 다 실으면 그것만으로 1만 바이트를 먹고 좌표가 통째로 밀려난다
+# (원래 앵커에서 경로를 벗겨 낸 이유가 그것이다). 6개면 실사례의 소제목(세
+# 조각)을 조각째 싣고도 다른 라벨 두엇이 더 들어가며 값은 700바이트 언저리다.
+_CROP_PATH_BUDGET: Final = 6
+# 좌표를 적는 자릿수. 이 모듈은 이미 breakpoint 를 6자리로 적고 있고(_cluster_
+# coordinates), 정규 좌표 1e-6 은 2613px 폭에서 0.0026px 라 화면 정밀도보다
+# 훨씬 잘다. 17자리를 그대로 실으면 같은 예산에 절반밖에 못 싣는다.
+_EVIDENCE_DIGITS: Final = 6
+
+
+def _rounded_box(box: NormalizedBox) -> NormalizedBox:
+    left = round(box.left, _EVIDENCE_DIGITS)
+    top = round(box.top, _EVIDENCE_DIGITS)
+    right = round(box.right, _EVIDENCE_DIGITS)
+    bottom = round(box.bottom, _EVIDENCE_DIGITS)
+    if left >= right or top >= bottom:
+        # 반올림이 넓이를 없앤 아주 얇은 상자는 잰 값 그대로 둔다.
+        return box
+    return NormalizedBox(left=left, top=top, right=right, bottom=bottom)
+
+
+def _rounded_segment(segment: ReferenceImageSegment) -> ReferenceImageSegment:
+    start_x = round(segment.start_x, _EVIDENCE_DIGITS)
+    start_y = round(segment.start_y, _EVIDENCE_DIGITS)
+    end_x = round(segment.end_x, _EVIDENCE_DIGITS)
+    end_y = round(segment.end_y, _EVIDENCE_DIGITS)
+    length = end_x - start_x if segment.orientation == "horizontal" else end_y - start_y
+    if length <= 0:
+        return segment
+    return segment.model_copy(
+        update={
+            "start_x": start_x,
+            "start_y": start_y,
+            "end_x": end_x,
+            "end_y": end_y,
+        }
+    )
+
+
+def _fill_tallies(
+    objects: tuple[ReferenceImageObject, ...],
+) -> tuple[ReferenceFillTally, ...]:
+    """채움색을 집계하고, 가까운 계조를 접어 넓이 순으로 낸다.
+
+    순서를 개수가 아니라 넓이로 바꾼 것이 D13 수리의 절반이다. 개수로 세면
+    안티에일리어싱 계조가 이긴다 — 잡티는 작은 조각이 여럿이라 (188,188,188)
+    한 색이 13개로 잡히는 반면, 먼셀 스와치는 한 색이 한 칸씩이라 1개다.
+    나머지 절반은 접기다. 접고 넓이로 세우면 149종이 29종으로 줄고 먼셀 6색이
+    상위 14위 안에 들어온다(실측).
+    """
+    counts: Counter[Rgb] = Counter()
+    areas: dict[Rgb, float] = {}
+    for item in objects:
+        if item.fill is None:
+            continue
+        counts[item.fill] += 1
+        areas[item.fill] = areas.get(item.fill, 0.0) + (
+            (item.bbox.right - item.bbox.left) * (item.bbox.bottom - item.bbox.top)
+        )
+    # 넓은 색이 무리의 대표가 된다. 대표는 평균이 아니라 실제 관측색이다.
+    ordered = sorted(areas, key=lambda fill: areas[fill], reverse=True)
+    representatives: list[Rgb] = []
+    absorbed: dict[Rgb, list[Rgb]] = {}
+    for fill in ordered:
+        for candidate in representatives:
+            if color_distance(fill, candidate) <= FILL_MERGE_DISTANCE:
+                absorbed[candidate].append(fill)
+                break
+        else:
+            representatives.append(fill)
+            absorbed[fill] = [fill]
+    tallies = [
+        ReferenceFillTally(
+            fill=representative,
+            object_count=sum(counts[fill] for fill in group),
+            # 겹친 객체가 있어 합이 1을 넘을 수 있다. 넓이 비율은 순위를 읽는
+            # 값이라 1에서 자른다.
+            area_ratio=round(
+                min(1.0, sum(areas[fill] for fill in group)),
+                _EVIDENCE_DIGITS,
+            ),
+            merged_fill_count=len(group),
+        )
+        for representative in representatives
+        if (group := absorbed[representative])
+    ]
+    return tuple(
+        sorted(tallies, key=lambda item: item.area_ratio, reverse=True)
+    )
+
+
+def _box_area(box: NormalizedBox) -> float:
+    return (box.right - box.left) * (box.bottom - box.top)
+
+
+def _ranked_objects(
+    analysis: ReferenceImageAnalysis,
+) -> tuple[ReferenceObjectSample, ...]:
+    """넓이 상위 object 에 크롭 후보를 더해 인라인 후보를 세운다.
+
+    넓이만으로 자르면 크롭 후보가 통째로 떨어진다 — 실사례의 크롭 후보 6개는
+    220x6~13px 라 254개 중 45위 언저리다. 이 응답이 색으로 되살릴 수 없다고
+    표시해 놓고 정작 그 좌표를 안 실으면 표시가 아무 쓸모가 없어서, 넓이
+    순위와 별개로 반드시 넣는다.
+    """
+    annotated = [
+        annotate_object(
+            item.model_copy(update={"bbox": _rounded_box(item.bbox)}),
+            analysis.text_regions,
+        )
+        for item in analysis.objects
+    ]
+    ordered = sorted(
+        annotated,
+        key=lambda item: _box_area(item.bbox),
+        reverse=True,
+    )
+    # 크롭 후보를 앞으로 당긴다. 뒤에 두면 몫이 모자랄 때 잘려 나간다.
+    return tuple(
+        sorted(ordered, key=lambda item: not item.crop_candidate)
+    )
+
+
+def _beside_a_run(
+    box: NormalizedBox,
+    runs: Sequence[ReferenceSwatchRun],
+) -> bool:
+    """이 글자 덩어리가 색견본 배열에 붙어 있는가.
+
+    세로로는 제 높이의 절반만큼 넓혀서 본다 — 배열의 제목·설명은 배열 바로
+    위나 아래에 앉지, 한 화면 건너에 앉지 않는다.
+
+    가로로는 "걸친다" 가 아니라 "얹혀 있다" 를 묻는다. 제 폭의 절반 넘게 배열
+    위아래에 들어와야 그 배열의 라벨이다. 그냥 겹침으로 물으면 페이지를 가로
+    지르는 큰 띠가 옆에 있는 작은 배열의 라벨로 둔갑한다(실사례: 폭 1.0 짜리
+    사진 띠가 폭 0.0295 짜리 얼룩 묶음에 3%만 걸치고도 라벨 자리를 차지했다).
+    실사례의 진짜 소제목은 제 폭의 85.5%가 배열 위에 얹혀 있다.
+    """
+    margin = (box.bottom - box.top) * _LABEL_RUN_MARGIN_RATIO
+    width = box.right - box.left
+    return any(
+        min(box.right, run.bbox.right) - max(box.left, run.bbox.left)
+        >= _LABEL_RUN_COVERAGE_RATIO * width
+        and run.bbox.top < box.bottom + margin
+        and box.top - margin < run.bbox.bottom
+        for run in runs
+    )
+
+
+def _ranked_text_anchors(
+    analysis: ReferenceImageAnalysis,
+    runs: Sequence[ReferenceSwatchRun],
+) -> tuple[ReferenceTextAnchorSample, ...]:
+    """끊긴 조각을 라벨로 붙이고, 배열 곁의 라벨을 앞으로 당겨 세운다.
+
+    면적만으로 세우면 배열을 설명하는 라벨이 통째로 떨어진다 — 실사례에서
+    소제목 "그래픽요소 적용" 은 세 조각으로 끊겨 저마다 97개 중 하위권이었고,
+    상위 18개만 실리는 예산에서 79개와 함께 잘려 나갔다. 그 결과 응답은 색견본
+    2칸과 4칸이 무엇을 위한 것인지 한 글자도 말하지 못했다.
+
+    당기는 방식은 objects 의 크롭 후보 확보와 같다(`_ranked_objects`). 면적
+    순위를 먼저 세운 뒤 안정 정렬로 배열 곁의 것만 앞으로 옮기므로, 확보되는
+    자리 말고는 순위가 그대로다.
+
+    붙이기가 지나칠 때가 있다는 것도 적어 둔다 — 같은 띠에서 서로 겹친 큰
+    영역들(실사례의 사진 띠 6개)은 한 앵커로 합쳐진다. 조각들은 section 에
+    그대로 남아 있고 `merged_from_count` 가 합친 수를 밝히므로, 잃는 것은
+    인라인 표본의 내부 경계뿐이고 얻는 것은 그만큼의 자리다.
+    """
+    ordered = sorted(
+        merge_text_fragments(
+            analysis.text_regions,
+            image_width=analysis.image_width,
+            image_height=analysis.image_height,
+        ),
+        key=lambda members: _box_area(merged_text_box(members)),
+        reverse=True,
+    )
+    hoisted = sorted(
+        ordered,
+        key=lambda members: not _beside_a_run(merged_text_box(members), runs),
+    )
+    anchors: list[ReferenceTextAnchorSample] = []
+    spent = 0
+    for members in hoisted:
+        # 경로를 실을 값어치가 있는 앵커: 배열 곁에 있거나, 조각을 붙여 만든
+        # 것이라 글자를 읽어야 뜻이 서는 라벨이다.
+        wanted = len(members) > 1 or _beside_a_run(merged_text_box(members), runs)
+        carried = wanted and spent + len(members) <= _CROP_PATH_BUDGET
+        if carried:
+            spent += len(members)
+        anchors.append(merged_text_anchor(members, with_crop_paths=carried))
+    return tuple(anchors)
+
+
+def _evidence_candidates(
+    analysis: ReferenceImageAnalysis,
+) -> dict[ReferenceEvidenceAxis, tuple[ContractModel, ...]]:
+    runs = detect_swatch_runs(
+        analysis.objects,
+        image_width=analysis.image_width,
+        image_height=analysis.image_height,
+        text_regions=analysis.text_regions,
+    )
+    return {
+        "fills": _fill_tallies(analysis.objects),
+        "swatch_runs": runs,
+        "objects": _ranked_objects(analysis),
+        "text_regions": _ranked_text_anchors(analysis, runs),
+        "protected_gaps": tuple(
+            item.model_copy(update={"bbox": _rounded_box(item.bbox)})
+            for item in analysis.protected_gaps
+        ),
+        "breakpoint_candidates": tuple(
+            item.model_copy(update={"position": round(item.position, _EVIDENCE_DIGITS)})
+            for item in analysis.breakpoint_candidates
+        ),
+        "tiles": tuple(
+            item.model_copy(update={"bbox": _rounded_box(item.bbox)})
+            for item in analysis.tiles
+        ),
+        "visible_segments": tuple(
+            _rounded_segment(item) for item in analysis.visible_segments
+        ),
+    }
+
+
+def _omission(
+    axis: ReferenceEvidenceAxis,
+    section: ReferenceDetailSection,
+    omitted_count: int,
+    next_offset: int | None,
+) -> ReferenceCompactOmission:
+    return ReferenceCompactOmission(
+        section=section,
+        omitted_count=omitted_count,
+        axis=axis,
+        # 골라 실은 축은 이어받을 주소가 없다.
+        next_offset=None if axis in _RANKED_AXES else next_offset,
+    )
+
+
+def _item_cost(item: ContractModel) -> int:
+    """항목 하나가 pretty-print 응답에서 차지하는 바이트.
+
+    예산이 토큰이고 토큰 어림이 pretty-print 바이트에서 나오므로, 싣고 말고를
+    정하는 자도 같은 자여야 한다. compact 바이트로 재면 값이 어긋난다 —
+    pretty-print 는 스칼라마다 줄을 바꾸고 들여쓰기를 붙여서 같은 항목이
+    1.7배까지 커진다(실측: 99,912 → 174,395).
+    """
+    text = json.dumps(
+        cast(JsonValue, json.loads(item.model_dump_json())),
+        indent=2,
+        ensure_ascii=False,
+    )
+    lines = text.count("\n") + 1
+    # 배열 안 항목이라 모든 줄이 깊이만큼 더 들여쓰이고, 뒤에 ",\n" 이 붙는다.
+    return (
+        len(text.encode("utf-8")) + lines * 2 * _EVIDENCE_INDENT_DEPTH + 2
+    )
+
+
+def _pack_evidence(
+    candidates: dict[ReferenceEvidenceAxis, tuple[ContractModel, ...]],
+    headroom: int,
+) -> tuple[
+    dict[str, tuple[ContractModel, ...]],
+    list[ReferenceCompactOmission],
+]:
+    """축마다 제 몫 안에서 앞에서부터 싣고, 남은 몫은 뒤로 넘긴다."""
+    carried: dict[str, tuple[ContractModel, ...]] = {}
+    omissions: list[ReferenceCompactOmission] = []
+    total_share = sum(share for _, _, share in _EVIDENCE_PRIORITY)
+    spare = 0
+    for axis, section, share in _EVIDENCE_PRIORITY:
+        items = candidates[axis]
+        allowance = max(0, headroom) * share // total_share + spare
+        kept = 0
+        for item in items:
+            cost = _item_cost(item)
+            if cost > allowance:
+                break
+            allowance -= cost
+            kept += 1
+        spare = allowance
+        if kept:
+            carried[axis] = items[:kept]
+        if kept < len(items):
+            omissions.append(_omission(axis, section, len(items) - kept, kept))
+    return carried, omissions
+
+
+def _omission_cost(
+    existing: int,
+    added: Sequence[ReferenceCompactOmission],
+) -> int:
+    if not added:
+        return 0
+    # 누락 신고도 pretty-print 로 실려 나가므로 같은 자로 잰다. 신고는
+    # evidence 항목보다 한 단계 얕다(root → omissions → 항목).
+    return sum(_item_cost(item) for item in added) - (0 if existing else 1)
+
+
+def fill_compact_evidence(
+    result: CompactReferenceImageAnalysis,
+    analysis: ReferenceImageAnalysis,
+) -> CompactReferenceImageAnalysis:
+    """남은 예산을 잰 값으로 채우고, 못 실은 축을 그대로 신고한다."""
+    if result.draft_reference_layout is not None or not result.analysis_complete:
+        # 초안을 낸 응답은 그 초안이 이미 예산의 임자다. 조기 종료 응답은
+        # 캐시가 없어 되받을 section 자체가 없다. 둘 다 손대지 않는다.
+        return result
+    candidates = _evidence_candidates(analysis)
+    base = _with_response_size(
+        result.model_copy(update={"evidence": ReferenceEvidenceSample()})
+    )
+    # 예산은 토큰이고 항목 값도 pretty-print 바이트라, 남은 자리도 같은 자로
+    # 잰다. 바이트 예산(response_budget_bytes)은 pretty 가 compact 보다 언제나
+    # 크므로 토큰 예산을 지키면 저절로 지켜진다.
+    headroom = (
+        math.floor(_RESPONSE_TOKEN_BUDGET * _BYTES_PER_TOKEN)
+        - _pretty_bytes(cast(JsonValue, json.loads(base.model_dump_json())))
+        - _RESPONSE_SIZE_MARGIN
+    )
+    # 누락 신고 자체도 응답 안에 들어가므로 그 몫을 먼저 떼어 놓는다. 떼는 몫이
+    # 커지면 싣는 양이 줄고, 줄면 신고가 늘 수는 있어도 주는 일은 없어서 위로만
+    # 수렴한다. 이 몫을 빼먹으면 채우기가 예산을 300바이트 넘겨(실측) 아래
+    # enforce 가 축 하나를 통째로 내리는 낭비가 난다.
+    carried: dict[str, tuple[ContractModel, ...]] = {}
+    added: list[ReferenceCompactOmission] = []
+    reserved = 0
+    for _ in range(4):
+        carried, added = _pack_evidence(candidates, headroom - reserved)
+        cost = _omission_cost(len(base.omissions), added)
+        if cost <= reserved:
+            break
+        reserved = cost
+    return _with_response_size(
+        base.model_copy(
+            update={
+                "evidence": ReferenceEvidenceSample.model_validate(carried),
+                "omissions": (*base.omissions, *added),
+            }
+        )
+    )
+
+
+def _drop_evidence_axis(
+    bounded: CompactReferenceImageAnalysis,
+    axis: ReferenceEvidenceAxis,
+    section: ReferenceDetailSection,
+) -> CompactReferenceImageAnalysis:
+    carried = cast(tuple[ContractModel, ...], getattr(bounded.evidence, axis))
+    already = sum(item.omitted_count for item in bounded.omissions if item.axis == axis)
+    kept = [item for item in bounded.omissions if item.axis != axis]
+    kept.append(_omission(axis, section, len(carried) + already, 0))
+    return _with_response_size(
+        bounded.model_copy(
+            update={
+                "evidence": bounded.evidence.model_copy(update={axis: ()}),
+                "omissions": tuple(kept),
+            }
+        )
+    )
+
+
+def _within_budget(result: CompactReferenceImageAnalysis) -> bool:
+    """바이트 예산과 토큰 예산을 둘 다 지켰는가.
+
+    토큰이 실제 구속조건이고 바이트는 옛 계약이라 둘 다 본다. 토큰 쪽이 거의
+    언제나 먼저 걸린다 — pretty-print 가 compact 보다 1.7배 커서다.
+    """
+    return (
+        result.response_size_bytes <= result.response_budget_bytes
+        and result.response_tokens_estimate <= _RESPONSE_TOKEN_BUDGET
+    )
 
 
 def enforce_compact_response_budget(
     result: CompactReferenceImageAnalysis,
 ) -> CompactReferenceImageAnalysis:
     bounded = _with_response_size(result)
-    if bounded.response_size_bytes <= bounded.response_budget_bytes:
+    if _within_budget(bounded):
         return bounded
     omissions = list(bounded.omissions)
     draft = bounded.draft_reference_layout
@@ -138,6 +767,7 @@ def enforce_compact_response_budget(
         omissions.append(
             ReferenceCompactOmission(
                 section="draft_reference_layout",
+                axis="draft_reference_layout",
                 omitted_count=max(
                     1,
                     len(draft.visible_edges)
@@ -155,13 +785,20 @@ def enforce_compact_response_budget(
                 }
             )
         )
-    if (
-        bounded.response_size_bytes > bounded.response_budget_bytes
-        and bounded.artifacts
-    ):
+    # 증거는 되받을 자리(section)가 있는 축이라 산출물 경로보다 먼저 내린다 —
+    # 경로를 먼저 지우면 되받는 길 자체가 사라진다. 낮은 우선순위부터 통째로
+    # 내리고, 내린 만큼을 omissions 에 합산해 총수를 정확히 유지한다.
+    for axis, section, _ in reversed(_EVIDENCE_PRIORITY):
+        if _within_budget(bounded):
+            break
+        if getattr(bounded.evidence, axis):
+            bounded = _drop_evidence_axis(bounded, axis, section)
+    omissions = list(bounded.omissions)
+    if not _within_budget(bounded) and bounded.artifacts:
         omissions.append(
             ReferenceCompactOmission(
                 section="artifacts",
+                axis="artifacts",
                 omitted_count=len(bounded.artifacts),
             )
         )
@@ -173,16 +810,14 @@ def enforce_compact_response_budget(
                 }
             )
         )
-    if (
-        bounded.response_size_bytes > bounded.response_budget_bytes
-        and (
-            bounded.source_image is not None
-            or bounded.analysis_result_path is not None
-        )
+    if not _within_budget(bounded) and (
+        bounded.source_image is not None
+        or bounded.analysis_result_path is not None
     ):
         omissions.append(
             ReferenceCompactOmission(
                 section="artifacts",
+                axis="artifacts",
                 omitted_count=sum(
                     path is not None
                     for path in (
@@ -201,8 +836,8 @@ def enforce_compact_response_budget(
                 }
             )
         )
-    if bounded.response_size_bytes > bounded.response_budget_bytes:
-        raise ValueError("compact reference image response exceeds UTF-8 byte budget")
+    if not _within_budget(bounded):
+        raise ValueError("compact reference image response exceeds its budget")
     return bounded
 
 
@@ -645,6 +1280,35 @@ def _compact_artifacts(
     )
 
 
+def _stopped_reason_codes(analysis: ReferenceImageAnalysis) -> tuple[str, ...]:
+    """조기 종료 사유를 잰 값만으로 말한다.
+
+    여기에 TEXTURE_DOMINANT 를 함께 달던 시절이 있었다. 사전 게이트가 시간을
+    많이 쓸 것 같다고 예측했다는 사실만으로 "이 그림은 질감이 지배한다"고
+    단정한 것인데, 그 단정을 받쳐 줄 관측이 게이트 안에 없다. 게이트가 실제로
+    재는 값(후보 선 수·표본 스캔 시간·외삽 선분 수)을 8종 픽스처에서 재 보면
+    방향이 오히려 뒤집힌다 — 후보 선 하나당 선분 수가 잔모자이크·사진 같은
+    질감에서 0.00~0.86 인데, 선화인 1400x1000 빗금은 24.73 이고 2400x3300
+    글줄은 2.40 이다. 후보 선 밀도는 여덟 종 모두 0.85~1.00 으로 붙어 있어
+    아무것도 가르지 못한다. 질감 지배를 가리키는 관측이 없으므로 그 코드를
+    붙이지 않는다: 예측이 마감을 넘겼다는 사실만 중립적으로 낸다.
+    """
+    codes = [
+        "ANALYSIS_STOPPED_EARLY",
+        "READ_IMAGE_DIRECTLY",
+        # 이 응답의 analysis_id 는 캐시에 없어 다시 집을 수 없다. 그 id 를 쓰기
+        # 호출에 붙이면 거절당하고, 같은 분석을 되풀이해도 같은 id 로 다시 조기
+        # 종료할 뿐이다 — 여기서 끊는다.
+        "ANALYSIS_ID_NOT_REUSABLE",
+    ]
+    if analysis.stop_reason == "predicted_over_deadline":
+        codes.append("PREDICTED_OVER_DEADLINE")
+    elif analysis.stop_reason == "time_budget_exhausted":
+        codes.append("TIME_BUDGET_EXHAUSTED")
+    codes.append("FULL_SCAN_AVAILABLE_ON_REQUEST")
+    return tuple(codes)
+
+
 def _build_compact_reference_image_analysis(
     analysis: ReferenceImageAnalysis,
 ) -> CompactReferenceImageAnalysis:
@@ -694,6 +1358,13 @@ def _build_compact_reference_image_analysis(
     )
     draft = _draft_layout(analysis, dominant, rows, columns) if dominant_grid else None
     result_path = analysis.overlay_path.parent / "result.json"
+    if not analysis.analysis_complete:
+        # 미완 분석은 캐시에 없다. 집을 수 없는 경로와 산출물을 광고하지 않고,
+        # 사유 코드로 모델 직접 판독을 권한다.
+        mode = "ordinary_layout"
+        reasons = list(_stopped_reason_codes(analysis))
+        draft = None
+        result_path = None
     return CompactReferenceImageAnalysis(
         analysis_id=analysis.analysis_id,
         analyzer_version=analysis.analyzer_version,
@@ -716,6 +1387,11 @@ def _build_compact_reference_image_analysis(
         structure=structure,
         recommended_execution_mode=mode,
         reason_codes=tuple(reasons),
+        analysis_complete=analysis.analysis_complete,
+        analysis_id_reusable=analysis.analysis_complete,
+        stop_reason=analysis.stop_reason,
+        predicted_seconds=analysis.predicted_seconds,
+        time_budget_seconds=analysis.time_budget_seconds,
         row_breakpoints=rows,
         column_breakpoints=columns,
         draft_reference_layout=draft,
@@ -738,7 +1414,10 @@ def compact_reference_image_analysis(
     analysis: ReferenceImageAnalysis,
 ) -> CompactReferenceImageAnalysis:
     return enforce_compact_response_budget(
-        _build_compact_reference_image_analysis(analysis)
+        fill_compact_evidence(
+            _build_compact_reference_image_analysis(analysis),
+            analysis,
+        )
     )
 
 

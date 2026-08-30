@@ -123,9 +123,7 @@ def _active_target(
             else ()
         ),
         cell_address_error=(
-            selected_cell_address_error.strip() or None
-            if base_mode == 3
-            else None
+            selected_cell_address_error.strip() or None if base_mode == 3 else None
         ),
     )
 
@@ -164,6 +162,10 @@ def inspect_native_context(
             indentation_hwpunit=paragraph.indentation_hwpunit,
             previous_spacing_hwpunit=paragraph.previous_spacing_hwpunit,
             next_spacing_hwpunit=paragraph.next_spacing_hwpunit,
+            heading_type=paragraph.heading_type,
+            heading_level=paragraph.heading_level,
+            marker_is_automatic=paragraph.marker_is_automatic,
+            manual_marker_value=paragraph.manual_marker_value,
         ),
         page_setup=PageSetup(
             paper_width_mm=_number(page_setup, "PaperWidth"),
@@ -231,9 +233,13 @@ def inspect_styles(
                 if not selected:
                     selected = hwp.MoveSelLeft()
                     guard()
+            if not selected:
+                raise HwpLiveError(
+                    "한컴 문서 스타일 목록을 읽기 위한 선택 영역을 만들지 못했습니다"
+                )
             style_xml = hwp.get_text_file(
                 format="HWPML2X",
-                option="saveblock:true" if selected else "",
+                option="saveblock:true",
             )
             guard()
     finally:
@@ -263,11 +269,7 @@ def inspect_styles(
         guard()
     current_modified = hwp.IsModified
     guard()
-    if (
-        restored_selection != selection
-        or caret_moved
-        or current_modified != modified
-    ):
+    if restored_selection != selection or caret_moved or current_modified != modified:
         raise HwpLiveError("한컴 문서 스타일을 읽는 동안 문서 상태가 바뀌었습니다")
     if not style_xml:
         raise HwpLiveError("한컴 문서 스타일 메모리 응답이 비어 있습니다")

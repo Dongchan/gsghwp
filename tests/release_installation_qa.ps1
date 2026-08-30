@@ -88,27 +88,15 @@ $manifest = Get-Content -LiteralPath (Join-Path $pluginRoot "compatibility-manif
 $mcp = Get-Content -LiteralPath (Join-Path $pluginRoot ".mcp.json") -Raw -Encoding UTF8 |
     ConvertFrom-Json
 $projectMetadata = Get-Content -LiteralPath (Join-Path $pluginRoot "pyproject.toml") -Raw -Encoding UTF8
-$pluginVersion = [string]$plugin.version
-$projectBlock = [regex]::Match(
-    $projectMetadata,
-    '(?ms)^\[project\]\s*(?<body>.*?)(?=^\[|\z)'
-)
-$projectVersionMatch = [regex]::Match(
-    $projectBlock.Groups["body"].Value,
-    '(?m)^version\s*=\s*"(?<version>[^"]+)"\s*$'
-)
 
 Assert-Equal -Expected "gsg-hwp" -Actual $plugin.name -Message "Plugin name mismatch"
-Assert-True -Condition ($pluginVersion -match '^\d+\.\d+\.\d+$') `
-    -Message "Plugin version must use major.minor.patch"
+Assert-Equal -Expected $manifest.distribution -Actual $plugin.version `
+    -Message "Plugin version mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.author.name -Message "Plugin author mismatch"
 Assert-Equal -Expected "inodesign" -Actual $plugin.interface.developerName `
     -Message "Plugin developer metadata mismatch"
-Assert-Equal -Expected $pluginVersion -Actual ([string]$manifest.distribution) `
-    -Message "Plugin and compatibility manifest versions differ"
-Assert-True -Condition (
-    [string]$manifest.source_version -match '^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
-) -Message "Source version format mismatch"
+Assert-True -Condition ($manifest.source_version -ne $manifest.distribution) `
+    -Message "Source and public distribution versions must remain distinct"
 Assert-Equal -Expected "inodesign" -Actual $manifest.developer -Message "Manifest developer mismatch"
 Assert-Equal -Expected "MIT" -Actual $manifest.license -Message "Distribution license mismatch"
 Assert-Equal -Expected "LICENSE" -Actual $manifest.license_file -Message "License file metadata mismatch"
@@ -132,21 +120,24 @@ $pluginNoticesHash = (Get-FileHash -LiteralPath (Join-Path $pluginRoot "THIRD_PA
     -Algorithm SHA256).Hash
 Assert-Equal -Expected $rootNoticesHash -Actual $pluginNoticesHash `
     -Message "Root and plugin notice copies differ"
-Assert-True -Condition $projectBlock.Success -Message "Python project metadata is missing"
-Assert-True -Condition $projectVersionMatch.Success -Message "Python project version is missing"
-Assert-Equal -Expected $projectVersionMatch.Groups["version"].Value `
-    -Actual ([string]$manifest.mcp) -Message "MCP and Python project versions differ"
-Assert-True -Condition (
-    [string]$manifest.native_bridge -match '^\d+\.\d+\.\d+$'
-) -Message "Native bridge version format mismatch"
-Assert-Equal -Expected 44 -Actual @($manifest.production_tools).Count `
+Assert-True -Condition ($projectMetadata -match '(?m)^version = "([^"]+)"\s*$') `
+    -Message "Python project version metadata is missing"
+Assert-Equal -Expected $Matches[1] -Actual $manifest.mcp -Message "MCP version mismatch"
+Assert-True -Condition ([regex]::IsMatch(
+    [string]$manifest.native_bridge,
+    '^\d+\.\d+\.\d+$'
+)) -Message "Native bridge version mismatch"
+Assert-Equal -Expected $manifest.tool_catalogs.worker_tools.count `
+    -Actual @($manifest.production_tools).Count `
     -Message "Production tool count mismatch"
 Assert-True -Condition ($manifest.production_tools -contains "hwp_insert_layout") `
     -Message "Mid-document layout tool is missing"
 Assert-True -Condition ($manifest.production_tools -contains "hwp_list_window_states") `
     -Message "Window-state tool is missing"
-Assert-Equal -Expected 45 -Actual $manifest.exposed_tool_count -Message "Exposed tool count mismatch"
-Assert-Equal -Expected 62 -Actual $manifest.qa_tool_count -Message "QA tool count mismatch"
+Assert-Equal -Expected $manifest.tool_catalogs.host_visible_tools.count `
+    -Actual $manifest.exposed_tool_count -Message "Exposed tool count mismatch"
+Assert-Equal -Expected $manifest.tool_catalogs.qa_tools.count `
+    -Actual $manifest.qa_tool_count -Message "QA tool count mismatch"
 Assert-Equal -Expected "hwp_reload" -Actual $manifest.runtime_tools[0] `
     -Message "Runtime reload tool mismatch"
 Assert-Equal -Expected 1452 -Actual $manifest.official_api_catalog_entries `
@@ -276,7 +267,9 @@ $automationModulesKey = "$registryRoot\AutomationModules"
 $localAppData = Join-Path ([System.IO.Path]::GetTempPath()) "GsgHwpReleaseQa-$testId"
 $paths = Get-GsgHwpPaths -PackageRoot $pluginRoot -LocalAppData $localAppData
 Assert-Equal -Expected (
-    Join-Path $localAppData ("GSG_HWP\runtime\{0}\.venv" -f $pluginVersion)
+    Join-Path $localAppData (
+        "GSG_HWP\runtime\{0}\.venv" -f $manifest.distribution
+    )
 ) -Actual $paths.RuntimeEnvironment `
     -Message "Runtime must use a distribution-specific .venv"
 $originalDll = [byte[]](10, 20, 30, 40)
@@ -314,7 +307,8 @@ try {
         $automationKey.Dispose()
     }
 
-    $installResult = Install-GsgHwpNative -Paths $paths -PackageVersion $pluginVersion `
+    $installResult = Install-GsgHwpNative -Paths $paths `
+        -PackageVersion $manifest.distribution `
         -ModulesKeyPath $modulesKey -AutomationModulesKeyPath $automationModulesKey
     Assert-True -Condition $installResult.Changed -Message "Native install did not report a change"
     Assert-True -Condition (Test-Path -LiteralPath $paths.ActiveState) `

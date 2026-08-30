@@ -84,9 +84,12 @@ class HwpAppendLayout(ContractModel):
 class HwpStyleCopyInput(ContractModel):
     source_position: RecipePosition
     target_position: RecipePosition
-    style_copy_type: Literal[0, 1, 2] = Field(
+    style_copy_type: Literal[0, 1, 2, 3, 4] = Field(
         default=2,
-        description="0은 글자 모양, 1은 문단 모양, 2는 둘 다 복사합니다.",
+        description=(
+            "0은 글자 모양, 1은 문단 모양, 2는 둘 다, "
+            "3은 글자 스타일, 4는 문단 스타일을 복사합니다."
+        ),
     )
 
 

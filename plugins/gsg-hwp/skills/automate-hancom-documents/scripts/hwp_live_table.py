@@ -116,6 +116,11 @@ def insert_table(
         left_margin=block.left_margin_mm,
         right_margin=block.right_margin_mm,
         indentation=block.indentation_mm,
+        # Lead only. The native path also pins this paragraph's line to 100%
+        # and restores it with the base style afterwards; this COM fallback
+        # has no style id to restore from, and an unrestored pin would be
+        # inherited by every cell paragraph below it.
+        before=block.plan_lead_mm,
     )
     guard()
     parent_position = hwp.get_pos()

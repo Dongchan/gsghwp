@@ -76,14 +76,27 @@ class _TerminalEntry:
 
 
 def _is_protected(record: JournalRecord) -> bool:
-    if record.state in {"accepted", "executing"}:
-        return True
-    if record.partial_mutation is True:
-        return True
-    return (
-        record.failure_code is not None
-        and "reconcile_required" in record.failure_code
-    )
+    """아직 끝나지 않은 작업만 지우기에서 뺀다.
+
+    지우면 안 되는 것은 "진행 중"이다. `accepted`/`executing` 은 종단 결과가
+    아니라 살아 있는 작업의 자리표라서, 지우면 그 작업이 자기 기록을 잃는다.
+
+    끝난 것은 전부 한도 안에서 늙어 사라진다 — 실패도, 수습이 필요한 실패도
+    마찬가지다. 예전에는 `partial_mutation is True` 이거나 `failure_code` 에
+    "reconcile_required" 가 든 레코드를 TTL(30일)·파일 수(10,000)·용량(64MiB)
+    **어느 한도로도** 지우지 않았다. 그 보호를 푸는 경로는
+    `record_save_reconciliation` 이 `failure_code=None` 으로 지우는 한 가지뿐이고
+    (`mark_failed` 계열은 코드를 지우지 않는다), 그 경로를 타지 못한 레코드는
+    디스크에 영원히 남았다. 두 조건은 실제로 같은 레코드에 함께 붙는다:
+    `with_result` 가 `partial_mutation` 을 결과에서 그대로 받아 오고, 부분 변경을
+    보고하는 작업은 `reconcile_required` 도 함께 세운다.
+
+    공개 계약이 이미 이 답을 써 놓았다(SKILL.md): 완료 결과는 기본 30일까지
+    재생 가능하고, 종단 저널이 10,000건이나 64MiB 를 넘으면 오래된 종단 결과부터
+    쫓아낸다. 예외는 적혀 있지 않다. "아직 수습 안 된 최근 건"은 최근이라는
+    이유로 이미 지켜진다 — TTL 을 넘지 않았고, 한도 축출은 오래된 것부터다.
+    """
+    return record.state in {"accepted", "executing"}
 
 
 def _read_terminal_entry(path: Path) -> tuple[_TerminalEntry | None, bool]:

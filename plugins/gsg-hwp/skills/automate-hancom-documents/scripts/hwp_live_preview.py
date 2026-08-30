@@ -14,7 +14,11 @@ from hwp_errors import HwpLiveError
 from hwp_live_api import SelectionRange
 from hwp_live_contract import PreviewResult
 from hwp_live_native_action_models import NativeDetailedInspection
-from hwp_live_native_batch import inspect_native_structure, read_native_snapshot
+from hwp_live_native_batch import (
+    inspect_native_structure,
+    native_foreground_guard,
+    read_native_snapshot,
+)
 from hwp_live_native_format_inputs import table_cell_coordinate
 from hwp_live_native_table_topology import table_topology
 from hwp_object_control_types import (
@@ -307,6 +311,34 @@ def _page_has_visible_structure(detail: NativeDetailedInspection) -> bool:
 
 
 def render_page(
+    candidate: PreviewCandidate,
+    hwp: PreviewApplication,
+    page: int,
+    dpi: int,
+    session_id: str,
+    guard: Callable[[], None],
+    *,
+    directory: Path | None = None,
+) -> PreviewResult:
+    # 렌더는 파이썬이 한컴 COM을 직접 때리는 경로다. 네이티브 Invoke를 거치지
+    # 않으니 BatchAutomation::Invoke의 가드가 이 구간을 덮지 못한다. 그래서
+    # 브리지에 가드를 열고 닫으라고만 시킨다. 무장할지, 활성화를 거부할지,
+    # 사용자가 직접 올린 창인지, 모달이면 어떻게 할지는 전부 C++ 쪽 판단이다.
+    #
+    # 가드가 실패해도 렌더는 그대로 진행된다. 포커스 때문에 미리보기를 막지 않는다.
+    with native_foreground_guard(candidate.window_handle):
+        return _render_page(
+            candidate,
+            hwp,
+            page,
+            dpi,
+            session_id,
+            guard,
+            directory=directory,
+        )
+
+
+def _render_page(
     candidate: PreviewCandidate,
     hwp: PreviewApplication,
     page: int,

@@ -806,9 +806,21 @@ public:
     }
 
     bool GoToCell(const LONG row, const LONG column) override {
+        if (context_->topology.Empty() && !BuildCellTopology(context_)) {
+            return false;
+        }
+        const hancom::inspection::CellTopologyCell* const owner =
+            context_->topology.OwnerAt(row + 1, column + 1);
+        if (owner == nullptr) {
+            return SetError(
+                context_->result,
+                L"CELL_NOT_FOUND",
+                ReferenceCellAddress(row, column),
+                L"logical cell is not covered by the current table topology");
+        }
         return ::hancom::actions::detail::GoToCell(
             context_,
-            ReferenceCellAddress(row, column));
+            owner->address);
     }
 
     bool Run(

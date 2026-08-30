@@ -11,6 +11,11 @@ class ResolvedWorkflowTable:
     table: StructureTable | None
     table_index: int | None
     candidates: tuple[WorkflowTargetCandidate, ...]
+    # How many tables the ambiguity was actually between. ``candidates`` is
+    # capped so the response stays small, so its length is a property of the
+    # cap and not of the document. A caller told "3 candidates" when the page
+    # holds seven stops looking at the other four.
+    observed_total: int = 0
 
 
 def workflow_page(target: HwpOperateTarget | None) -> int:
@@ -96,4 +101,5 @@ def resolve_workflow_table(
             workflow_table_candidate(table, index, snapshot.page)
             for index, table in source[:3]
         ),
+        len(source),
     )

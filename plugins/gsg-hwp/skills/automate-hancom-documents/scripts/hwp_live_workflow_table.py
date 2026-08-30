@@ -29,6 +29,7 @@ from hwp_operation_contract import (
     HwpOperateTarget,
 )
 from hwp_table_format_inference import (
+    ContextualCellEdit,
     FormatRevertedCell,
     infer_table_cell_edits as infer_table_cell_edits,
     plan_table_cell_edits,
@@ -51,6 +52,8 @@ _OBSERVED_SAFE_TABLE_CELL_COUNT: Final = 100
 _OBSERVED_SAFE_WORST_MICROSECONDS: Final = 24_155_000
 # 위 실측 표본은 topology 를 셀마다 다시 만들던 시절의 것이다. 그때 100셀 채움의
 # topology 작업량은 실행 1회 + 편집 셀마다 준비 1회로 100 * (100 + 1) 이었다.
+# 그 재조사는 사라졌으므로 이 표본은 이제 과대평가다. 즉 예산은 안전한 쪽으로
+# 틀렸고, 좁히려면 새 실측이 필요하다.
 _OBSERVED_SAFE_TOPOLOGY_WORK: Final = _OBSERVED_SAFE_TABLE_CELL_COUNT * (
     _OBSERVED_SAFE_EDIT_COUNT + 1
 )
@@ -239,6 +242,47 @@ def table_fill_contract_conflict(
     return None
 
 
+def _replaces_whole_cell(edit: ContextualCellEdit) -> bool:
+    if len(edit.patches) != 1:
+        return False
+    patch = edit.patches[0]
+    return (
+        patch.expected_text == edit.expected_text
+        and patch.replacement == edit.replacement
+        and patch.occurrence == 1
+    )
+
+
+def _literal_cell_patch(
+    control_id: str,
+    address: str,
+    expected_text: str,
+    replacement: str,
+    *,
+    preserve_format: bool,
+) -> TextPatchCommand | None:
+    """관측한 셀 텍스트 전체를 좁은 text.patch 범위로 바꿀 수 있으면 만든다.
+
+    CELL patch는 관측 문자열의 시작·끝 위치를 계산해 그 텍스트 범위만 다시
+    선택한다. 여러 문단도 같은 HWP list 안의 두 문단 좌표로 표현할 수 있다.
+    빈 기존 셀만은 시작과 끝이 같아 SelectTextRange가 TEXT_RANGE로 거절하므로
+    기존 SET_CELL_TEXT 삽입 경로를 유지한다.
+    """
+
+    if not expected_text:
+        return None
+    return TextPatchCommand(
+        target="table_cell",
+        expected_text=expected_text,
+        replacement=replacement,
+        occurrence=1,
+        match_case=True,
+        table_instance_id=control_id,
+        cell_address=address,
+        preserve_format=preserve_format,
+    )
+
+
 def prepare_table_fill(
     candidate: HwpDocumentCandidate,
     table: StructureTable,
@@ -280,14 +324,21 @@ def prepare_table_fill(
         command_groups = tuple(
             (
                 (
-                    SetCellTextCommand(
+                    _literal_cell_patch(
+                        control_id,
+                        edit.address,
+                        edit.expected_text,
+                        edit.replacement,
+                        preserve_format=policy.preserve_character_style,
+                    )
+                    or SetCellTextCommand(
                         edit.address,
                         edit.replacement,
                         expected_text=edit.expected_text,
                         preserve_style=policy.preserve_character_style,
                     ),
                 )
-                if not edit.expected_text
+                if not edit.expected_text or _replaces_whole_cell(edit)
                 else tuple(
                     TextPatchCommand(
                         target="table_cell",
@@ -306,29 +357,36 @@ def prepare_table_fill(
         )
         edit_commands = tuple(command for group in command_groups for command in group)
         native_protocol: Literal[9, 12] = 12
-    elif policy.preserve_character_style:
-        # 표시 문자열은 준 그대로 쓰되 글꼴·크기·색은 살린다. 이 조합이
-        # `EL.+39.3m` 을 `39.3` 으로 바꾸면서 서식을 잃지 않는 경로다.
-        # expected_text 를 실어 STALE_CELL_TEXT 검사도 그대로 남긴다.
+    else:
         command_groups = tuple(
             (
-                SetCellTextCommand(
+                _literal_cell_patch(
+                    control_id,
+                    address,
+                    _owner_cell(cells, address).text,
+                    value,
+                    preserve_format=policy.preserve_character_style,
+                )
+                or SetCellTextCommand(
                     address,
                     value,
-                    expected_text=_owner_cell(cells, address).text,
-                    preserve_style=True,
+                    expected_text=(
+                        _owner_cell(cells, address).text
+                        if policy.preserve_character_style
+                        else None
+                    ),
+                    preserve_style=policy.preserve_character_style,
                 ),
             )
             for address, value in replacements
         )
         edit_commands = tuple(group[0] for group in command_groups)
-        native_protocol = 12
-    else:
-        command_groups = tuple(
-            (SetCellTextCommand(address, value),) for address, value in replacements
+        native_protocol = (
+            12
+            if policy.preserve_character_style
+            or any(isinstance(command, TextPatchCommand) for command in edit_commands)
+            else 9
         )
-        edit_commands = tuple(group[0] for group in command_groups)
-        native_protocol = 9
     commands = (
         SelectControlCommand(control_id),
         CaptureTableCommand(),
@@ -371,10 +429,16 @@ def _table_fill_chunk(
             # SELECT_CONTROL, CAPTURE_TABLE 다음에 편집 명령만 오는 형태를
             # 유지한다. 네이티브는 이 형태만 고수준 표 채움으로 인식하고
             # (ActionTextPatch.cpp IsTableTextFillBatch), 인식된 요청만
-            # 모든 셀을 shadow 로 검증한 뒤 mutation 을 시작하며
-            # (PreflightTableTextCommands) topology 를 요청당 한 번만 만든다
-            # (SelectTableForCellPatch 의 reusableTableTextFillRequest).
-            # 여기에 CELL 같은 다른 명령을 끼우면 두 보호가 함께 사라진다.
+            # 모든 셀을 shadow 로 검증한 뒤 mutation 을 시작한다
+            # (PreflightTableTextCommands). 여기에 CELL 같은 다른 명령을
+            # 끼우면 그 원자성 보호가 사라진다.
+            #
+            # 인식된 요청은 topology 도 한 번만 만든다.
+            # SelectTableForCellPatch 의 reusableTableTextFillRequest 가드가
+            # 표 채움 배치 안에서 실제로 통과한다. 오래도록 통과하지 못했고
+            # (캐시한 표와 방금 고른 표의 IDispatch 포인터를 비교했는데 한/글
+            # 은 CurSelectedCtrl 을 읽을 때마다 새 래퍼를 준다), 그 시절
+            # preflight 는 편집 셀마다 표 전체 재조사 1회분을 더 썼다.
             *prefix,
             *(command for group in command_groups for command in group),
         ),
@@ -422,10 +486,11 @@ def table_fill_chunks(
     ):
         raise HwpLiveError("대량 표 채움 요청의 표 선택 명령 순서가 올바르지 않습니다")
 
-    # 분할 기준은 요청당 명령 수 하나뿐이다. 네이티브가 고수준 표 채움으로
-    # 인식하는 형태에서는 topology 를 준비 1회·실행 1회, 즉 요청당 두 번만
-    # 만든다. 그 비용은 표 크기에만 비례하고 한 요청에 담은 편집 수와는
-    # 무관하므로 더 잘게 쪼개도 줄지 않는다. 오히려 호출 수만큼 곱해진다.
+    # 분할 기준은 요청당 명령 수 하나뿐이다. original_topology_work 는 이제
+    # 실제 비용이 아니라 상한이다 — 표 전체 재조사는 요청당 1회로 줄었고
+    # (SelectTableForCellPatch 재사용 가드), 남은 셀당 비용은 표 크기와
+    # 무관하다(20셀 채움 실측: 30/62/103셀 표에서 157/142/178ms). 이 예산을
+    # 그대로 두는 것은 보수적으로 안전한 쪽이고, 다시 재는 것은 별건이다.
     chunks: list[PreparedWorkflowTableFill] = []
     start = 0
     edit_count = 0

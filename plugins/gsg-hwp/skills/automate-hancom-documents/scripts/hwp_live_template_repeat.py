@@ -23,7 +23,10 @@ from hwp_live_native_action_models import (
     RunCommand,
     SelectControlCommand,
 )
-from hwp_live_native_action_results import NativeDetailedInspection
+from hwp_live_native_action_results import (
+    NativeDetailedInspection,
+    is_structural_inspection_error,
+)
 from hwp_live_native_batch import (
     execute_native_actions,
     inspect_native_page,
@@ -201,6 +204,7 @@ def _source_cells(
         error
         for error in inspected.inspection_errors
         if error.control_instance_id == source_control_id
+        and is_structural_inspection_error(error.code)
     )
     if source_errors:
         raise HwpLiveError(f"원본 표 구조 조회 오류: {source_errors[0].message}")
@@ -308,6 +312,7 @@ def _verify_repeated_caption_numbers(
             error
             for error in inspected.inspection_errors
             if error.control_instance_id == control_id
+            and is_structural_inspection_error(error.code)
         )
         if errors:
             raise HwpLiveError(
@@ -366,6 +371,7 @@ def _verify_repeated_table(
         for page in pages
         for error in page.inspection_errors
         if error.control_instance_id == table_id
+        and is_structural_inspection_error(error.code)
     )
     if errors:
         raise HwpLiveError(f"{table_id} 표 사후 구조 조회 오류: {errors[0].message}")

@@ -26,6 +26,9 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <LinkDocumentGraphReaders Condition="'$(LinkDocumentGraphReaders)'==''">true</LinkDocumentGraphReaders>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <OutDir>$(ProjectDir)bin\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)obj\$(Configuration)\</IntDir>
@@ -43,16 +46,17 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/Brepro /PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <ModuleDefinitionFile>$(ProjectDir)HancomLiveBridge.def</ModuleDefinitionFile>
-      <AdditionalDependencies>ole32.lib;oleaut32.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>bcrypt.lib;pathcch.lib;ole32.lib;oleaut32.lib;crypt32.lib;winspool.lib;version.lib;gdi32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -74,8 +78,20 @@
     <ClCompile Include="ComState.cpp" />
     <ClCompile Include="DispatchInvoke.cpp" />
     <ClCompile Include="DocumentLifecycle.cpp" />
+    <ClCompile Include="DocumentGraphCodec.cpp" />
+    <ClCompile Include="DocumentGraphCapture.cpp" />
+    <ClCompile Include="DocumentGraphCaptureSpool.cpp" />
+    <ClCompile Include="DocumentGraphCaptureRecords.cpp" />
+    <ClCompile Include="DocumentGraphStore.cpp" />
+    <ClCompile Include="DocumentGraphQuery.cpp" />
+    <ClCompile Include="DocumentGraphIdentity.cpp" />
+    <ClCompile Include="DocumentGraphPatch.cpp" />
+    <ClCompile Include="DocumentGraphResolve.cpp" />
+    <ClCompile Include="DocumentGraphPatchExecutor.cpp" />
+    <ClCompile Include="DocumentGraphProtocol.cpp" />
     <ClCompile Include="LiveInspection.cpp" />
     <ClCompile Include="OfficialApiProbe.cpp" />
+    <ClCompile Include="OfficialApiCapability.cpp" />
     <ClCompile Include="OfficialApiAutomationProbe.cpp" />
     <ClCompile Include="OfficialApiAutomationOwner.cpp" />
     <ClCompile Include="OfficialApiParameterArray.cpp" />
@@ -89,6 +105,7 @@
     <ClCompile Include="OfficialApiVariant.cpp" />
     <ClCompile Include="ParagraphFormatting.cpp" />
     <ClCompile Include="ProtocolEncoding.cpp" />
+    <ClCompile Include="ProtocolBundle.cpp" />
     <ClCompile Include="ReferenceLayoutPayloadArrays.cpp" />
     <ClCompile Include="ReferenceLayoutGapSpec.cpp" />
     <ClCompile Include="ReferenceLayoutSpec.cpp" />
@@ -98,6 +115,13 @@
     <ClCompile Include="ReferenceLayoutStyleCommands.cpp" />
     <ClCompile Include="ReferenceLayoutValidation.cpp" />
     <ClCompile Include="TableInspection.cpp" />
+    <ClCompile Include="TextPatchReadback.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="DocumentGraphReaders.vcxproj" Condition="'$(LinkDocumentGraphReaders)'=='true'">
+      <Project>{DE375F51-69DB-48D4-82F8-10256391A909}</Project>
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ActionExecutor.h" />
@@ -112,8 +136,30 @@
     <ClInclude Include="ComState.h" />
     <ClInclude Include="DispatchInvoke.h" />
     <ClInclude Include="DocumentLifecycle.h" />
+    <ClInclude Include="DocumentGraphCodec.h" />
+    <ClInclude Include="DocumentGraphCapture.h" />
+    <ClInclude Include="DocumentGraphCaptureModel.h" />
+    <ClInclude Include="DocumentGraphCaptureSpool.h" />
+    <ClInclude Include="DocumentGraphCaptureRecords.h" />
+    <ClInclude Include="DocumentGraphCodecInternal.h" />
+    <ClInclude Include="DocumentGraphControls.h" />
+    <ClInclude Include="DocumentGraphEffectiveProperties.h" />
+    <ClInclude Include="DocumentGraphImages.h" />
+    <ClInclude Include="DocumentGraphLayout.h" />
+    <ClInclude Include="DocumentGraphStore.h" />
+    <ClInclude Include="DocumentGraphQuery.h" />
+    <ClInclude Include="DocumentGraphIdentity.h" />
+    <ClInclude Include="DocumentGraphPatch.h" />
+    <ClInclude Include="DocumentGraphResolve.h" />
+    <ClInclude Include="DocumentGraphPatchExecutor.h" />
+    <ClInclude Include="DocumentGraphProtocol.h" />
+    <ClInclude Include="DocumentGraphStories.h" />
+    <ClInclude Include="DocumentGraphTables.h" />
+    <ClInclude Include="DocumentGraphText.h" />
+    <ClInclude Include="ForegroundGuard.h" />
     <ClInclude Include="LiveInspection.h" />
     <ClInclude Include="OfficialApiProbe.h" />
+    <ClInclude Include="OfficialApiCapability.h" />
     <ClInclude Include="OfficialApiAutomationProbe.h" />
     <ClInclude Include="OfficialApiAutomationOwner.h" />
     <ClInclude Include="OfficialApiParameterArray.h" />
@@ -126,6 +172,7 @@
     <ClInclude Include="OfficialApiVariant.h" />
     <ClInclude Include="ParagraphFormatting.h" />
     <ClInclude Include="ProtocolEncoding.h" />
+    <ClInclude Include="ProtocolBundle.h" />
     <ClInclude Include="ReferenceLayoutPayloadArrays.h" />
     <ClInclude Include="ReferenceLayoutGapSpec.h" />
     <ClInclude Include="ReferenceLayoutSpec.h" />
@@ -133,6 +180,7 @@
     <ClInclude Include="ReferenceLayoutCommands.h" />
     <ClInclude Include="ReferenceLayoutExecutor.h" />
     <ClInclude Include="TableInspection.h" />
+    <ClInclude Include="TextPatchReadback.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="HancomLiveBridge.def" />

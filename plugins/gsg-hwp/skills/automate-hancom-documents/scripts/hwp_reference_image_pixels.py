@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+import numpy as np
+from numpy.typing import NDArray
 from PIL import Image, ImageChops, ImageFilter
 
 from hwp_live_values import Rgb
@@ -107,6 +109,26 @@ class PixelCanvas:
 
     def close(self) -> None:
         self.image.close()
+
+    def rgb_array(self) -> NDArray[np.uint8]:
+        """RGB 바이트를 (height, width, 3) uint8 배열로 본다.
+
+        np.frombuffer 는 복사하지 않는 뷰라서 호출 비용이 사실상 없다. 픽셀
+        재측정 루프가 이 배열 위에서 정수 연산으로 돌아 파이썬 회전 없이도
+        스칼라 구현과 같은 값을 낸다 — uint8 뺄셈은 반올림이 없으므로 두
+        경로의 결과가 근사치가 아니라 정확히 같다.
+        """
+        return np.frombuffer(self.rgb, dtype=np.uint8).reshape(
+            self.height,
+            self.width,
+            3,
+        )
+
+    def contrast_array(self) -> NDArray[np.uint8]:
+        return np.frombuffer(self.contrast, dtype=np.uint8).reshape(
+            self.height,
+            self.width,
+        )
 
     def color(self, x: int, y: int) -> Rgb:
         offset = (y * self.width + x) * 3

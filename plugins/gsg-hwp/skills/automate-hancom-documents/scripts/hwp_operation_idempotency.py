@@ -494,6 +494,7 @@ class OperationIdempotency:
                 before,
                 attached=True,
             )
+            baseline_evidence["save_baseline_diagnostic_reason"] = baseline_reason
             if baseline_reason is None:
                 return result.model_copy(update=baseline_evidence)
             marker = f"[save_baseline_reason={baseline_reason}]"

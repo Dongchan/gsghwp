@@ -41,10 +41,7 @@ def map_table_images(
     if isinstance(mapped_result, TablePlanInputFailure):
         return prefix_failure(mapped_result, "images")
     return MappedTableImages(
-        images={
-            mapped_result.by_key[item.key].address: item.path
-            for item in requested
-        }
+        images={mapped_result.by_key[item.key].address: item.path for item in requested}
     )
 
 
@@ -56,20 +53,20 @@ def map_table_cells(
     owners = tuple(cell for cell in table.cells if cell.owner_address == cell.address)
     mapped: dict[str, StructureCell] = {}
     for key in keys:
-        address = key.strip().upper()
-        if _ADDRESS.fullmatch(address) is not None:
-            cell = by_address.get(address)
-            if cell is None:
-                return TablePlanInputFailure(key, f"대상 표에 {address} 셀이 없습니다")
-            owner = by_address.get(cell.owner_address)
-            if owner is None:
-                return TablePlanInputFailure(
-                    key,
-                    f"{address} 셀의 병합 소유 셀을 찾지 못했습니다",
-                )
-            mapped[key] = owner
-            continue
         normalized = normalize_cell_label(key)
+        address = normalized.upper()
+        address_shaped = _ADDRESS.fullmatch(address) is not None
+        if address_shaped:
+            cell = by_address.get(address)
+            if cell is not None:
+                owner = by_address.get(cell.owner_address)
+                if owner is None:
+                    return TablePlanInputFailure(
+                        key,
+                        f"{address} 셀의 병합 소유 셀을 찾지 못했습니다",
+                    )
+                mapped[key] = owner
+                continue
         matches = tuple(
             cell
             for cell in sorted(owners, key=lambda owner: (owner.row, owner.column))

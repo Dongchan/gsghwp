@@ -33,25 +33,25 @@ async def call_worker_before_deadline(
     timeout_seconds: float,
     *,
     effect: ToolEffect,
+    state: WorkerCallState | None = None,
 ) -> WorkerToolResult:
-    state = WorkerCallState()
+    call_state = WorkerCallState() if state is None else state
     dispatched = False
     send, receive = anyio.create_memory_object_stream[WorkerToolResult](1)
     async with send, receive:
         try:
             with anyio.move_on_after(timeout_seconds):
-                await requests.send(WorkerCallTool(name, arguments, send, state))
+                await requests.send(WorkerCallTool(name, arguments, send, call_state))
                 dispatched = True
                 return await receive.receive()
         except BaseException:
-            if not state.started.is_set():
-                state.cancelled.set()
+            call_state.cancelled.set()
             raise
-        state.cancelled.set()
+        call_state.cancelled.set()
     raise HwpWorkerCallTimeout(
         name,
         timeout_seconds,
         dispatched=dispatched,
-        started=state.started.is_set(),
+        started=call_state.started.is_set(),
         effect=effect,
     )

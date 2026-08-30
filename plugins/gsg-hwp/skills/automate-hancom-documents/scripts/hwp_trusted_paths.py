@@ -1,83 +1,44 @@
+"""사용자가 이름을 대서 지목한 문서·그림 경로를 여는 자리.
+
+여기 남은 검사는 셋뿐이고, 셋 다 막는 실패가 무엇인지 말할 수 있다.
+
+* 확장자·실재 검사 -- 한/글이 열 수 없는 파일을 열라고 보내면 그 실패는
+  엔진 안에서 나므로 호출자가 무엇이 잘못됐는지 알기 어렵다. stat 한 번으로
+  같은 답을 먼저 준다.
+* Zone.Identifier -- 인터넷에서 받은 문서를 차단 해제 없이 여는 것을 막는다.
+  이건 경로 취향이 아니라 실제 보안 표식이고, 사용자가 할 조치도 분명하다.
+* 출력 덮어쓰기 금지 -- 사용자의 기존 파일을 지우는 실패를 막는다.
+
+없앤 것과 그 이유(2026-08-23 가드 감사):
+
+* UNC(``\\\\server\\share``)·NT 네임스페이스 경로 거부, 그리고
+  ``GetDriveType`` 이 ``DRIVE_REMOTE`` 를 답하면 거부하던 검사.
+  - 무엇을 막았나: 대응하는 실패 모드가 코드·주석·시험·사고 기록 어디에도
+    없었다. 이 모듈에는 시험이 한 건도 없었고 근거 주석도 한 줄이 없었다.
+  - 무엇을 막고 있었나: 사내 파일서버(``\\\\nas\\팀공유\\보고서.hwp``)와
+    매핑된 네트워크 드라이브(``Z:``)의 문서 전부. 우회 인자가 없었다.
+  - 더 나쁜 것: 실패가 fail-closed 였다. ``win32file`` 을 못 불러오거나
+    ``GetDriveType`` 이 0/1 을 답하면 **로컬 C: 문서까지** 거부했다. 즉
+    라이브러리 부재가 파일 거부로 번역됐다.
+  - 경로를 댄 것은 사용자다. 그 경로가 회사 공유 폴더인지 아닌지는 이 코드가
+    사용자 대신 판단할 일이 아니다.
+"""
+
 from __future__ import annotations
 
-from importlib import import_module
 from pathlib import Path
-from typing import Final, Protocol, runtime_checkable
+from typing import Final
 
 from hwp_errors import DocumentAutomationError
 
 
-class DriveTypeReader(Protocol):
-    def __call__(self, root: str) -> int: ...
-
-
-@runtime_checkable
-class _Win32FileModule(Protocol):
-    def GetDriveType(self, root_path_name: str) -> int: ...
-
-
-_DRIVE_REMOTE: Final = 4
-_LOCAL_DRIVE_TYPES: Final = frozenset({2, 3, 5, 6})
 _IMAGE_EXTENSIONS: Final = frozenset(
     {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 )
 
 
-def _read_drive_type(root: str) -> int:
-    module = import_module("win32file")
-    if not isinstance(module, _Win32FileModule):
-        raise DocumentAutomationError(
-            "드라이브 종류를 확인할 수 없어 한컴 문서를 열지 않습니다"
-        )
-    return module.GetDriveType(root)
-
-
-def _reject_network_namespace(path: Path) -> None:
-    normalized = str(path).replace("/", "\\")
-    if normalized.startswith("\\\\") or normalized.startswith("\\??\\"):
-        raise DocumentAutomationError("네트워크 경로의 한컴 문서는 열지 않습니다")
-
-
-def _classify_drive(path: Path, reader: DriveTypeReader) -> bool:
-    if not path.drive:
-        return False
-    root = f"{path.drive}\\"
-    try:
-        drive_type = reader(root)
-    except (ImportError, OSError, UnicodeError) as error:
-        raise DocumentAutomationError(
-            "드라이브 종류를 확인할 수 없어 한컴 문서를 열지 않습니다"
-        ) from error
-    if drive_type == _DRIVE_REMOTE:
-        raise DocumentAutomationError(
-            "네트워크 드라이브의 한컴 문서는 열지 않습니다"
-        )
-    if drive_type in _LOCAL_DRIVE_TYPES:
-        return True
-    raise DocumentAutomationError(
-        "드라이브 종류를 확인할 수 없어 한컴 문서를 열지 않습니다"
-    )
-
-
-def input_document(
-    path: Path,
-    *,
-    drive_type_reader: DriveTypeReader = _read_drive_type,
-) -> Path:
-    _reject_network_namespace(path)
-    expanded = path.expanduser()
-    _reject_network_namespace(expanded)
-    classified = _classify_drive(expanded, drive_type_reader)
-    absolute = expanded.absolute()
-    _reject_network_namespace(absolute)
-    if not classified:
-        classified = _classify_drive(absolute, drive_type_reader)
-    if not classified:
-        raise DocumentAutomationError(
-            "드라이브 종류를 확인할 수 없어 한컴 문서를 열지 않습니다"
-        )
-    resolved = absolute.resolve()
-    _reject_network_namespace(resolved)
+def input_document(path: Path) -> Path:
+    resolved = path.expanduser().absolute().resolve()
     if resolved.suffix.lower() not in {".hwp", ".hwpx"} or not resolved.is_file():
         raise DocumentAutomationError(f"HWP/HWPX 입력 파일이 없습니다: {resolved}")
     zone_path = Path(f"{resolved}:Zone.Identifier")
@@ -103,12 +64,7 @@ def output_document(path: Path) -> Path:
     return resolved
 
 
-def input_local_image(
-    path: Path,
-    *,
-    drive_type_reader: DriveTypeReader = _read_drive_type,
-) -> Path:
-    _ = drive_type_reader
+def input_local_image(path: Path) -> Path:
     expanded = path.expanduser()
     absolute = expanded if expanded.is_absolute() else expanded.absolute()
     if absolute.suffix.lower() not in _IMAGE_EXTENSIONS:

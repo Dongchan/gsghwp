@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from time import monotonic_ns
-from typing import Final, final
+from typing import Final, Literal, cast, final
 
 from anyio import CancelScope, to_thread
 
@@ -18,11 +18,14 @@ from hwp_layout_preflight import LayoutPreflightResult
 from hwp_live_bridge import HancomBridge, operation_recovery_scope
 from hwp_live_contract import (
     ConnectedDocument,
-    DocumentStyleList,
     LayoutPlan,
     LiveContext,
     PreviewResult,
+    StyleReadOutcome,
 )
+from hwp_live_grounding import HwpGroundingReport, HwpGroundingRequest
+from hwp_pageplan_contract import canonical_page_plan_sha256
+from hwp_pageplan_g04_contract import G04ApplyRequest, G04ApplyResponse, G04Error
 from hwp_live_native_action_contract import NativeActionFailure
 from hwp_live_native_dispatch_scope import (
     PublicNativeDispatchScope,
@@ -35,6 +38,7 @@ from hwp_native_failure_result import native_action_failure_result
 from hwp_operation_contract import (
     HwpOperateGuards,
     HwpOperateInputs,
+    OperationPhaseTiming,
     OperationPosition,
     OperationResult,
     TextMatchCandidate,
@@ -42,9 +46,17 @@ from hwp_operation_contract import (
 )
 from hwp_operation_idempotency import OperationIdempotency, OperationTicket
 from hwp_operation_journal import OperationJournal
+from hwp_operation_local_precondition import (
+    is_local_target_precondition_failure,
+    is_local_text_precondition_failure,
+    local_precondition_retry_result,
+    reinterpreted_operate_inputs,
+    reinterpreted_text_patch,
+)
 from hwp_operation_registry import operation_registry
 from hwp_operation_verification import enforce_operation_verification
 from hwp_live_text_patch_contract import (
+    TextPatchPlanGuard,
     TextPatchRequest,
     TextPatchTarget,
     text_patch_minimum_protocol,
@@ -64,10 +76,25 @@ _PUBLIC_TOOL_SESSION_SCOPE: ContextVar[_PublicToolSessionScope | None] = Context
     default=None,
 )
 _PUBLIC_CLEANUP_GRACE_SECONDS: Final = 0.05
+_TEXT_PATCH_APPLIED_MESSAGE: Final = (
+    "본문 text.patch를 적용하고 변경 범위와 서식을 다시 읽어 검증했습니다"
+)
 CleanupCompletionWaiter = Callable[
     [tuple[Future[None], ...], float],
     Awaitable[None],
 ]
+
+
+def _text_patch_message(notice: str) -> str:
+    """The applied-and-verified line, plus whatever else the caller must know.
+
+    A notice never replaces the message: the patch was applied either way, and
+    what the notice reports is something alongside it, such as this edit having
+    no MCP undo entry.
+    """
+    if not notice:
+        return _TEXT_PATCH_APPLIED_MESSAGE
+    return f"{_TEXT_PATCH_APPLIED_MESSAGE}. {notice}"
 
 
 def _consume_cleanup_result(future: asyncio.Future[None]) -> None:
@@ -205,6 +232,35 @@ class HwpOperationExecutor:
                 pass
         return reconciled
 
+    def _release_confirmed_save_close_block(
+        self,
+        ticket: OperationTicket | None,
+        result: OperationResult,
+        session_id: str,
+    ) -> None:
+        """디스크 지문으로 확정된 저장이 닫기 차단을 남기지 않게 한다.
+
+        ``SaveStateMachine`` 은 네이티브 readback 이 저장 전후 문서 지문을
+        대조해야 "verified"에 닿는다. 엔진이 직렬화하지 못하는 크기의
+        문서에서는 그 지문이 아예 없어 매번 미확정이 남고, 해제 경로는
+        도달할 수 없는 저장을 한 번 더 요구한다. 반증은 같은 응답 안에
+        있다 — 이 자리에 온 결과가 6조건 파일 지문 증명을 통과했다면
+        저장은 이미 디스크에서 확정됐다.
+        """
+        if (
+            ticket is None
+            or ticket.operation not in {"document.save", "document.save_reopen_verify"}
+            or result.save_fingerprint_verified is not True
+            or result.disk_persistence_verified is not True
+            or result.verified is not True
+            or result.reconcile_required is not False
+        ):
+            return
+        try:
+            _ = self._bridge.release_confirmed_save_close_block(session_id)
+        except AttributeError:
+            pass
+
     async def ensure_connection(
         self,
         document_selector: str | None,
@@ -312,6 +368,18 @@ class HwpOperationExecutor:
             connected.session_id,
         )
 
+    async def ground_document(
+        self,
+        document_selector: str | None,
+        request: HwpGroundingRequest,
+    ) -> HwpGroundingReport:
+        connected = await self.ensure_connection(document_selector)
+        return await self._dispatcher.run(
+            self._bridge.ground_document,
+            connected.session_id,
+            request,
+        )
+
     async def preflight_layout(
         self,
         document_selector: str | None,
@@ -322,6 +390,31 @@ class HwpOperationExecutor:
             self._bridge.preflight_layout,
             connected.session_id,
             plan,
+        )
+
+    async def apply_page_plan(
+        self,
+        request: G04ApplyRequest,
+    ) -> G04ApplyResponse:
+        try:
+            connected = await self.ensure_connection(request.document_selector)
+        except HwpLiveError as error:
+            plan = request.compiled.plan
+            return G04ApplyResponse(
+                status="rejected",
+                operation_id=request.operation_id,
+                candidate=plan.candidate,
+                plan_sha256=canonical_page_plan_sha256(plan),
+                source_manifest_sha256=request.compiled.source_manifest_sha256,
+                error=G04Error(
+                    code="DOCUMENT_UNAVAILABLE",
+                    message=str(error),
+                ),
+            )
+        return await self._dispatcher.run_mutation(
+            self._bridge.apply_page_plan,
+            connected.session_id,
+            request,
         )
 
     async def replace_selected_text(
@@ -379,7 +472,11 @@ class HwpOperationExecutor:
                 query=intent,
                 registry_entries=operation_registry().count,
                 lookup_microseconds=0,
-                message="범위·검색·표 셀 text.patch에는 확인할 기존 텍스트가 필요합니다",
+                message=(
+                    f'target.kind="{request.target.kind}"에는 최상위 expected_text가 '
+                    "필요합니다. find는 그 문자열을 문서에서 찾고, range·table_cell은 "
+                    "그 자리의 현재 원문이 같은지 확인한 뒤에만 바꿉니다"
+                ),
                 verified=False,
                 partial_mutation=False,
                 retry_safe=True,
@@ -421,9 +518,12 @@ class HwpOperationExecutor:
             return prepared
         ticket: OperationTicket | None = prepared
 
-        def execute_started_patch() -> OperationResult:
+        def attempt_patch(
+            attempted: TextPatchRequest,
+        ) -> tuple[OperationResult, NativeActionFailure | None]:
+            native_failure: NativeActionFailure | None = None
             try:
-                patched = self._bridge.patch_text(connected.session_id, request)
+                patched = self._bridge.patch_text(connected.session_id, attempted)
                 before = patched.before
                 after = patched.after
                 result = OperationResult(
@@ -433,7 +533,7 @@ class HwpOperationExecutor:
                     query=intent,
                     registry_entries=operation_registry().count,
                     lookup_microseconds=0,
-                    message="본문 text.patch를 적용하고 변경 범위와 서식을 다시 읽어 검증했습니다",
+                    message=_text_patch_message(patched.notice),
                     execution_mode="native_in_process",
                     native_protocol=minimum_protocol,
                     verification="native_operation_specific_readback",
@@ -457,8 +557,20 @@ class HwpOperationExecutor:
                         paragraph=after.cursor.paragraph,
                         character=after.cursor.character,
                     ),
+                    # Straight from the bridge's own call results. null means
+                    # this patch wrote no checkpoint at all.
+                    document_checkpoint_capture=cast(
+                        Literal["document_file", "encoded_block"] | None,
+                        patched.checkpoint_evidence.capture_method or None,
+                    ),
+                    document_identity_restored=(
+                        patched.checkpoint_evidence.identity_restored
+                        if patched.checkpoint_evidence.capture_method
+                        else None
+                    ),
                 )
             except NativeActionFailure as failure:
+                native_failure = failure
                 if failure.code == "AMBIGUOUS_TEXT_MATCH":
                     result = OperationResult(
                         request_id=inputs.request_id,
@@ -469,8 +581,8 @@ class HwpOperationExecutor:
                         text_candidates=_text_match_candidates(
                             failure.location,
                             ""
-                            if request.expected_text is None
-                            else request.expected_text,
+                            if attempted.expected_text is None
+                            else attempted.expected_text,
                         ),
                         message="일치하는 본문이 여러 개여서 변경하지 않았습니다. occurrence를 지정하세요",
                         execution_mode="native_in_process",
@@ -510,6 +622,18 @@ class HwpOperationExecutor:
                     ).model_copy(update={"request_id": inputs.request_id})
             except HwpLiveError as error:
                 result = transport_error_result(inputs, error, intent=intent)
+            return result, native_failure
+
+        def execute_started_patch() -> OperationResult:
+            result, failure = attempt_patch(request)
+            # 대상 국소 전제조건 계약: 지목한 자리의 기대 원문이 어긋나 편집 전에
+            # 멈췄다면, 호출자가 준 expected_text 로 한 번만 다시 해석해 재시도한다.
+            # 티켓을 새로 뽑지 않으므로 operation_id 는 그대로다.
+            if failure is not None and is_local_text_precondition_failure(failure):
+                reinterpreted = reinterpreted_text_patch(request)
+                if reinterpreted is not None:
+                    retried, _ = attempt_patch(reinterpreted)
+                    result = local_precondition_retry_result(result, retried)
             return self._idempotency.commit(
                 ticket,
                 enforce_operation_verification(canonical_workflow(inputs), result),
@@ -517,6 +641,153 @@ class HwpOperationExecutor:
 
         async with self._idempotency.execution(ticket):
             return await self._dispatcher.run_mutation(execute_started_patch)
+
+    async def patch_text_batch(
+        self,
+        intent: str,
+        inputs: HwpOperateInputs,
+        requests: tuple[TextPatchRequest, ...],
+        plan_guard: TextPatchPlanGuard | None = None,
+    ) -> OperationResult:
+        minimum_protocol: Literal[11, 12] = (
+            12
+            if any(text_patch_minimum_protocol(request) == 12 for request in requests)
+            else 11
+        )
+        try:
+            connected = await self.ensure_connection(inputs.document)
+        except HwpLiveError as error:
+            return transport_error_result(
+                inputs,
+                error,
+                intent=intent,
+                mutation_started=False,
+            )
+        if plan_guard is not None and (
+            connected.document.document_id != plan_guard.document_id
+            or connected.document.full_name.casefold() != plan_guard.full_name.casefold()
+        ):
+            return transport_error_result(
+                inputs,
+                HwpLiveError(
+                    "text.patch plan document identity가 현재 문서와 다릅니다",
+                    mutation_started=False,
+                    safe_to_repeat=True,
+                ),
+                intent=intent,
+                mutation_started=False,
+            )
+        prepared = await to_thread.run_sync(
+            self._idempotency.prepare,
+            connected.document,
+            intent,
+            inputs,
+            None,
+        )
+        if isinstance(prepared, OperationResult):
+            return prepared
+        ticket: OperationTicket | None = prepared
+
+        def execute_started_batch() -> OperationResult:
+            try:
+                patched = self._bridge.patch_text_batch(
+                    connected.session_id,
+                    requests,
+                    plan_guard,
+                )
+                before = patched.before
+                after = patched.after
+                result = OperationResult(
+                    request_id=inputs.request_id,
+                    status="executed",
+                    changed=True,
+                    query=intent,
+                    registry_entries=operation_registry().count,
+                    lookup_microseconds=0,
+                    message=_text_patch_message(patched.notice),
+                    execution_mode="native_in_process",
+                    native_protocol=minimum_protocol,
+                    verification="native_operation_specific_readback",
+                    verified=True,
+                    commands_executed=patched.native.commands_executed,
+                    native_actions_executed=patched.native.actions_executed,
+                    native_elapsed_microseconds=patched.native.elapsed_microseconds,
+                    phase_timings=tuple(
+                        OperationPhaseTiming(
+                            phase=timing.phase,
+                            source=timing.source,
+                            elapsed_microseconds=timing.elapsed_microseconds,
+                        )
+                        for timing in patched.phase_timings
+                    ),
+                    current_page=after.current_page,
+                    page_count=after.page_count,
+                    modified=after.modified,
+                    partial_mutation=False,
+                    retry_safe=True,
+                    commands_completed=patched.native.commands_executed,
+                    cursor_before=OperationPosition(
+                        list_id=before.cursor.list_id,
+                        paragraph=before.cursor.paragraph,
+                        character=before.cursor.character,
+                    ),
+                    cursor_after=OperationPosition(
+                        list_id=after.cursor.list_id,
+                        paragraph=after.cursor.paragraph,
+                        character=after.cursor.character,
+                    ),
+                    document_checkpoint_capture=cast(
+                        Literal["document_file", "encoded_block"] | None,
+                        patched.checkpoint_evidence.capture_method or None,
+                    ),
+                    document_identity_restored=(
+                        patched.checkpoint_evidence.identity_restored
+                        if patched.checkpoint_evidence.capture_method
+                        else None
+                    ),
+                )
+            except NativeActionFailure as failure:
+                result = native_action_failure_result(
+                    intent,
+                    failure,
+                    minimum_native_protocol=minimum_protocol,
+                ).model_copy(
+                    update={
+                        "request_id": inputs.request_id,
+                        "phase_timings": tuple(
+                            OperationPhaseTiming(
+                                phase=phase,
+                                source=source,
+                                elapsed_microseconds=elapsed,
+                            )
+                            for phase, source, elapsed in failure.phase_timings
+                        ),
+                    }
+                )
+            except HwpLiveError as error:
+                result = transport_error_result(
+                    inputs,
+                    error,
+                    intent=intent,
+                ).model_copy(
+                    update={
+                        "phase_timings": tuple(
+                            OperationPhaseTiming(
+                                phase=phase,
+                                source=source,
+                                elapsed_microseconds=elapsed,
+                            )
+                            for phase, source, elapsed in error.phase_timings
+                        )
+                    }
+                )
+            return self._idempotency.commit(
+                ticket,
+                enforce_operation_verification(canonical_workflow(inputs), result),
+            )
+
+        async with self._idempotency.execution(ticket):
+            return await self._dispatcher.run_mutation(execute_started_batch)
 
     async def get_operation_status(
         self,
@@ -566,7 +837,7 @@ class HwpOperationExecutor:
     async def inspect_styles(
         self,
         document_selector: str | None,
-    ) -> DocumentStyleList:
+    ) -> StyleReadOutcome:
         connected = await self.ensure_connection(document_selector)
         return await self._dispatcher.run(
             self._bridge.styles,
@@ -585,6 +856,16 @@ class HwpOperationExecutor:
             connected.session_id,
             page,
             include_cells=include_cells,
+        )
+
+    async def read_content_revision(
+        self,
+        document_selector: str | None,
+    ) -> str:
+        connected = await self.ensure_connection(document_selector)
+        return await self._dispatcher.run(
+            self._bridge.content_revision,
+            connected.session_id,
         )
 
     async def inspect_structure(
@@ -650,42 +931,66 @@ class HwpOperationExecutor:
         ticket: OperationTicket | None = prepared
         reconcile = ticket is not None and ticket.action == "reconcile"
 
+        def attempt_operation(attempted: HwpOperateInputs) -> OperationResult:
+            try:
+                return self._bridge.operate(
+                    connected.session_id,
+                    intent,
+                    attempted.parameters,
+                    resolve_only=reconcile,
+                    allow_document_change=not reconcile,
+                    use_defaults=attempted.use_defaults,
+                    expected_cursor=expected_cursor,
+                    workflow=canonical_workflow(attempted),
+                    target=attempted.target,
+                    data=attempted.data,
+                    assets=attempted.assets,
+                    policy=attempted.policy,
+                    postconditions=attempted.postconditions,
+                    layout=attempted.layout,
+                    recipe=attempted.recipe,
+                )
+            except NativeActionFailure as failure:
+                return native_action_failure_result(intent, failure)
+            except HwpLiveError as error:
+                return transport_error_result(attempted, error, intent=intent)
+
         def execute_started_mutation() -> OperationResult:
             with operation_recovery_scope(
                 None if ticket is None else ticket.request_id
             ):
-                try:
-                    result = self._bridge.operate(
-                        connected.session_id,
-                        intent,
-                        inputs.parameters,
-                        resolve_only=reconcile,
-                        allow_document_change=not reconcile,
-                        use_defaults=inputs.use_defaults,
-                        expected_cursor=expected_cursor,
-                        workflow=canonical_workflow(inputs),
-                        target=inputs.target,
-                        data=inputs.data,
-                        assets=inputs.assets,
-                        policy=inputs.policy,
-                        postconditions=inputs.postconditions,
-                        layout=inputs.layout,
-                        recipe=inputs.recipe,
-                    )
-                except NativeActionFailure as failure:
-                    result = native_action_failure_result(intent, failure)
-                except HwpLiveError as error:
-                    result = transport_error_result(inputs, error, intent=intent)
+                result = attempt_operation(inputs)
+                # 대상 국소 전제조건 계약: 지목한 개체 식별자가 문서와 맞지 않아
+                # 아무것도 쓰지 않고 멈췄다면, 요청이 함께 들고 있는 대상 조건으로
+                # 한 번만 다시 해석해 재시도한다. 같은 티켓 안에서 실행하므로
+                # operation_id 는 그대로고 멱등성도 그대로다.
+                #
+                # reconcile 은 제외한다. 그 갈래는 이미 실행된 요청이 무엇을
+                # 건드렸는지 되짚는 중이라, 다른 개체를 골라 오면 남의 편집을
+                # 이 요청의 것으로 기록한다.
+                if not reconcile and is_local_target_precondition_failure(result):
+                    reinterpreted = reinterpreted_operate_inputs(inputs)
+                    if reinterpreted is not None:
+                        result = local_precondition_retry_result(
+                            result,
+                            attempt_operation(reinterpreted),
+                        )
             result = enforce_operation_verification(canonical_workflow(inputs), result)
             committed = self._idempotency.commit(
                 ticket,
                 result.model_copy(update={"request_id": inputs.request_id}),
             )
-            return self._immediate_save_reconciliation(
+            reconciled = self._immediate_save_reconciliation(
                 ticket,
                 committed,
                 connected.document.selector,
             )
+            self._release_confirmed_save_close_block(
+                ticket,
+                reconciled,
+                connected.session_id,
+            )
+            return reconciled
 
         async with self._idempotency.execution(ticket):
             return await self._dispatcher.run_mutation(

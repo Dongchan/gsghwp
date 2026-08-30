@@ -23,6 +23,7 @@ from hwp_live_native_format_inputs import (
     table_cell_coordinate,
 )
 from hwp_live_native_format_target import (
+    SELECTION_TARGET_BASES,
     NativeTableTargetRequest,
     ResolvedTable,
     TargetFailure,
@@ -117,36 +118,51 @@ def _prepare_table_format(
     if isinstance(parsed, InputFailure):
         return parsed
     cells: tuple[str, ...]
-    if parsed.cell is not None:
-        cells = (parsed.cell,)
+    # 대상 표 자체가 한/글의 현재 선택에서 나왔다면 "지금 선택된 것이 표다"는
+    # 이미 확인된 것이다. 그때는 어느 셀인지도 같은 선택에서 읽는다 --
+    # _resolve_selected_table_cells 가 스냅샷이 비면 application.SelectionMode
+    # 로 한 번 더 묻는 자리다. 거기서도 못 읽으면 지금까지와 같은 missing-input
+    # 으로 끝나므로, 이 갈래가 새로 막는 것은 없다.
+    selection_basis = resolved.basis in SELECTION_TARGET_BASES
+    # parse_table_format 이 'A4:P4' 같은 구간을 이미 펼쳐 두었다. 여기서 그
+    # 전체를 그대로 넘기면 직사각형은 recipe._topology_cell_geometry_targets 가
+    # CellRangeTarget 하나로 접어 한 번의 선택으로 처리한다.
+    requested_cells = parsed.cells or (() if parsed.cell is None else (parsed.cell,))
+    if requested_cells:
+        cells = requested_cells
     elif has_explicit_table_locator(request):
         cells = ()
     elif before.selection.base_mode in {3, 4}:
-        if before.control_type != "tbl" or not before.control_instance_id:
+        if not selection_basis and (
+            before.control_type != "tbl" or not before.control_instance_id
+        ):
             return _missing_table_format_target(
                 "현재 선택이 표 또는 표 셀 선택이 아닙니다"
             )
         cells = ()
     elif before.control_type == "tbl" and before.cell_address:
         cells = (before.cell_address,)
+    elif selection_basis:
+        cells = ()
     else:
         return _missing_table_format_target(
             "현재 커서가 표 셀 안에 있지 않고 선택한 표나 셀도 없습니다"
         )
-    if parsed.cell is not None and (
+    if requested_cells and (
         parsed.row_height_mm is not None or parsed.column_width_mm is not None
     ):
-        row, column = table_cell_coordinate(parsed.cell)
         if resolved.rows is None or resolved.columns is None:
             return InputFailure(
                 "schema_conflict",
                 "행·열 크기 변경 전에 대상 표의 행·열 수를 확인하지 못했습니다",
             )
-        if row > resolved.rows or column > resolved.columns:
-            return InputFailure(
-                "schema_conflict",
-                f"{parsed.cell} 셀이 대상 표의 {resolved.rows}행 {resolved.columns}열 범위를 벗어납니다",
-            )
+        for address in requested_cells:
+            row, column = table_cell_coordinate(address)
+            if row > resolved.rows or column > resolved.columns:
+                return InputFailure(
+                    "schema_conflict",
+                    f"{address} 셀이 대상 표의 {resolved.rows}행 {resolved.columns}열 범위를 벗어납니다",
+                )
     return PreparedFormatOperation(
         TableFormatCommandPlan(parsed, resolved, cells),
         resolved.instance_id,

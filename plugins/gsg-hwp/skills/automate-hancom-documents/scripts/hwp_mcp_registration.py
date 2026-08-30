@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
+from difflib import get_close_matches
 from functools import wraps
 from types import MappingProxyType
 from typing import cast
 
 from mcp.types import AnyFunction
-from pydantic import JsonValue
+from pydantic import BaseModel, JsonValue
 
+from hwp_custom_action_tools import HwpCustomActionTools
+from hwp_live_contract import ResolvedOpenDocument
 from hwp_mcp_catalog import (
     call_production_catalog_gateway_tool,
     catalog_tool_handlers,
@@ -19,7 +22,9 @@ from hwp_mcp_forward import ForwardingFastMCP, HwpExecuteArguments
 from hwp_mcp_operation import McpOperationHandler
 from hwp_mcp_operation_executor import HwpOperationExecutor
 from hwp_mcp_qa_handlers import McpQaHandlers
+from hwp_mcp_pageplan_tools import HwpPagePlanTools
 from hwp_mcp_registry import (
+    MCP_TOOL_SPECS,
     McpProfile,
     McpToolSpec,
     ToolHandlerSource,
@@ -27,10 +32,13 @@ from hwp_mcp_registry import (
     tool_specs,
 )
 from hwp_public_document_tools import HwpPublicDocumentTools
+from hwp_public_graph_tools import HwpPublicGraphTools, graph_call_tool_result
 from hwp_public_inspection_tools import HwpPublicInspectionTools
 from hwp_public_live_edit_tools import HwpPublicLiveEditTools
 from hwp_public_object_tools import HwpPublicObjectTools
+from hwp_public_restructure_tools import HwpPublicRestructureTools
 from hwp_public_selection_tools import HwpPublicSelectionTools
+from hwp_public_xlsx_tools import HwpPublicXlsxTools
 from hwp_public_table_edit_tools import HwpPublicTableEditTools
 from hwp_public_table_tools import HwpPublicTableTools
 from hwp_public_tools import HwpPublicTools
@@ -49,11 +57,16 @@ class McpToolBindings:
     public_visibility_tools: HwpPublicVisibilityTools
     public_table_edit_tools: HwpPublicTableEditTools
     public_object_tools: HwpPublicObjectTools
+    public_restructure_tools: HwpPublicRestructureTools
     public_inspection_tools: HwpPublicInspectionTools
+    public_graph_tools: HwpPublicGraphTools
     public_selection_tools: HwpPublicSelectionTools
+    public_xlsx_tools: HwpPublicXlsxTools
     public_document_tools: HwpPublicDocumentTools
     public_live_edit_tools: HwpPublicLiveEditTools
     reference_image_tools: HwpReferenceImageTools
+    pageplan_tools: HwpPagePlanTools
+    custom_action_tools: HwpCustomActionTools
 
 
 class McpToolBindingError(RuntimeError):
@@ -99,15 +112,89 @@ def _binding_handlers(
     return MappingProxyType(handlers)
 
 
+def _closest_tool_names(tool_name: str, candidates: frozenset[str]) -> tuple[str, ...]:
+    return tuple(get_close_matches(tool_name, sorted(candidates), n=3, cutoff=0.7))
+
+
+def _unsupported_forward_message(tool_name: str, profile: McpProfile) -> str:
+    """Say which name failed and why, not just that something is missing.
+
+    The old sentence ("설치된 현재 프로필에 등록된 HWP 도구가 아닙니다.") never
+    named ``tool_name``, so it read as if ``hwp_execute`` itself were missing —
+    ``hwp_execute`` is registered in every profile and the name it was asked to
+    forward is what does not exist here.
+    """
+    if tool_name == "hwp_execute":
+        return (
+            "hwp_execute는 자기 자신을 전달하지 않습니다. "
+            "tool_name에는 실제로 실행할 HWP 도구 이름을 넣으세요."
+        )
+    known = tool_name in {spec.name for spec in MCP_TOOL_SPECS}
+    if known:
+        return (
+            f"{tool_name}은(는) 이 빌드에 있지만 현재 프로필({profile})에는 "
+            "등록되지 않은 도구입니다. available_tools 중에서 고르세요."
+        )
+    suggestions = _closest_tool_names(tool_name, tool_names(profile))
+    hint = (
+        ""
+        if not suggestions
+        else " 이름이 비슷한 도구: " + ", ".join(suggestions) + "."
+    )
+    missing = (
+        f"{tool_name}(이)라는 HWP 도구는 없습니다. available_tools의 이름은 모두 "
+        "직접 호출할 수 있으므로 hwp_execute를 거치지 않아도 됩니다."
+    )
+    return missing + hint
+
+
 def _public_tool_handler(
     executor: HwpOperationExecutor,
     tool_name: str,
     handler: AnyFunction,
 ) -> AnyFunction:
+    if tool_name == "hwp_open_document":
+
+        async def scoped_open_document(
+            path: str,
+            reference_selector: str | None = None,
+            new_tab: bool = True,
+            restore_reference: bool = True,
+        ) -> ResolvedOpenDocument:
+            async with executor.public_tool_session_scope(tool_name):
+                result = cast(
+                    object,
+                    await handler(
+                        path=path,
+                        reference_selector=reference_selector,
+                        new_tab=new_tab,
+                        restore_reference=restore_reference,
+                    ),
+                )
+            return ResolvedOpenDocument.model_validate(result)
+
+        return scoped_open_document
+
     @wraps(handler)
     async def scoped_handler(*args: object, **kwargs: object) -> object:
         async with executor.public_tool_session_scope(tool_name):
-            return cast(object, await handler(*args, **kwargs))
+            result = cast(object, await handler(*args, **kwargs))
+        if tool_name in {
+            "hwp_get_graph_manifest",
+            "hwp_query_graph",
+            "hwp_get_graph_node",
+            "hwp_get_graph_property",
+            "hwp_get_graph_asset",
+            "hwp_fetch_graph_artifact",
+            "hwp_validate_graph_patch",
+            "hwp_diff_graph_patch",
+            "hwp_invert_graph_patch",
+            "hwp_graph_patch_history",
+            "hwp_apply_graph_patch",
+            "hwp_reconcile_graph_patch",
+        }:
+            return graph_call_tool_result(tool_name, cast(BaseModel, result))
+        return result
 
     return scoped_handler
 
@@ -142,7 +229,7 @@ def register_mcp_tools(
                 "status": "unsupported",
                 "requested_tool": tool_name,
                 "available_tools": available_tools,
-                "message": "설치된 현재 프로필에 등록된 HWP 도구가 아닙니다.",
+                "message": _unsupported_forward_message(tool_name, profile),
             }
             return failure
         return await server.call_unconverted_tool(tool_name, arguments)

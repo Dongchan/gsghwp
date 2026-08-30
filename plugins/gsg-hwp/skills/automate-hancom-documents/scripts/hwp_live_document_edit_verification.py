@@ -55,7 +55,22 @@ def capture_history_structure_snapshot(
 def verify_history_structure_change(
     before: HistoryStructureSnapshot,
     after: HistoryStructureSnapshot,
+    applied_steps: int | None = None,
 ) -> None:
+    """Refuse to call an undo/redo a success when nothing was restored.
+
+    `applied_steps` is what 한/글 itself said it did, and it is only used to say
+    so in the message. The caller reaches this having already found no change in
+    the native whole-document state (page count, control count, control hash),
+    so an unchanged page token here is a second, independent no.
+
+    That agreement is why the last branch refuses with `mutation_started=False`.
+    Without it the failure travels as "unknown", `transport_error_result` reads
+    unknown conservatively as changed, and the answer says `modified: true`
+    about a document two probes just measured as untouched — which is the
+    opposite of what was observed. The two probes before it are less certain
+    about the whole document, so they stay unknown.
+    """
     if before.document_id != after.document_id or _normalized_path(
         before.full_name
     ) != _normalized_path(after.full_name):
@@ -65,8 +80,28 @@ def verify_history_structure_change(
     if before.page != after.page:
         raise HwpLiveError("한컴 실행 이력 검증 쪽이 전후에 달라졌습니다")
     if before.state_token == after.state_token:
+        # The old wording was "한컴 실행 이력이 없거나 ... 바뀌지 않았습니다" — a
+        # disjunction the caller could already resolve, since it knows how many
+        # steps the engine reported. Say which one it was.
+        ran = (
+            "한컴 실행 이력을 실행했지만"
+            if applied_steps is None
+            else f"한컴 실행 이력을 {applied_steps}단계 실행했지만"
+        )
         raise HwpLiveError(
-            "한컴 실행 이력이 없거나 실행 후 문서 구조 상태가 바뀌지 않았습니다"
+            f"{ran} 문서 내용도 대상 쪽 구조도 바뀌지 않아 "
+            "되돌린 편집을 확인하지 못했습니다. 이 호출로 문서 내용은 바뀌지 "
+            "않았습니다"
+            + (
+                ""
+                if not applied_steps
+                else f"(한/글 자체 이력은 {applied_steps}단계 소비됐으므로 "
+                "그대로 다시 실행하지 마세요)"
+            ),
+            mutation_started=False,
+            # The engine consumed history steps to get here even though nothing
+            # in the document moved. Offering a retry would spend more of them.
+            safe_to_repeat=not applied_steps,
         )
 
 

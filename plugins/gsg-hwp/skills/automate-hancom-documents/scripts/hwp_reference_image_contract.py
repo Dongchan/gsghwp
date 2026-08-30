@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from hwp_live_values import ContractModel, Rgb
+from hwp_reference_image_budget import ReferenceAnalysisStopReason
 
 
 AnalysisAxis = Literal["row", "column"]
@@ -107,6 +108,13 @@ class ReferenceImageAnalysis(ContractModel):
     )
     analysis_time_ms: float = Field(ge=0)
     cache_hit: bool
+    # 조기 종료는 오류가 아니라 정직한 구조화 응답이다. 미완 결과는 캐시에
+    # 쓰지 않으므로 analysis_id 로 다시 집을 수 없고, 좌표 증거로 쓰여서도
+    # 안 된다 — 소비자는 이 값을 보고 모델 직접 판독으로 넘어가면 된다.
+    analysis_complete: bool = True
+    stop_reason: ReferenceAnalysisStopReason | None = None
+    predicted_seconds: float | None = Field(default=None, ge=0)
+    time_budget_seconds: float | None = Field(default=None, gt=0)
     objects: tuple[ReferenceImageObject, ...]
     text_regions: tuple[ReferenceTextRegion, ...]
     protected_gaps: tuple[ReferenceProtectedGap, ...]

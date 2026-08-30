@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from hwp_errors import HwpLiveError
 from hwp_live_events import (
     ChangeNotifier,
+    ChangeObserver,
     HwpEventObservation,
     WinEventChangeSignal,
 )
@@ -210,6 +211,16 @@ class NativeHwpEventSignal:
     def wait(self, after_sequence: int, timeout_seconds: float) -> int:
         return self._notifier.wait(after_sequence, timeout_seconds)
 
+    def observe_window(
+        self,
+        window_handle: int,
+        observer: ChangeObserver,
+    ) -> None:
+        self._notifier.observe_window(window_handle, observer)
+
+    def forget_window(self, window_handle: int) -> None:
+        self._notifier.forget_window(window_handle)
+
     def stop(self) -> None:
         process = self._process
         thread = self._thread
@@ -291,6 +302,17 @@ class HybridChangeSignal:
 
     def wait(self, after_sequence: int, timeout_seconds: float) -> int:
         return self._notifier.wait(after_sequence, timeout_seconds)
+
+    def observe_window(
+        self,
+        window_handle: int,
+        observer: ChangeObserver,
+    ) -> None:
+        """Both sources share one notifier, so this covers native and window events."""
+        self._notifier.observe_window(window_handle, observer)
+
+    def forget_window(self, window_handle: int) -> None:
+        self._notifier.forget_window(window_handle)
 
     def stop(self) -> None:
         if not self._started:

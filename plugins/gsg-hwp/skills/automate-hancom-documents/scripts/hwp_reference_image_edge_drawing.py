@@ -4,9 +4,7 @@ from collections.abc import Callable
 from math import ceil
 from typing import cast
 
-import cv2
-import numpy as np
-
+from hwp_reference_image_budget import ReferenceAnalysisTimeBudget
 from hwp_reference_image_edge_support import (
     coalesce_candidates,
     has_structural_support,
@@ -126,6 +124,17 @@ def _is_continuous(
 def _edge_drawing_lines(
     canvas: PixelCanvas,
 ) -> tuple[tuple[float, float, float, float], ...]:
+    try:
+        import cv2
+        import numpy as np
+    except ModuleNotFoundError as error:
+        raise ValueError(
+            "reference image edge analysis requires opencv-contrib-python"
+        ) from error
+    if not hasattr(cv2, "ximgproc"):
+        raise ValueError(
+            "installed OpenCV does not provide the ximgproc edge analyzer"
+        )
     image = np.frombuffer(canvas.rgb, dtype=np.uint8).reshape(
         canvas.height,
         canvas.width,
@@ -152,9 +161,20 @@ def refine_segments_with_edge_drawing(
     *,
     horizontal_probe: StrokeProbe,
     vertical_probe: StrokeProbe,
+    budget: ReferenceAnalysisTimeBudget | None = None,
 ) -> tuple[PixelSegment, ...]:
+    if budget is not None and budget.exhausted():
+        # 예산이 이미 끝났으면 선 검출 자체를 부르지 않는다. 그 호출은 쪼갤 수
+        # 없는 한 번짜리라 800x600 잔모자이크에서 0.132초, 8MP에서 0.34~0.38초를
+        # 통째로 쓴다 — 어차피 버릴 결과에 그만큼을 더 쓰면 예산이 그만큼 샌다.
+        return baseline
     accepted: list[tuple[PixelSegment, int]] = []
     for values in _edge_drawing_lines(canvas):
+        # 실측 지배 구간이다(1400x1000 빗금 3.8초, 1600x1200 잔모자이크 1.9초).
+        # 한 회전이 후보 선 하나의 획 재측정이라 바깥 회전마다 묻는 것으로 충분히
+        # 잘다 — 선 검출 자체는 한 번짜리 호출이라 8MP에서도 0.38초다.
+        if budget is not None and budget.exhausted():
+            break
         detected = _validated_axis_segment(
             canvas,
             values,

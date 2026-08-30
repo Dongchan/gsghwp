@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Final
 
 from hwp_errors import HwpLiveError
 from hwp_layout_preflight import LayoutPreflightResult
 from hwp_live_bridge_mixin import HancomBridgeSessionRuntime
 from hwp_live_contract import LayoutPlan
+from hwp_pageplan_g04_contract import G04ApplyRequest, G04ApplyResponse
 from hwp_live_native_batch import probe_official_api
 from hwp_official_api_live import (
     OfficialApiLiveBatchResult,
@@ -25,17 +27,47 @@ from hwp_operation_contract import (
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
 
 
+STYLE_READ_UNVERIFIED_REASON_CODE: Final = "style_read_unverified"
+
+
+def _unverified_preflight(result: LayoutPreflightResult) -> LayoutPreflightResult:
+    if STYLE_READ_UNVERIFIED_REASON_CODE in result.reason_codes:
+        return result
+    return result.model_copy(
+        update={
+            "reason_codes": (
+                *result.reason_codes,
+                STYLE_READ_UNVERIFIED_REASON_CODE,
+            )
+        }
+    )
+
+
 class HancomBridgeOperationMixin(HancomBridgeSessionRuntime):
     __slots__: tuple[str, ...] = ()
+
+    def apply_page_plan(
+        self,
+        session_id: str,
+        request: G04ApplyRequest,
+    ) -> G04ApplyResponse:
+        return self._call_mutation(
+            lambda: self._bridge_controller().apply_page_plan(session_id, request),
+            session_id=session_id,
+        )
 
     def preflight_layout(
         self,
         session_id: str,
         plan: LayoutPlan,
     ) -> LayoutPreflightResult:
+        # 읽기 전용 예측이다. 토큰이 계속 움직였다고 거부하면 레이아웃을 미리
+        # 재보는 길 자체가 막히므로, 계산한 값을 주고 reason_codes 로 "이 값이
+        # 최신 문서 상태 기준이라고 보증하지 못한다"만 알린다.
         return self._call_style_read(
             lambda controller: controller.preflight_layout(session_id, plan),
             session_id=session_id,
+            degrade=_unverified_preflight,
         )
 
     def run_official_api_batch(

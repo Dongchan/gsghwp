@@ -56,8 +56,8 @@ def attach_table_caption(
             reject_cell=True,
             error_message="정확한 표 캡션 편집 위치를 확인하지 못했습니다",
         )
-        if not hwp.ShapeObjInsertCaptionNum():
-            raise HwpLiveError("한컴 표 캡션의 자동 번호를 넣지 못했습니다")
+        if not hwp.MoveParaEnd():
+            raise HwpLiveError("한컴 표 캡션의 제목 위치로 이동하지 못했습니다")
         guard()
         require_exact_control_context(
             hwp,
@@ -68,7 +68,7 @@ def attach_table_caption(
             reject_cell=True,
             error_message="정확한 표 캡션 편집 위치를 확인하지 못했습니다",
         )
-        if not hwp.insert_text(f" {title}"):
+        if not hwp.insert_text(title):
             raise HwpLiveError("한컴 표 캡션 제목을 넣지 못했습니다")
         guard()
     finally:

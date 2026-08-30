@@ -70,6 +70,7 @@ class WorkerToolList:
 class WorkerToolResult:
     result: CallToolResult
     reloaded: bool
+    supervisor_failure_tool: Tool | None = None
 
 
 @dataclass(frozen=True, slots=True)

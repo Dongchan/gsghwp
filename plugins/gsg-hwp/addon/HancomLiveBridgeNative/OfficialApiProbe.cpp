@@ -2,6 +2,7 @@
 
 #include "DispatchInvoke.h"
 #include "OfficialApiAutomationProbe.h"
+#include "OfficialApiCapability.h"
 #include "OfficialApiFixture.h"
 #include "OfficialApiParameterProbe.h"
 #include "OfficialApiState.h"
@@ -329,7 +330,8 @@ HRESULT PrepareActionFixtures(
     const std::vector<std::wstring>& inputLines) noexcept {
     for (const std::wstring& line : inputLines) {
         const std::vector<std::wstring> fields = Fields(line);
-        if (!fields.empty() && fields[0] == L"SET") {
+        if (!fields.empty() &&
+            (fields[0] == L"SET" || fields[0] == L"OPTIONS")) {
             continue;
         }
         if (fields.size() != 3 || fields[0] != L"FIXTURE" ||
@@ -400,7 +402,8 @@ HRESULT ApplyActionInputs(
     }
     for (const std::wstring& line : inputLines) {
         const std::vector<std::wstring> fields = Fields(line);
-        if (!fields.empty() && fields[0] == L"FIXTURE") {
+        if (!fields.empty() &&
+            (fields[0] == L"FIXTURE" || fields[0] == L"OPTIONS")) {
             continue;
         }
         if (fields.size() != 4 || fields[0] != L"SET" ||
@@ -430,6 +433,23 @@ bool HasActionSetInputs(
         const std::vector<std::wstring> fields = Fields(line);
         if (!fields.empty() && fields[0] == L"SET") {
             return true;
+        }
+    }
+    return false;
+}
+
+bool HasActionOption(
+    const std::vector<std::wstring>& inputLines,
+    const wchar_t* const option) noexcept {
+    for (const std::wstring& line : inputLines) {
+        const std::vector<std::wstring> fields = Fields(line);
+        if (fields.empty() || fields[0] != L"OPTIONS") {
+            continue;
+        }
+        for (size_t index = 1; index < fields.size(); ++index) {
+            if (fields[index] == option) {
+                return true;
+            }
         }
     }
     return false;
@@ -468,6 +488,10 @@ std::wstring ProbeAction(
             std::to_wstring(static_cast<LONG>(fixture)).c_str());
     }
     const DocumentState before = CaptureDocumentState(hwp);
+    const bool observeDialogs =
+        HasActionOption(inputLines, L"DIALOGS_OBSERVE");
+    const bool executeOnly =
+        HasActionOption(inputLines, L"EXECUTE_ONLY");
     CComVariant rawAction;
     const HRESULT createAction = Method(
         hwp,
@@ -501,7 +525,8 @@ std::wstring ProbeAction(
         getDefault = CallBoolean(action, L"GetDefault", {CComVariant(parameters)});
         const HRESULT inputStatus = ApplyActionInputs(parameters, inputLines);
         MessageBoxScope messageBoxes(hwp);
-        messageMode = messageBoxes.Activate();
+        messageMode =
+            observeDialogs ? S_FALSE : messageBoxes.Activate();
         const bool canExecute = SUCCEEDED(inputStatus) &&
             (SUCCEEDED(getDefault.status) || HasActionSetInputs(inputLines));
         if (canExecute && SUCCEEDED(messageMode)) {
@@ -509,20 +534,25 @@ std::wstring ProbeAction(
         } else if (FAILED(inputStatus)) {
             execute.status = inputStatus;
         }
-        if (SUCCEEDED(messageMode) &&
+        if (!executeOnly && SUCCEEDED(messageMode) &&
             SUCCEEDED(inputStatus) &&
             (!canExecute || FAILED(execute.status))) {
             run = CallBoolean(action, L"Run", {});
         }
     } else if (SUCCEEDED(actionDispatch)) {
         MessageBoxScope messageBoxes(hwp);
-        messageMode = messageBoxes.Activate();
+        messageMode =
+            observeDialogs ? S_FALSE : messageBoxes.Activate();
         if (SUCCEEDED(messageMode)) {
-            CComVariant empty;
-            execute = CallBoolean(action, L"Execute", {empty});
-            run = CallBoolean(action, L"Run", {});
+            if (executeOnly) {
+                run = CallBoolean(action, L"Run", {});
+            } else {
+                CComVariant empty;
+                execute = CallBoolean(action, L"Execute", {empty});
+                run = CallBoolean(action, L"Run", {});
+            }
         }
-    } else if (SUCCEEDED(createAction)) {
+    } else if (!executeOnly && SUCCEEDED(createAction)) {
         CComVariant rawHAction;
         CComPtr<IDispatch> hAction;
         HRESULT hActionStatus = PropertyGet(hwp, L"HAction", &rawHAction);
@@ -531,7 +561,8 @@ std::wstring ProbeAction(
         }
         if (SUCCEEDED(hActionStatus)) {
             MessageBoxScope messageBoxes(hwp);
-            messageMode = messageBoxes.Activate();
+            messageMode =
+                observeDialogs ? S_FALSE : messageBoxes.Activate();
             if (SUCCEEDED(messageMode)) {
                 run = CallBoolean(
                     hAction,
@@ -575,6 +606,101 @@ std::wstring Probe(IDispatch* const hwp, const std::wstring& payload) noexcept {
             return ErrorResponse(L"BAD_REQUEST", L"HCV1 request framing is invalid");
         }
         const std::vector<std::wstring> command = Fields(lines[1]);
+        if (command.size() == 2 && command[0] == L"CAPABILITY" &&
+            (command[1] == L"TYPELIB_EXTENSION" ||
+             command[1] == L"CONTAINMENT" ||
+             command[1] == L"STORY_SPINE" ||
+             command[1] == L"TEXT_CURRENT" ||
+             command[1] == L"TEXT_BODY" ||
+             command[1] == L"EFFECTIVE_PROPERTIES" ||
+             command[1] == L"CONTROL_ADAPTERS" ||
+             command[1] == L"CAPTURE_COORDINATOR" ||
+             command[1] == L"IMAGE_GRAPH" ||
+             command[1] == L"LAYOUT_GRAPH" ||
+             command[1] == L"TABLE_GRAPH" ||
+             command[1] == L"TABLE_TOPOLOGY")) {
+            return capability::ProbeCapability(
+                hwp,
+                command[1],
+                std::vector<std::wstring>(lines.begin() + 2, lines.end() - 1));
+        }
+        if (command.size() == 2 && command[0] == L"ACTION" &&
+            PlainName(command[1])) {
+            return ProbeAction(
+                hwp,
+                command[1],
+                std::vector<std::wstring>(lines.begin() + 2, lines.end() - 1));
+        }
+        if (command.size() == 3 && command[0] == L"PARAMETER_SET" &&
+            PlainName(command[1]) &&
+            (command[2] == L"-" || PlainName(command[2]))) {
+            return ProbeParameterSet(
+                hwp,
+                command[1],
+                command[2],
+                std::vector<std::wstring>(lines.begin() + 2, lines.end() - 1));
+        }
+        if (command.size() == 4 && command[0] == L"AUTOMATION" &&
+            PlainName(command[1]) && PlainName(command[2]) &&
+            (command[3] == L"property" || command[3] == L"method" ||
+             command[3] == L"event")) {
+            std::vector<std::wstring> arguments(lines.begin() + 2, lines.end() - 1);
+            if (!arguments.empty() && arguments.front() == L"FIXTURE\tISOLATED") {
+                const HRESULT fixture = PrepareIsolatedAutomationFixture(
+                    hwp,
+                    command[1]);
+                if (FAILED(fixture)) {
+                    return ErrorResponse(
+                        L"FIXTURE_FAILED",
+                        std::to_wstring(static_cast<LONG>(fixture)).c_str());
+                }
+                arguments.erase(arguments.begin());
+            }
+            return ProbeAutomation(
+                hwp,
+                command[1],
+                command[2],
+                command[3],
+                arguments);
+        }
+        return ErrorResponse(L"BAD_REQUEST", L"official API command is invalid");
+    } catch (...) {
+        return ErrorResponse(L"NATIVE_EXCEPTION", L"official API probe failed unexpectedly");
+    }
+}
+
+std::wstring Probe(
+    IDispatch* const hwp,
+    const std::wstring& payload,
+    const graph::layout::LayoutEnvironmentPlatformV1* const
+        environmentPlatform) noexcept {
+    try {
+        const std::vector<std::wstring> lines = Lines(payload);
+        if (hwp == nullptr || lines.size() < 3 || lines[0] != L"HCV1" ||
+            lines.back() != L"END") {
+            return ErrorResponse(L"BAD_REQUEST", L"HCV1 request framing is invalid");
+        }
+        const std::vector<std::wstring> command = Fields(lines[1]);
+        if (command.size() == 2 && command[0] == L"CAPABILITY" &&
+            (command[1] == L"TYPELIB_EXTENSION" ||
+             command[1] == L"CONTAINMENT" ||
+             command[1] == L"STORY_SPINE" ||
+             command[1] == L"TEXT_CURRENT" ||
+             command[1] == L"TEXT_BODY" ||
+             command[1] == L"EFFECTIVE_PROPERTIES" ||
+             command[1] == L"CONTROL_ADAPTERS" ||
+             command[1] == L"CAPTURE_COORDINATOR" ||
+             command[1] == L"IMAGE_GRAPH" ||
+             command[1] == L"LAYOUT_GRAPH" ||
+             command[1] == L"TABLE_GRAPH" ||
+             command[1] == L"TABLE_RANGE_BASES" ||
+             command[1] == L"TABLE_TOPOLOGY")) {
+            return capability::ProbeCapability(
+                hwp,
+                command[1],
+                std::vector<std::wstring>(lines.begin() + 2, lines.end() - 1),
+                environmentPlatform);
+        }
         if (command.size() == 2 && command[0] == L"ACTION" &&
             PlainName(command[1])) {
             return ProbeAction(

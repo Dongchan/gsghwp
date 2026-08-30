@@ -49,9 +49,7 @@ def _native_block(
         delete_from = None
         delete_count = 0
     else:
-        raise HwpLiveError(
-            f"기존 시리즈 표 행 수가 템플릿과 다릅니다: {target_rows}"
-        )
+        raise HwpLiveError(f"기존 시리즈 표 행 수가 템플릿과 다릅니다: {target_rows}")
     return NativeTableCopy(
         text_cells=tuple(
             NativeCellText(cell.address, cell.replacement) for cell in block.text_cells
@@ -140,9 +138,7 @@ def _verify_captions(
     if caption_title is None:
         return
     captions = _series_captions(window_handle, targets)
-    for index, (target, caption) in enumerate(
-        zip(targets, captions, strict=True)
-    ):
+    for index, (target, caption) in enumerate(zip(targets, captions, strict=True)):
         actual = caption_literal_text(
             caption.text,
             automatic_number=caption.automatic_number,
@@ -255,9 +251,7 @@ def sync_table_template_series(
         if plan.caption_title is not None
         else ()
     )
-    for index, (target, block) in enumerate(
-        zip(targets, plan.blocks, strict=True)
-    ):
+    for index, (target, block) in enumerate(zip(targets, plan.blocks, strict=True)):
         if target.control.rows is None:
             raise HwpLiveError("시리즈 표 행 수를 읽지 못했습니다")
         native = _native_block(
@@ -297,13 +291,14 @@ def sync_table_template_series(
                 )
             )
         )
-        commands.extend(
-            replace_table_cell_pictures_commands(
-                target.page,
-                target.control.instance_id,
-                native.pictures,
+        if native.pictures:
+            commands.extend(
+                replace_table_cell_pictures_commands(
+                    target.page,
+                    target.control.instance_id,
+                    native.pictures,
+                )
             )
-        )
     executed = execute_series_actions(window_handle, tuple(commands))
     verified = discover_table_series(window_handle, plan)
     if tuple(target.control.instance_id for target in verified) != tuple(
@@ -326,7 +321,7 @@ def sync_table_template_series(
         page_count=after.page_count,
         # 동기화 대상 표가 실제로 있던 쪽. discover_table_series 결과를 다시 쓰므로
         # 네이티브 왕복은 늘지 않는다.
-        affected_pages=tuple(sorted({target.page for target in verified})),
+        affected_pages=tuple(sorted({target.page.page for target in verified})),
         modified=after.modified,
         verified=True,
         verification_error=None,

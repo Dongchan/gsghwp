@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from threading import Event, Lock, Thread
 from time import monotonic_ns
-from typing import Final, Protocol, final, runtime_checkable
+from typing import Callable, Final, Protocol, final, runtime_checkable
 
 from hwp_errors import HwpLiveError
 
@@ -90,6 +90,26 @@ class HwpEventSignal(Protocol):
     def events_after(self, after_sequence: int) -> tuple[HwpEventObservation, ...]: ...
 
 
+ChangeObserver = Callable[[int], None]
+
+
+@runtime_checkable
+class ChangeObservable(Protocol):
+    """A change signal that can drop per-window caches as edits are observed.
+
+    Observers run on the hook/reader thread that raised the change, so an
+    implementation must keep them to constant-time bookkeeping.
+    """
+
+    def observe_window(
+        self,
+        window_handle: int,
+        observer: ChangeObserver,
+    ) -> None: ...
+
+    def forget_window(self, window_handle: int) -> None: ...
+
+
 _EVENT_HISTORY_LIMIT: Final = 256
 
 
@@ -104,18 +124,59 @@ class HwpEventObservation:
 
 @final
 class ChangeNotifier:
-    __slots__ = ("_changed", "_events", "_lock", "_sequence")
+    __slots__ = (
+        "_changed",
+        "_events",
+        "_lock",
+        "_observers",
+        "_observer_targets",
+        "_sequence",
+    )
 
     _changed: Event
     _events: deque[HwpEventObservation]
     _lock: Lock
+    _observers: dict[int, ChangeObserver]
+    _observer_targets: tuple[tuple[int, ChangeObserver], ...]
     _sequence: int
 
     def __init__(self) -> None:
         self._changed = Event()
         self._events = deque(maxlen=_EVENT_HISTORY_LIMIT)
         self._lock = Lock()
+        self._observers = {}
+        self._observer_targets = ()
         self._sequence = 0
+
+    def observe_window(
+        self,
+        window_handle: int,
+        observer: ChangeObserver,
+    ) -> None:
+        """Invalidate one window's caches whenever a change is observed.
+
+        Registration rebuilds a flat tuple so that ``notify`` reads the
+        observers without taking a lock or allocating: an edit burst must cost
+        one dictionary pop per watched window and nothing else.
+        """
+        with self._lock:
+            self._observers[window_handle] = observer
+            self._observer_targets = tuple(self._observers.items())
+
+    def forget_window(self, window_handle: int) -> None:
+        with self._lock:
+            if self._observers.pop(window_handle, None) is None:
+                return
+            self._observer_targets = tuple(self._observers.items())
+
+    def _invalidate(self) -> None:
+        for window_handle, observer in self._observer_targets:
+            try:
+                observer(window_handle)
+            except (OSError, RuntimeError, ValueError):
+                # A hook thread that dies stops every later change signal, so a
+                # failed invalidation must never escape into the message pump.
+                continue
 
     def notify(
         self,
@@ -133,6 +194,7 @@ class ChangeNotifier:
                         observed_at_monotonic_ns=monotonic_ns(),
                     )
                 )
+        self._invalidate()
         self._changed.set()
 
     def sequence(self) -> int:
@@ -290,6 +352,16 @@ class WinEventChangeSignal:
 
     def wait(self, after_sequence: int, timeout_seconds: float) -> int:
         return self._notifier.wait(after_sequence, timeout_seconds)
+
+    def observe_window(
+        self,
+        window_handle: int,
+        observer: ChangeObserver,
+    ) -> None:
+        self._notifier.observe_window(window_handle, observer)
+
+    def forget_window(self, window_handle: int) -> None:
+        self._notifier.forget_window(window_handle)
 
     def stop(self) -> None:
         self._stop.set()

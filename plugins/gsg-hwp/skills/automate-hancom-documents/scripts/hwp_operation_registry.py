@@ -132,12 +132,24 @@ _KNOWN_FAILURES: Final[Mapping[str, str]] = {
         "공식 ParameterArray 인터페이스를 런타임 객체가 제공하지 않아 E_NOINTERFACE입니다"
     ),
 }
+# 여기 적는 이름은 사용자가 실제로 부를 수 있는 도구여야 한다. production
+# 프로필에 없는 이름을 추천하면 그 답은 막다른 길이고, 사용자는 그것을
+# 확인하려고 한 번 더 왕복한다. `hwp_apply_layout` 이 그랬다 — production
+# 카탈로그에 없는데 두 자리에서 추천하고 있었다.
+#
+# `hwp_apply_layout` 은 "현재 커서 또는 plan.target=document_end 에 삽입"을
+# 한 도구가 하던 시절의 이름이고, production 에서는 그 일이 커서 쪽
+# (`hwp_insert_layout`)과 문서 끝(`hwp_append_layout`)으로 나뉘어 있다.
+# `tests/test_hwp_tool_catalog.py` 가 이 표의 모든 이름이 production 카탈로그에
+# 있는지 확인한다.
 _ACTION_RECOMMENDED_TOOLS: Final[Mapping[str, str]] = {
-    "TableCreate": "hwp_apply_layout",
+    # 표 만들기는 커서 자리의 일이다: layout.target=current 로 표 블록을 넣는다.
+    "TableCreate": "hwp_insert_layout",
 }
 _AUTOMATION_RECOMMENDED_TOOLS: Final[Mapping[tuple[str, str], str]] = {
     ("IHwpObject", "CreatePageImage"): "hwp_render_page",
-    ("IHwpObject", "InsertPicture"): "hwp_apply_layout",
+    # 그림 한 장 넣기는 레이아웃 계획이 아니라 그림 도구의 일이다.
+    ("IHwpObject", "InsertPicture"): "hwp_insert_image",
 }
 
 _BLOCKED_ACTIONS: Final = frozenset(

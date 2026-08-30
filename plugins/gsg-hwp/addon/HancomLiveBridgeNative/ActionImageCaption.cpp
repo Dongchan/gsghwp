@@ -59,10 +59,14 @@ bool ReadImagePixelSize(
     return true;
 }
 
+// Only the part Hancom still shows is fitted into the box. With no crop the
+// visible part is the whole file, which is the letterboxing behaviour every
+// caller had before crop existed.
 bool FitImageInBox(
     const std::wstring& path,
     const double boxWidthMm,
     const double boxHeightMm,
+    const PictureCrop& crop,
     double* const widthMm,
     double* const heightMm,
     ExecutionResult* const result) {
@@ -71,13 +75,109 @@ bool FitImageInBox(
     if (!ReadImagePixelSize(path, &pixelWidth, &pixelHeight, result)) {
         return false;
     }
-    const double scale = (std::min)(
-        boxWidthMm / static_cast<double>(pixelWidth),
-        boxHeightMm / static_cast<double>(pixelHeight));
-    *widthMm = static_cast<double>(pixelWidth) * scale;
-    *heightMm = static_cast<double>(pixelHeight) * scale;
+    const double visibleWidth =
+        static_cast<double>(pixelWidth) * (1.0 - crop.left - crop.right);
+    const double visibleHeight =
+        static_cast<double>(pixelHeight) * (1.0 - crop.top - crop.bottom);
+    if (visibleWidth <= 0.0 || visibleHeight <= 0.0) {
+        return SetError(result, L"IMAGE_SIZE", path, L"image crop leaves nothing visible");
+    }
+    const double scale = (std::min)(boxWidthMm / visibleWidth, boxHeightMm / visibleHeight);
+    *widthMm = visibleWidth * scale;
+    *heightMm = visibleHeight * scale;
     return std::isfinite(*widthMm) && std::isfinite(*heightMm) &&
         *widthMm > 0.0 && *heightMm > 0.0;
+}
+
+bool ReadOptionalItemLong(
+    IDispatch* const set,
+    const wchar_t* const name,
+    LONG* const value) {
+    CComVariant raw;
+    HRESULT status = Method(set, L"Item", {CComVariant(name)}, &raw);
+    if (SUCCEEDED(status)) {
+        status = AsLong(raw, value);
+    }
+    return SUCCEEDED(status);
+}
+
+LONG CropSkipUnits(const double fraction, const LONG original) {
+    if (fraction <= 0.0 || original <= 0) {
+        return 0;
+    }
+    const double units = std::floor(fraction * static_cast<double>(original));
+    if (units <= 0.0) {
+        return 0;
+    }
+    const double limit = static_cast<double>(original);
+    return static_cast<LONG>(units < limit ? units : limit);
+}
+
+// Hancom's own crop, applied to the picture control that was just inserted.
+// DrawImageAttr (ParameterSetTable_2504.pdf p41-42) carries both the trim
+// amounts SkipLeft/SkipTop/SkipRight/SkipBottom and OriginalSizeX/OriginalSizeY
+// for the same source image. The file on disk is only read, never rewritten.
+//
+// Two assumptions stand behind this, and neither is proven in this repository.
+//   Unit -- the catalogue does not state what Skip* counts in. This scales the
+//     caller's unitless fractions by OriginalSizeX/Y read from the same set at
+//     run time, which assumes the two live in one coordinate space.
+//   Propagation -- SetItem here writes into the nested ShapeDrawImageAttr set
+//     obtained from the control's Properties, and the caller then puts
+//     Properties back on the control. That assumes the nested set is the
+//     parent's own storage rather than a copy. The only other use of
+//     ShapeDrawImageAttr in this repository is read-only (BatchExecutor.cpp,
+//     telling a picture from any other gso), so there is no write precedent
+//     here to lean on.
+//
+// How each assumption fails is not the same, and only one is caught. If this
+// build hands back no ShapeDrawImageAttr, no OriginalSizeX/Y, or refuses the
+// SetItem, false is returned: the caller then sizes the picture the way it
+// always did and verify_inserted_picture measures that uncropped box and
+// reports cropped=false. If instead SetItem succeeds but does not reach the
+// control, this returns true, the box is sized for the surviving part, and the
+// size-based verification cannot tell that apart from a crop that landed. Live
+// confirmation is what settles the propagation assumption; nothing here does.
+bool TryApplyPictureCrop(IDispatch* const properties, const PictureCrop& crop) {
+    CComVariant rawAttributes;
+    HRESULT status = Method(
+        properties,
+        L"Item",
+        {CComVariant(L"ShapeDrawImageAttr")},
+        &rawAttributes);
+    if (FAILED(status)) {
+        return false;
+    }
+    CComPtr<IDispatch> imageAttributes;
+    status = AsDispatch(rawAttributes, imageAttributes);
+    if (FAILED(status) || imageAttributes == nullptr) {
+        return false;
+    }
+    LONG originalWidth = 0;
+    LONG originalHeight = 0;
+    if (!ReadOptionalItemLong(imageAttributes, L"OriginalSizeX", &originalWidth) ||
+        !ReadOptionalItemLong(imageAttributes, L"OriginalSizeY", &originalHeight) ||
+        originalWidth <= 0 || originalHeight <= 0) {
+        return false;
+    }
+    const std::pair<const wchar_t*, LONG> skips[] = {
+        {L"SkipLeft", CropSkipUnits(crop.left, originalWidth)},
+        {L"SkipRight", CropSkipUnits(crop.right, originalWidth)},
+        {L"SkipTop", CropSkipUnits(crop.top, originalHeight)},
+        {L"SkipBottom", CropSkipUnits(crop.bottom, originalHeight)},
+    };
+    CComVariant ignored;
+    for (const auto& [name, value] : skips) {
+        status = Method(
+            imageAttributes,
+            L"SetItem",
+            {CComVariant(name), CComVariant(value)},
+            &ignored);
+        if (FAILED(status)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool ConfigureImageCell(Context* const context, const std::wstring& location) {
@@ -209,6 +309,12 @@ bool InsertPicture(Context* const context, const Command& command) {
         return false;
     }
     CComVariant ignored;
+    // Crop first, size second: the object rectangle has to describe the part
+    // that survived the crop, or Hancom stretches what is left to fill it.
+    const PictureCrop crop = command.hasPictureCrop &&
+            TryApplyPictureCrop(properties, command.pictureCrop)
+        ? command.pictureCrop
+        : PictureCrop{};
     if (command.hasPictureBox) {
         double widthMm = 0.0;
         double heightMm = 0.0;
@@ -216,6 +322,7 @@ bool InsertPicture(Context* const context, const Command& command) {
                 path,
                 command.pictureWidthMm,
                 command.pictureHeightMm,
+                crop,
                 &widthMm,
                 &heightMm,
                 context->result)) {

@@ -12,6 +12,9 @@ from hwp_errors import HwpLiveError
 NATIVE_INSPECT_PAGES_MAX: Final = 256
 # Native source: BatchProtocol.cpp::kMaximumOperations defines this operation limit.
 NATIVE_BATCH_MAX_OPERATIONS: Final = 5_000
+# Native source: LiveInspection.cpp::kParagraphScanHardLimit clamps the request
+# to this many paragraphs per InspectParagraphStyles call.
+NATIVE_PARAGRAPH_STYLE_SCAN_MAX: Final = 20_000
 
 
 @dataclass(frozen=True, slots=True)

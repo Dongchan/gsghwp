@@ -1,6 +1,6 @@
 interface:
   display_name: "공생계 한컴 베타"
   short_description: "열린 HWP 실시간 편집과 네이티브 레이아웃 구성"
-  default_prompt: "$automate-hancom-documents의 호스트 표시 SKILL.md를 먼저 직접 읽고 그 실행 정책을 단일 원본으로 따르세요. 표시 경로 형식은 가정하지 마세요. 현재 열린 HWP에서 가장 구체적인 gsg-hwp-beta-live 도구를 즉시 실행하고, 연결이 없거나 닫혔으면 보고 후 중단하며 computer-use나 UI 자동화로 우회하지 마세요."
+  default_prompt: "$automate-hancom-documents를 사용해 현재 열린 HWP에서 가장 구체적인 gsg-hwp-beta-live 도구를 실행하고, 이미지·PPT 재구성은 스킬이 지정한 native-layout 참조를 따르며, MCP가 없으면 UI 자동화로 우회하지 말고 중단하세요."
 policy:
   allow_implicit_invocation: true

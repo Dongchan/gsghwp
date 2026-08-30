@@ -25,7 +25,12 @@ from hwp_live_structure_contract import (
     TableImageUpdate,
     TableUpdateResult,
 )
-from hwp_live_text_patch_contract import TextPatchRequest, TextPatchResult
+from hwp_live_text_patch_batch_history import execute_managed_text_patch_batch
+from hwp_live_text_patch_contract import (
+    TextPatchPlanGuard,
+    TextPatchRequest,
+    TextPatchResult,
+)
 
 
 class LiveHwpEditSession(LiveHwpInspectionSession):
@@ -56,6 +61,25 @@ class LiveHwpEditSession(LiveHwpInspectionSession):
         request: TextPatchRequest,
     ) -> TextPatchResult:
         candidate, hwp = self._validate(session_id)
+        if request.formatting is not None and request.target.kind != "current":
+            # A format-only patch is a one-target prepared transaction. It captures
+            # only requested prior format values and records native inverses; no
+            # document-file checkpoint belongs on this public formatting route.
+            #
+            # ``current`` stays on the single path: the batch engine validates with
+            # require_current_expected=True, which rejects a cursor-targeted patch
+            # that carries no expected_text -- and the cursor is the caller's own
+            # selection, so there is nothing to re-confirm it against. The single
+            # path supports formatting on its own (execute_managed_text_patch sends
+            # every formatting request down the checkpointed route).
+            return execute_managed_text_patch_batch(
+                hwp,
+                candidate,
+                self._live_edit_history,
+                (request,),
+                self._unsafe_selectors,
+                self._guard(candidate, hwp),
+            )
         return execute_managed_text_patch(
             hwp,
             candidate,
@@ -63,6 +87,23 @@ class LiveHwpEditSession(LiveHwpInspectionSession):
             request,
             self._unsafe_selectors,
             self._guard(candidate, hwp),
+        )
+
+    def patch_text_batch(
+        self,
+        session_id: str,
+        requests: tuple[TextPatchRequest, ...],
+        plan_guard: TextPatchPlanGuard | None = None,
+    ) -> TextPatchResult:
+        candidate, hwp = self._validate(session_id)
+        return execute_managed_text_patch_batch(
+            hwp,
+            candidate,
+            self._live_edit_history,
+            requests,
+            self._unsafe_selectors,
+            self._guard(candidate, hwp),
+            plan_guard,
         )
 
     def apply_layout(

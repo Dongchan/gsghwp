@@ -238,8 +238,25 @@ _DEFINITIONS: Final = _register_workflow_definitions((
     ),
     _WorkflowDefinition(
         "image.resize",
-        "그림 크기 또는 배치 크기 조절",
-        (_IMAGE, ("크기", "너비", "높이", "비율", "resize", "scale")),
+        "그림 자르기 또는 표 셀 사이 배치 조절",
+        (
+            _IMAGE,
+            (
+                "크기",
+                "너비",
+                "높이",
+                "비율",
+                "자르",
+                "잘라",
+                "크롭",
+                "확대",
+                "옮기",
+                "이동",
+                "resize",
+                "scale",
+                "crop",
+            ),
+        ),
     ),
     _WorkflowDefinition(
         "caption.add",
@@ -284,7 +301,15 @@ _HYBRID_INDEX: Final = WorkflowHybridIndex(
         for definition in _DEFINITIONS
     )
 )
-_ATOMIC_ONLY = (("연결", "그림", "포함"), ("linked", "picture", "embedded"))
+_ATOMIC_ONLY_PICTURE_CONCEPTS: Final = frozenset({"image", "linked", "embedded"})
+_ATOMIC_ONLY_ABSTENTION: Final = "route_abstained:picture_link_embed_is_atomic_only"
+_NO_CANDIDATE_ABSTENTION: Final = "route_abstained:no_candidate_reached_visibility"
+# 확정 임계값. corpus(87건)로는 0.50~0.72 전 구간이 87/87로 동일해 이 값을
+# 아래쪽으로 정당화하지 못한다. 근거가 서는 것은 상한뿐이다 — 0.75에서 1건,
+# 0.80에서 4건, 0.90에서 10건이 resolved에서 ambiguous로 떨어진다.
+_DECISIVE_TOP_SCORE: Final = 0.72
+# 1·2위 격차 하한. corpus로는 0.0(=격차 요구 없음)과 0.04가 완전히 같은 결과라
+# 이 값에는 근거가 없다. 0.15부터 2건이 ambiguous로 떨어지므로 상한만 관측된다.
 _RESOLUTION_MARGIN: Final = 0.04
 
 
@@ -293,7 +318,10 @@ def workflow_count() -> int:
 
 
 def has_decisive_workflow_lead(top_score: float, second_score: float) -> bool:
-    return top_score >= 0.72 and top_score - second_score >= _RESOLUTION_MARGIN
+    return (
+        top_score >= _DECISIVE_TOP_SCORE
+        and top_score - second_score >= _RESOLUTION_MARGIN
+    )
 
 
 def _hits(frame: WorkflowSemanticFrame, values: tuple[str, ...]) -> int:
@@ -383,14 +411,18 @@ def resolve_workflow(
         hit.workflow_id: hit
         for hit in _HYBRID_INDEX.search(frame.positive)
     }
-    if (
-        {"image", "linked", "embedded"} <= query_concepts
-        or any(all(frame.contains(term) for term in pattern) for pattern in _ATOMIC_ONLY)
-    ):
+    # 연결(linked)+그림(image)+포함(embedded)이 함께 오는 의도의 주인은 원자 액션
+    # action:PictureLinkedToEmbedded 이고, 워크플로 35개 중에는 대응이 없다.
+    # 여기서 기권하지 않으면 "연결된 그림을 내장 그림으로 바꿔줘"가
+    # image.replace 를 confidence 1.0 · status=resolved 로 잡아 자동 실행 대상이
+    # 된다(그림을 바꿔치우는 파괴적 오라우팅). 기권하면 호출부가 원자 레지스트리로
+    # 넘겨 action:PictureLinkedToEmbedded 를 후보로 돌려준다.
+    if _ATOMIC_ONLY_PICTURE_CONCEPTS <= query_concepts:
         return WorkflowResolution(
             query=cleaned,
             status="not_found",
             lookup_microseconds=(time.perf_counter_ns() - started) // 1_000,
+            steps=(_ATOMIC_ONLY_ABSTENTION,),
         )
 
     ranked: list[tuple[float, _WorkflowDefinition, WorkflowMatchKind]] = []
@@ -409,22 +441,38 @@ def resolve_workflow(
             and state_score <= 0
         ):
             continue
+        # 아래 가중치의 근거는 corpus 87건(KOREAN_WORKFLOW_EXAMPLES) 위에서 값을
+        # 0으로 죽이거나 키워 본 관측이다. 판정은 세 종류로 갈린다.
+        #   근거 있음  — 0으로 죽여도 키워도 정확도가 움직인다.
+        #   상한만     — 0으로 해도 corpus는 멀쩡하고, 키우면 나빠진다.
+        #   미확정     — 점수는 실제로 붙는데 argmax를 한 번도 바꾸지 못한다.
+        # 근거 있음: 0 → 85/87, 2배 → 77/87(그중 4건은 틀린 워크플로로 확정).
         group_score = 0.75 * matched_groups / len(definition.groups)
+        # 미확정: corpus 3045쌍 중 285쌍에서 실제로 붙고 상한 0.15까지 닿지만,
+        # 0으로 죽여도 4배로 키워도 87/87 그대로다. group_score에 눌린다.
         context_score = min(0.15, 0.05 * _hits(frame, definition.contexts))
+        # 미확정: 300쌍에서 붙고 상한 0.45까지 닿는데 0배·3배 모두 87/87.
         negative_score = min(0.45, 0.15 * _hits(frame, definition.negatives))
+        # 상한만: 0으로 해도 87/87, 상한을 0.5로 열면 86/87.
         specificity = min(0.05, 0.01 * sum(_hits(frame, group) for group in definition.groups))
+        # 상한만: 0으로 해도 87/87, 0.8로 키우면 1건이 틀린 워크플로로 확정된다.
         semantic_score = 0.4 if preference == definition.workflow_id else 0
         matched_concepts = (
             0 if hybrid_hit is None else len(hybrid_hit.matched_concepts)
         )
         preference_adjustment = (
+            # 미확정: 0으로 죽여도 2배로 키워도 87/87. 같은 조건에 rule 쪽
+            # semantic_score(0.4)가 이미 붙어 max() 비교에서 밀리는 것으로 보이나
+            # 그 지배 관계를 증명하지는 못했다.
             0.25
             if preference == definition.workflow_id
+            # 상한만: 0으로 해도 87/87, -0.45로 키우면 86/87.
             else (-0.15 if preference is not None else 0.0)
         )
         hybrid_confidence = max(0.0, min(
             1.0,
             hybrid_score
+            # 근거 있음: 0 → 83/87, 3배 → 67/87.
             + 0.08 * min(3, matched_concepts)
             + state_score
             + preference_adjustment,
@@ -472,6 +520,7 @@ def resolve_workflow(
             query=cleaned,
             status="not_found",
             lookup_microseconds=(time.perf_counter_ns() - started) // 1_000,
+            steps=(_NO_CANDIDATE_ABSTENTION,),
         )
 
     top_score, top_definition, top_kind = ranked[0]

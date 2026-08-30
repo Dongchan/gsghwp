@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from hwp_errors import HwpLiveError
-from hwp_image_fit import fit_image_in_box
+from hwp_image_fit import (
+    cover_crop_in_box,
+    fit_cropped_image_in_box,
+    fit_image_in_box,
+)
 from hwp_live_api import LiveHwpApplication
 from hwp_live_native_action_models import (
     BooleanValue,
@@ -20,6 +24,7 @@ from hwp_live_native_action_models import (
     NativeSnapshot,
     NativeSetter,
     ParameterActionCommand,
+    PictureCrop,
     SelectControlCommand,
     TextValue,
 )
@@ -144,6 +149,9 @@ def operate_object_recipe(
     image_document_end = False
     image_fitted_width_mm: float | None = None
     image_fitted_height_mm: float | None = None
+    image_uncropped_width_mm: float | None = None
+    image_uncropped_height_mm: float | None = None
+    image_crop: PictureCrop | None = None
     image_replace_before: NativeDetailedControl | None = None
     image_replace_expectation: PictureReplaceExpectation | None = None
     resolved_control_page: NativePageInspection | None = None
@@ -191,6 +199,27 @@ def operate_object_recipe(
                 width_mm=width,
                 height_mm=height,
             )
+            # 상자를 꽉 채우라고 한 경우에만 자르기가 붙는다. 자를지 말지는
+            # 도구가 정하지 않는다. 어느 가장자리를 얼마나 감출지는 원본 픽셀
+            # 비와 상자 비에서 정해지는 값이고, 실제 자르기는 C++/ATL 이 한/글
+            # SkipLeft/SkipTop/SkipRight/SkipBottom 으로 수행한다. 여기서 만든
+            # 값은 wire 로 넘길 비율과 결과 대조용 기대치일 뿐이다.
+            if recipe_inputs is not None and recipe_inputs.picture_fit == "cover":
+                image_crop = cover_crop_in_box(
+                    image,
+                    width_mm=width,
+                    height_mm=height,
+                )
+                image_uncropped_width_mm = image_fitted_width_mm
+                image_uncropped_height_mm = image_fitted_height_mm
+                image_fitted_width_mm, image_fitted_height_mm = (
+                    fit_cropped_image_in_box(
+                        image,
+                        width_mm=width,
+                        height_mm=height,
+                        crop=image_crop,
+                    )
+                )
         image_before_page = (
             routing_page.page_count if document_end else routing_page.page
         )
@@ -201,7 +230,7 @@ def operate_object_recipe(
         if image_before is None:
             raise HwpLiveError("네이티브 그림 삽입 전 상세 구조를 읽지 못했습니다")
         image_before_controls = image_before.controls
-        commands = (*prefix, InsertPictureCommand(image, width, height))
+        commands = (*prefix, InsertPictureCommand(image, width, height, image_crop))
     elif workflow == "image.replace":
         image = single_image(assets)
         resolved_control = resolve_control_target(
@@ -509,8 +538,16 @@ def operate_object_recipe(
     if picture_caption_probe is not None:
         executed += picture_caption_probe.commands_executed
         elapsed += picture_caption_probe.elapsed_microseconds
+    image_replace_content_unverified = (
+        workflow == "image.replace" and image_replace_expectation is None
+    )
     operation_verified: bool | None = None
-    operation_message = "프로토콜 9 C++/ATL 네이티브 개체 recipe를 실행했습니다"
+    operation_message = (
+        "프로토콜 9 그림 교체 명령은 실행됐지만 새 그림 내용은 구조 및 렌더에서 "
+        + "확인하지 못했습니다"
+        if image_replace_content_unverified
+        else "프로토콜 9 C++/ATL 네이티브 개체 recipe를 실행했습니다"
+    )
     created_control_ids: tuple[str, ...] = ()
     if workflow == "image.insert":
         if image_before_page is None:
@@ -534,13 +571,26 @@ def operate_object_recipe(
                 image_fitted_width_mm,
                 image_fitted_height_mm,
                 after_pages if image_document_end else frozenset(),
+                image_uncropped_width_mm,
+                image_uncropped_height_mm,
             ),
         )
         created_control_ids = (verified_picture.instance_id,)
+        # 자르기를 요청했으면 실제로 잘렸는지까지 읽은 크기로 말한다. 브리지가
+        # 자르지 못해 종전대로 넣은 경우를 잘랐다고 보고하면 안 된다.
+        crop_note = (
+            ""
+            if verified_picture.cropped is None
+            else (
+                ", 한/글 자르기 적용"
+                if verified_picture.cropped
+                else ", 한/글 자르기 미적용 — 원본 비율로 넣음"
+            )
+        )
         operation_message = (
             "프로토콜 9 C++/ATL 네이티브 개체 recipe를 실행했습니다 "
             f"(실제 그림 크기 {verified_picture.width_mm:.3f}"
-            f"×{verified_picture.height_mm:.3f} mm)"
+            f"×{verified_picture.height_mm:.3f} mm{crop_note})"
         )
         operation_verified = True
     if workflow == "image.replace" and image_replace_expectation is not None:
@@ -650,6 +700,11 @@ def operate_object_recipe(
                 else "native_snapshot_before_after"
             ),
             "verified": operation_verified,
+            "failure_stage": (
+                "image_replace_content_verification"
+                if image_replace_content_unverified
+                else None
+            ),
             "commands_executed": executed,
             "native_elapsed_microseconds": elapsed,
             "current_page": current_page,

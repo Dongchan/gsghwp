@@ -5,16 +5,17 @@ from collections.abc import Callable
 
 from hwp_errors import HwpLiveError
 from hwp_live_api import LiveHwpApplication
-from hwp_live_contract import LiveContext, OpenDocument
+from hwp_live_contract import LiveContext, OpenDocument, ParagraphStyle
 from hwp_live_inspection import inspect_native_context
 from hwp_live_native_action_models import NativeSnapshot
 from hwp_live_native_batch import (
     inspect_native_page,
     inspect_native_structure,
+    read_native_paragraph_styles,
     read_native_snapshot,
 )
 from hwp_live_native_structure import document_structure_from_native
-from hwp_live_rot import HwpDocumentCandidate
+from hwp_live_rot import HwpDocumentCandidate, confirmed_page_count
 from hwp_live_structure_contract import DocumentStructure
 
 
@@ -22,7 +23,7 @@ def connected_document(
     candidate: HwpDocumentCandidate,
     snapshot: NativeSnapshot,
 ) -> OpenDocument:
-    _require_snapshot_document(candidate, snapshot, "현재 상태")
+    require_snapshot_document(candidate, snapshot, "현재 상태")
     return OpenDocument(
         selector=candidate.selector,
         title=ntpath.basename(candidate.full_name) or "저장되지 않은 문서",
@@ -31,13 +32,15 @@ def connected_document(
         format=candidate.document_format,
         edit_mode=candidate.edit_mode,
         modified=snapshot.modified,
-        page_count=snapshot.page_count,
+        # 네이티브 스냅샷도 같은 PageCount 를 읽는다. 아직 쪽 나누기가 끝나지
+        # 않아 0 이면 0 을 사실처럼 싣지 않고 미확정으로 답한다.
+        page_count=confirmed_page_count(snapshot.page_count),
         active=True,
         window_handle=candidate.window_handle,
     )
 
 
-def _require_snapshot_document(
+def require_snapshot_document(
     candidate: HwpDocumentCandidate,
     snapshot: NativeSnapshot,
     label: str,
@@ -45,9 +48,57 @@ def _require_snapshot_document(
     expected_name = ntpath.normcase(ntpath.normpath(candidate.full_name))
     actual_name = ntpath.normcase(ntpath.normpath(snapshot.full_name))
     if snapshot.document_id != candidate.document_id or actual_name != expected_name:
-        raise HwpLiveError(
-            f"한컴 네이티브 {label} 문서가 현재 연결 문서와 다릅니다"
-        )
+        raise HwpLiveError(f"한컴 네이티브 {label} 문서가 현재 연결 문서와 다릅니다")
+
+
+def _enrich_numbering_from_native_scan(
+    candidate: HwpDocumentCandidate,
+    snapshot: NativeSnapshot,
+    paragraph: ParagraphStyle,
+    guard: Callable[[], None],
+) -> ParagraphStyle:
+    """Add numbering fields only from the exact native caret paragraph.
+
+    The older snapshot wire record does not carry these fields. The paragraph
+    scan is optional, so an unavailable or mismatched scan leaves the existing
+    observation untouched instead of manufacturing a marker value.
+    """
+    scan = read_native_paragraph_styles(
+        candidate.window_handle,
+        list_id=snapshot.cursor.list_id,
+        start=snapshot.cursor.paragraph,
+        limit=1,
+        paragraph_shape=True,
+    )
+    guard()
+    if scan is None:
+        return paragraph
+    expected_name = ntpath.normcase(ntpath.normpath(candidate.full_name))
+    actual_name = ntpath.normcase(ntpath.normpath(scan.full_name))
+    if (
+        scan.document_id != candidate.document_id
+        or actual_name != expected_name
+        or scan.list_id != snapshot.cursor.list_id
+    ):
+        return paragraph
+    observed = next(
+        (
+            item
+            for item in scan.paragraphs
+            if item.paragraph == snapshot.cursor.paragraph
+            and (item.style_id is None or item.style_id == snapshot.style_id)
+        ),
+        None,
+    )
+    if observed is None:
+        return paragraph
+    updates: dict[str, object] = {}
+    if observed.heading_type is not None:
+        updates["heading_type"] = observed.heading_type
+        updates["marker_is_automatic"] = observed.heading_type > 0
+    if observed.heading_level is not None:
+        updates["heading_level"] = observed.heading_level
+    return paragraph.model_copy(update=updates) if updates else paragraph
 
 
 def inspect_candidate_context(
@@ -60,7 +111,7 @@ def inspect_candidate_context(
     guard()
     if snapshot is None:
         raise HwpLiveError("한컴 네이티브 현재 상태 조회를 사용할 수 없습니다")
-    _require_snapshot_document(candidate, snapshot, "현재 상태 조회")
+    require_snapshot_document(candidate, snapshot, "현재 상태 조회")
     page = inspect_native_page(
         candidate.window_handle,
         snapshot.current_page,
@@ -82,11 +133,21 @@ def inspect_candidate_context(
         )
     page_setup = hwp.get_pagedef_as_dict("eng")
     guard()
-    return inspect_native_context(
+    context = inspect_native_context(
         snapshot,
         connected_document(candidate, snapshot),
         page.text,
         page_setup,
+    )
+    return context.model_copy(
+        update={
+            "paragraph_style": _enrich_numbering_from_native_scan(
+                candidate,
+                snapshot,
+                context.paragraph_style,
+                guard,
+            )
+        }
     )
 
 

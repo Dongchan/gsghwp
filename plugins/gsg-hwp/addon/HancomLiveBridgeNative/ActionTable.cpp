@@ -69,7 +69,21 @@ bool SelectControl(
             instanceId)) {
         return false;
     }
-    return GetSelectedControl(context, instanceId, selectedControl);
+    if (GetSelectedControl(context, instanceId, selectedControl)) {
+        return true;
+    }
+    // SelectCtrl already said it selected nothing. Reading CurSelectedCtrl
+    // after that answers with an empty VARIANT, and the type mismatch that
+    // AsDispatch reports for it (0x80020005) says nothing about the actual
+    // problem, which is that no control in this document carries that id.
+    if (!selected) {
+        return SetError(
+            context->result,
+            L"CONTROL_NOT_FOUND",
+            instanceId,
+            L"SelectCtrl found no control with this instance id");
+    }
+    return false;
 }
 
 bool SelectControl(Context* const context, const std::wstring& instanceId) {
@@ -530,23 +544,96 @@ bool MergeCellsUsingTopology(
     const std::wstring& first,
     const std::wstring& second,
     const bool clearTopology) {
-    if (context->topology.Empty() && !BuildCellTopology(context)) {
+    Position savedCursor;
+    Selection savedSelection;
+    if (!GetPosition(context->hwp, &savedCursor, context->result) ||
+        !GetSelection(
+            context->hwp,
+            &savedSelection,
+            context->result,
+            SelectionCapturePolicy::RequiredControl)) {
         return false;
+    }
+    if (!hancom::com_state::CanRestoreSelection(savedSelection)) {
+        return SetError(
+            context->result,
+            L"UNSUPPORTED_SELECTION",
+            first + L":" + second,
+            L"the active HWP selection cannot be restored around cell merge");
+    }
+    bool mergeApplied = false;
+    bool ownerFallbackAllowed = false;
+    const auto finish = [&]() {
+        const Error primaryError = context->result->error;
+        const std::wstring primaryStep = context->result->failedStep;
+        const bool restored = mergeApplied
+            ? hancom::com_state::RestoreSelectionAfterMerge(
+                context->hwp,
+                savedCursor,
+                savedSelection,
+                NormalizeAddress(first),
+                ownerFallbackAllowed)
+            : hancom::com_state::RestoreSelection(
+                context->hwp,
+                savedCursor,
+                savedSelection);
+        if (!restored) {
+            if (primaryError.code.empty()) {
+                SetError(
+                    context->result,
+                    L"STATE_RESTORE",
+                    first + L":" + second,
+                    L"cursor or selection restoration failed after cell merge");
+            } else {
+                context->result->error = primaryError;
+                context->result->error.message +=
+                    L"; cursor or selection restoration also failed";
+                context->result->failedStep = primaryStep;
+            }
+            return false;
+        }
+        return mergeApplied && primaryError.code.empty();
+    };
+    if (context->topology.Empty() && !BuildCellTopology(context)) {
+        return finish();
     }
     std::vector<hancom::inspection::CellTopologyStep> path;
     std::vector<std::wstring> region;
     std::wstring error;
     if (!context->topology.PlanRectangularMerge(first, second, &path, &region, &error)) {
-        return SetError(
+        SetError(
             context->result,
             L"MERGE_RANGE",
             first + L":" + second,
             error.empty() ? L"merge range is not a complete cell rectangle" : error);
+        return finish();
+    }
+    if ((savedSelection.mode & kSelectionModeMask) == 3) {
+        std::wstring selectedFirst;
+        std::wstring selectedLast;
+        std::vector<hancom::inspection::CellTopologyStep> selectedPath;
+        std::vector<std::wstring> selectedRegion;
+        if (context->topology.PlanRectangularSelection(
+                savedSelection.start.list,
+                savedSelection.end.list,
+                &selectedFirst,
+                &selectedLast,
+                &selectedPath,
+                &selectedRegion,
+                &error)) {
+            ownerFallbackAllowed = std::all_of(
+                selectedRegion.begin(),
+                selectedRegion.end(),
+                [&](const std::wstring& address) {
+                    return std::find(region.begin(), region.end(), address) !=
+                        region.end();
+                });
+        }
     }
     if (!GoToCell(context, first) ||
         !RunAction(context->action, L"TableCellBlock", context->result, first) ||
         !RunAction(context->action, L"TableCellBlockExtend", context->result, first)) {
-        return false;
+        return finish();
     }
     for (const hancom::inspection::CellTopologyStep& step : path) {
         const wchar_t* const action =
@@ -554,24 +641,26 @@ bool MergeCellsUsingTopology(
             ? L"TableRightCell"
             : L"TableLowerCell";
         if (!RunAction(context->action, action, context->result, step.destination)) {
-            return false;
+            return finish();
         }
         if (GetCellAddress(context->hwp) != step.destination) {
-            return SetError(
+            SetError(
                 context->result,
                 L"MERGE_PATH",
                 step.destination,
                 L"actual cell neighbour did not match the inspected topology");
+            return finish();
         }
     }
     if (!RunAction(context->action, L"TableMergeCell", context->result, first)) {
-        return false;
+        return finish();
     }
+    mergeApplied = true;
     if (clearTopology) {
         context->topology.Clear();
     }
     context->currentCell = NormalizeAddress(first);
-    return true;
+    return finish();
 }
 
 bool MergeCells(Context* const context, const std::wstring& first, const std::wstring& second) {

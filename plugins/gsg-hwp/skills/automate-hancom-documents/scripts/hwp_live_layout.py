@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from hwp_document_style_profile import (
+    document_body_style_id,
+    resolve_layout_style_profile,
+)
+from hwp_document_style_usage import DocumentStyleUsage
 from hwp_errors import HwpLiveError
 from hwp_image_fit import fit_image_in_box
-from hwp_live_api import HwpControl, LiveHwpApplication
+from hwp_live_api import HwpControl, LiveHwpApplication, ShapeValue
 from hwp_live_anchor import require_empty_paragraph
 from hwp_live_contract import (
     ImageBlock,
@@ -14,92 +19,90 @@ from hwp_live_contract import (
 )
 from hwp_live_formatting import apply_paragraph_style, apply_text_style
 from hwp_live_inspection import inspect_styles
+from hwp_live_native_text_format import lead_before_mm
 from hwp_live_table import insert_table
 from hwp_live_table_contract import TableBlock
 from hwp_picture_placement import enforce_picture_size
+from hwp_reference_layout_geometry import (
+    HWPUNITS_PER_INCH,
+    MILLIMETERS_PER_INCH,
+    SectionPageGeometry,
+)
 from hwp_trusted_paths import input_local_image
 
 
-_TABLE_CAPTION_STYLE_NAMES = frozenset({"표타이틀", "표제목"})
-_BASE_STYLE_NAMES = frozenset({"바탕글", "normal"})
+def _page_value(values: Mapping[str, ShapeValue], key: str) -> float:
+    value = values.get(key)
+    if isinstance(value, bool):
+        return float(int(value))
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
 
 
-def _compact_style_name(name: str) -> str:
-    return "".join(character.casefold() for character in name if character.isalnum())
-
-
-def _resolve_table_caption_style(
-    names: tuple[str, ...],
-    requested: str | None,
-) -> str:
-    if requested is not None:
-        if requested not in names:
-            raise HwpLiveError(f"현재 문서에 표 캡션 스타일 '{requested}'이 없습니다")
-        return requested
-    exact = tuple(
-        name for name in names if _compact_style_name(name) in _TABLE_CAPTION_STYLE_NAMES
+def document_page_geometry(
+    hwp: LiveHwpApplication,
+    guard: Callable[[], None],
+) -> SectionPageGeometry:
+    page = hwp.get_pagedef_as_dict("eng")
+    guard()
+    return SectionPageGeometry.from_mm(
+        paper_width_mm=_page_value(page, "PaperWidth"),
+        paper_height_mm=_page_value(page, "PaperHeight"),
+        landscape=bool(_page_value(page, "Landscape")),
+        left_margin_mm=_page_value(page, "LeftMargin"),
+        right_margin_mm=_page_value(page, "RightMargin"),
+        top_margin_mm=_page_value(page, "TopMargin"),
+        bottom_margin_mm=_page_value(page, "BottomMargin"),
+        header_mm=_page_value(page, "HeaderLen"),
+        footer_mm=_page_value(page, "FooterLen"),
+        gutter_mm=_page_value(page, "GutterLen"),
+        gutter_type=int(_page_value(page, "GutterType")),
     )
-    if len(exact) == 1:
-        return exact[0]
-    fallback = tuple(
-        name
-        for name in names
-        if any(_compact_style_name(name).endswith(alias) for alias in _TABLE_CAPTION_STYLE_NAMES)
-    )
-    if len(fallback) == 1:
-        return fallback[0]
-    if not exact and not fallback:
-        raise HwpLiveError("현재 문서에서 표타이틀 또는 표 제목 스타일을 찾지 못했습니다")
-    raise HwpLiveError("표 캡션 스타일 후보가 여러 개라 caption_style_name 지정이 필요합니다")
 
 
-def _resolve_base_style(
-    names: tuple[str, ...],
-    requested: str | None,
-) -> str:
-    if requested is not None:
-        if requested not in names:
-            raise HwpLiveError(f"현재 문서에 표 기준 스타일 '{requested}'이 없습니다")
-        return requested
-    candidates = tuple(
-        name for name in names if _compact_style_name(name) in _BASE_STYLE_NAMES
+def document_content_width_mm(geometry: SectionPageGeometry) -> float:
+    return (
+        geometry.usable_area(page_number=1).width
+        * MILLIMETERS_PER_INCH
+        / HWPUNITS_PER_INCH
     )
-    if len(candidates) == 1:
-        return candidates[0]
-    if not candidates:
-        raise HwpLiveError("현재 문서에서 바탕글 스타일을 찾지 못했습니다")
-    raise HwpLiveError("표 기준 스타일 후보가 여러 개라 base_style_name 지정이 필요합니다")
 
 
 def resolve_layout_styles(
     hwp: LiveHwpApplication,
     plan: LayoutPlan,
     guard: Callable[[], None],
-) -> LayoutPlan:
-    if not any(isinstance(block, TableBlock) for block in plan.blocks):
-        return plan
-    names = tuple(style.name for style in inspect_styles(hwp, guard).styles)
-    blocks = tuple(
-        block.model_copy(
-            update={
-                "base_style_name": _resolve_base_style(names, block.base_style_name),
-                **(
-                    {
-                        "caption_style_name": _resolve_table_caption_style(
-                            names,
-                            block.caption_style_name,
-                        )
-                    }
-                    if block.caption is not None
-                    else {}
-                ),
-            }
-        )
-        if isinstance(block, TableBlock)
-        else block
-        for block in plan.blocks
+    *,
+    usage: DocumentStyleUsage | None = None,
+) -> tuple[LayoutPlan, SectionPageGeometry]:
+    """Bind a bulk layout plan to the styles the open document actually has.
+
+    This used to only rewrite ``TableBlock`` style *names* and left
+    ``ParagraphBlock`` untouched, so every paragraph the C++ batch inserted
+    reached HWP with no ``Style`` action at all — the document's paragraph
+    numbering and bullets (``○``, ``(1)``, ``·``) never came along and the model
+    was left typing the glyphs as literal text. Both the bulk path and the
+    recipe path now go through the same resolver
+    (``hwp_document_style_profile.resolve_layout_style_profile``), which is what
+    ``hwp_live_operation_recipe.native_style_plan`` already calls, so the two
+    paths agree on which document style each role gets.
+
+    ``usage`` is the observed [leading shape -> style id] table; passing it lets
+    this path pick ``○``'s real style (``동그라미``) instead of guessing by name.
+    """
+    styles = inspect_styles(hwp, guard).styles
+    page_geometry = document_page_geometry(hwp, guard)
+    return (
+        resolve_layout_style_profile(
+            plan,
+            styles,
+            fallback_style_id=document_body_style_id(styles, usage),
+            content_width_mm=document_content_width_mm(page_geometry),
+            usage=usage,
+        ),
+        page_geometry,
     )
-    return plan.model_copy(update={"blocks": blocks})
 
 
 def prepare_layout_assets(plan: LayoutPlan) -> dict[Path, Path]:
@@ -136,7 +139,7 @@ def _insert_paragraph(
         hwp,
         alignment=block.alignment,
         line_spacing=block.line_spacing_percent,
-        before=block.space_before_mm,
+        before=lead_before_mm(block.space_before_mm, block.plan_lead_mm),
         after=block.space_after_mm,
         left_margin=block.left_margin_mm,
         right_margin=block.right_margin_mm,
@@ -158,7 +161,17 @@ def _insert_image(
     guard: Callable[[], None],
 ) -> None:
     guard()
-    apply_paragraph_style(hwp, alignment=block.alignment)
+    # The native path also pins this paragraph's line spacing to 100% and puts
+    # it back by re-applying the document's base style afterwards. This COM
+    # fallback has no style id to go back to and no verb that means "inherit
+    # again", so it writes only the lead -- which is restorable -- and carries
+    # the line's own leading instead. Position is preserved either way; the
+    # per-picture leading the native path removes is still present here.
+    apply_paragraph_style(
+        hwp,
+        alignment=block.alignment,
+        before=block.plan_lead_mm,
+    )
     guard()
     control = hwp.insert_picture(str(assets[block.path]))
     guard()
@@ -178,6 +191,13 @@ def _insert_image(
     if not hwp.BreakPara():
         raise HwpLiveError("그림 다음 문단을 만들지 못했습니다")
     guard()
+    if block.plan_lead_mm is not None:
+        # BreakPara copies the picture paragraph's shape into the paragraph it
+        # opens, lead included, so a 50mm lead would reappear under the picture
+        # and push everything after it down. Clearing it is the same leak the
+        # native path closes by re-applying the base style.
+        apply_paragraph_style(hwp, alignment="inherit", before=0.0)
+        guard()
     if block.caption is not None:
         if block.caption_style_id is not None and not hwp.set_style(
             block.caption_style_id

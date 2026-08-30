@@ -13,10 +13,15 @@ Call the selected read tool directly. Production inspection auto-connects the si
 | Current-or-last HWP cursor, selected text/cells/table, current paragraph and character formatting | `hwp_inspect` |
 | Native style names and IDs | `hwp_list_styles` |
 | Table refs, merged cells, captions, page span, optimistic token | `hwp_inspect_structure` |
+| Complete immutable document graph inventory | `hwp_get_graph_manifest` |
+| Paged graph records | `hwp_query_graph` |
+| One public node/property/asset | `hwp_get_graph_node`, `hwp_get_graph_property`, `hwp_get_graph_asset` |
 | HWP page analysis or result verification | `hwp_render_page` (`CreatePageImage`) |
 | Wait for cursor, structure, window, or dialog changes in QA | `hwp_watch_state` |
+| Read an HWP popup's complete current control structure | `hwp_inspect_dialog` |
+| Invoke one model-selected popup button | `hwp_invoke_dialog_action` |
 
-Fast inspection is C++/ATL in-process and must be tried before detailed structure inspection. Detailed inspection is an edit preflight, not a polling API.
+Fast inspection runs C++/ATL in-process. Detailed structure inspection is a separate native control traversal — an edit preflight, not a polling API — and answers a narrower set of questions (table refs, merged cells, captions, page span, optimistic token) than its name suggests. For a 1–3 page XLSX-driven text/table patch, use one `hwp_inspect_patch_plan`, read the workbook with one bounded `hwp_workflow_query.py read-xlsx` run, and project those values into one `hwp_patch_text_batch` — or into one `hwp_fill_table` per target table when every target is a cell of that table. Copy each `target` object verbatim from its projection item, and build the batch guards (`expected_document_id`, `expected_document_full_name`, `expected_content_revision`) from the same projection document rather than composing them. Journal the caller's operation ID on that write. After its verified readback, no blanket re-inspection follows.
 
 An identical fast inspection is cached for the current live-change revision, with at most 32 page/mode entries. Any MCP mutation, external HWP change event, reconnect, or disconnect invalidates it, so repeated reasoning reads avoid a second full control scan without serving pre-edit structure after a change.
 
@@ -26,9 +31,15 @@ When `hwp_inspect_structure` receives an explicit nonzero `page`, native control
 
 `hwp_inspect`, `hwp_list_styles`, `hwp_inspect_page_fast`, `hwp_inspect_structure`, and `hwp_render_page` return a short MCP text summary and keep the complete result once in the structured payload. Read the structured result; do not expect or parse a duplicate JSON copy from the text summary.
 
+## Complete graph reads
+
+Graph tools are additive and do not replace the compact inspection tools above. Start with `hwp_get_graph_manifest`: its response remains at most 32 KiB and reports one immutable generation/version plus an index of content-addressed source frames. It never compacts, truncates, or drops graph records. Use `hwp_query_graph` until `continuation=null`; each receipt identifies a digest-bound immutable record artifact. Use `hwp_fetch_graph_artifact` with the receipt's exact `document_id`, `store_id`, and 64-digit `expected_version`, then follow `continuation_offset` to exhaust large property, text, or asset bytes. The same `hwp-graph://artifact/...` URI is readable through the MCP resource surface only by the server/session capability that created it.
+
+Node IDs and graph facts are only those returned by the graph. `hwp_get_graph_node` and related tools never mint IDs or infer unavailable values. `NOT_EXPOSED`, `NOT_APPLICABLE`, and `READ_FAILED` are explicit observations, not empty values. Every continuation and artifact is cryptographically bound to its server/session authorization scope, exact document/session lineage, store, graph version, immutable cache generation, content digest, media type, and kind. URI possession alone grants no access. A wrong document, stale version, foreign server/session, retired generation, altered URI/digest, or invalid NodeId returns a typed structured error and exposes no artifact bytes. Artifacts remain available while their authorized generation is active; replacement generation retirement and server/session shutdown remove only that owner's generation tree deterministically. Public responses do not expose native automation action/member names.
+
 Every top-level `instance_id` returned by fast inspection is immediately reusable. Pass it directly as `target_id` to `hwp_add_caption`, `hwp_replace_image`, or `hwp_fill_table`. For a tool whose schema has a `target` object, including `hwp_format_table`, `hwp_merge_table_cells`, and `hwp_split_table_cell`, pass `target: {"target_id": instance_id}`. Include it in `control_instance_ids` for `hwp_delete_control`. After a worker reload, inspect again before relying on cached page and index metadata.
 
-For an HWP document analysis or verification request, render the relevant page with `hwp_render_page` and inspect the returned PNG. Rendering establishes visual facts; use the structural reads above alongside it for IDs, cell addresses, merges, and exact dimensions.
+A render establishes visual facts — how a page looks, and whether something is clipped, distorted, or in the wrong place. The structural reads above establish IDs, cell addresses, merges, and exact dimensions. Neither substitutes for the other, and a question about text or structure alone does not need a render. Reconstruction is not such a question: rebuilding a page from an image is a visual claim, so its closed loop in `native-layout.md` renders the changed page, compares it with the source, and renders again after a corrective patch.
 
 ## State discipline
 
@@ -38,3 +49,18 @@ For an HWP document analysis or verification request, render the relevant page w
 - Pass exact cursor, selection, original text, `table_ref`, and `state_token` values back to writes.
 - If any expected value changes, discard the pending write and inspect again.
 - Do not use screenshots to infer cell addresses, merges, captions, or styles.
+
+## Structured popup interaction
+
+Never infer a popup action from a fixed title, translated label, button order, or assumed button count.
+
+1. Discover the popup handle from the current window/dialog diagnostic.
+2. Call `hwp_inspect_dialog(dialog_window_handle=...)`.
+3. Read every returned control's source (`win32` or `uia`), title, class, `control_id`, role, visibility, enabled state, default state, and accelerator.
+4. Let the model select any enabled `actionable=true` control from that current structure. Do not apply label, ordinal, button-count, or default-button routing rules.
+5. Call `hwp_invoke_dialog_action` with the same dialog handle and selected `control_id`.
+6. Verify `message_delivered`, `dialog_present_after`, and the returned post-action structure.
+
+Inspection is read-only. Invocation re-enumerates and revalidates the selected child immediately before one bounded Win32 `BM_CLICK` or WPF UI Automation `InvokePattern`; it fails closed for missing, duplicate, changed, hidden, disabled, or non-actionable controls. A delivery timeout is an uncertain result and must not be retried automatically.
+
+The same structure applies to normal tool dialogs, error dialogs, overwrite confirmations, and future HWP popups. Labels such as `설정`, `취소`, `예`, or `아니요` are observations, never routing rules. If a popup has no child action and only a title-bar `X`, inspection adds an actionable `source=window`, `role=window_close`, `control_id=-1` entry; the model may select it exactly like any other returned control.

@@ -14,6 +14,18 @@ type PublicCellAddress = Annotated[
     str,
     Field(min_length=2, max_length=20, pattern=r"^[A-Za-z]+[1-9][0-9]*$"),
 ]
+# 'A4:P4' 같은 직사각형 구간. 셀 하나만 받는 PublicCellAddress 때문에 45셀짜리
+# 머리글 한 줄이 45번의 개별 호출로 갈라졌는데, 네이티브 레시피는 이미 한 번의
+# 선택으로 직사각형을 처리한다(hwp_live_native_format_recipe
+# ._topology_cell_geometry_targets). 여기는 그 구간을 적을 수 있게만 한다.
+type PublicCellRange = Annotated[
+    str,
+    Field(
+        min_length=5,
+        max_length=41,
+        pattern=r"^[A-Za-z]+[1-9][0-9]*:[A-Za-z]+[1-9][0-9]*$",
+    ),
+]
 
 
 class PublicCellSelector(ContractModel):

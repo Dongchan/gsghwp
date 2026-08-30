@@ -5,13 +5,13 @@ import json
 import ntpath
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, replace
 from importlib import import_module
 from io import StringIO
-from threading import local
-from typing import Protocol, cast, final, runtime_checkable
+from threading import Lock, local
+from typing import Final, Protocol, cast, final, runtime_checkable
 from weakref import ReferenceType, ref
 
 from hwp_errors import HwpLiveError
@@ -25,6 +25,7 @@ from hwp_live_contract import OpenDocument
 from hwp_live_native_batch import (
     NativeActivationCallError,
     activate_native_document,
+    native_foreground_guard,
 )
 from hwp_live_wrapper import detached_live_wrapper
 
@@ -110,6 +111,144 @@ def _load_com_error() -> type[Exception]:
 _COM_ERROR = _load_com_error()
 _TRANSIENT_SCAN_RETRY_DELAY_SECONDS = 0.02
 
+# 한/글은 문서를 연 직후 쪽 나누기를 백그라운드로 끝낸다. 그동안 PageCount 는
+# 0 을 돌려주고, 문서가 클수록 그 구간이 길다. "아직 값이 없다"는 거부의 근거가
+# 아니라 잠깐 기다렸다 다시 읽을 근거다.
+#
+# 상한이 무엇을 묶는지 정확히. 예산은 함수에 들어온 순간부터 실제 시계
+# (monotonic)로 센다 -- sleep 의 합이 아니다. 첫 읽기가 느려서 예산을 다 써
+# 버렸으면 그 사실이 곧바로 보인다.
+#   묶는다   -- 재계산·재읽기·폴링을 "시작할지" 판단하는 모든 시점. 예산이 다
+#               되었으면 다음 것을 아예 시작하지 않고 끝낸다.
+#   못 묶는다 -- 예산 검사 하나를 지나면 끊을 수 없는 호출이 최대 둘 이어진다.
+#               RecalcPageCount 와 그 직후 읽기다(재계산 값을 한 번은 읽는다 --
+#               아래 주석 참고). RecalcPageCount 는 IHwpObject 의 동기 메서드고
+#               COM 읽기도 동기라, 시작한 뒤에는 중간에 끊을 방법이 없다.
+#
+# 그래서 최악의 실제 경과는 (상한) + (재계산 한 번) + (읽기 한 번)이다. 재계산이
+# 오래 걸리는 만큼은 이 함수가 줄일 수 있는 값이 아니라 한/글이 쪽 나누기에 쓰는
+# 시간이고, 그 시간은 기다리든 안 기다리든 다음 조회에서 어차피 치른다. 줄일 수
+# 있는 것은 "언제 시작하느냐" 하나뿐이고 그게 _RECALC_MINIMUM_BUDGET_SHARE 다.
+#
+# 상한 1.0초의 근거: 정상 문서는 첫 읽기에서 바로 1 이상이 나와 이 경로에
+# 들어오지 않고, 들어오더라도 RecalcPageCount()가 쪽 나누기를 그 자리에서
+# 끝내므로 보통 첫 재읽기에서 끝난다. 즉 폴링은 재계산이 안 먹혔을 때의
+# 뒷받침일 뿐이다. 그리고 이 함수를 부르는 세 자리는 전부 대상 탭을 활성화해 둔
+# 구간 안이다 -- 기다리는 동안 사용자가 보던 탭이 바뀐 채로 머문다(호출부 주석
+# 참고). 이미 엔진에 계산을 시켜 놓은 값을 더 오래 붙잡고 기다려서 얻는 것이,
+# 사용자의 화면을 3초 붙잡는 대가보다 크지 않다. 못 읽어도 거부가 아니라
+# "모른다"(page_count=None)이므로 짧은 상한이 도구를 막지 않는다.
+PAGE_COUNT_SETTLE_TIMEOUT_SECONDS: Final = 1.0
+PAGE_COUNT_SETTLE_POLL_SECONDS: Final = 0.05
+# RecalcPageCount() 를 시작하려면 예산이 이만큼(비율)은 남아 있어야 한다.
+# 재계산은 통틀어 한 번뿐이고 끊을 수 없으므로, 통제할 수 있는 것은 시작 시점뿐
+# 이다. 이 검사가 실제로 걸리는 경우는 첫 PageCount 읽기 자체가 예산의 절반을
+# 넘게 쓴 때다 -- 한/글 UI 스레드가 막혀 프로세스 간 읽기 하나가 초 단위로
+# 걸리는 상황이고, 그때 재계산은 그보다 더 걸린다. 상한을 크게 넘길 것이 뻔한데
+# 얻는 것은 없으므로 시작하지 않는다.
+_RECALC_MINIMUM_BUDGET_SHARE: Final = 0.5
+
+
+@dataclass(frozen=True, slots=True)
+class SettledPageCount:
+    """One page-count reading and whether it had to be waited for.
+
+    ``page_count`` is ``None`` only when the count is genuinely still unknown --
+    never 0, because no document has zero body pages. ``waited`` tells a caller
+    that holds an activation guard that real time passed between its last check
+    and this value, so it can re-confirm the target if it cares.
+    """
+
+    page_count: int | None
+    waited: bool
+
+
+@runtime_checkable
+class PageCountRecalculator(Protocol):
+    def RecalcPageCount(self) -> bool: ...
+
+
+def settle_page_count(
+    read: Callable[[], int],
+    *,
+    source: object | None = None,
+    timeout_seconds: float | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> SettledPageCount:
+    """Read the body page count, waiting only while it is still unknown.
+
+    The first read is unconditional and is the whole cost on a document that is
+    already paginated -- nothing below runs on the healthy path. Only a reading
+    below one enters the wait, and the wait first asks Hancom to finish
+    pagination through ``source.RecalcPageCount``: the same call
+    ``hwp_render_page`` already makes on a read path (``hwp_live_preview.py``),
+    so it is not a new kind of side effect. The lookup is deliberately made here
+    and not by the caller, so an object that does not offer it costs nothing on
+    the healthy path and simply skips straight to re-reading. A recalculation
+    that fails is a hint that did not land, not a failure of the read.
+
+    The budget is measured against ``monotonic`` from the moment this is
+    entered, not against the sum of the ``sleep`` calls, and it covers the first
+    read too. Every step that can block -- the recalculation, each re-read, each
+    poll -- is only *started* while the budget still has time in it. One budget
+    check can be followed by two uninterruptible calls, though: the
+    recalculation and the one read that always takes its result, so the worst
+    real elapsed time is the budget plus one recalculation plus one read --
+    exactly the bound ``test_settled_page_count_gives_up_within_the_bound``
+    asserts. Nothing here can interrupt a call in flight: ``RecalcPageCount`` is
+    a synchronous ``IHwpObject`` method and a COM property read is synchronous
+    too. What can be controlled is when the uninterruptible one is allowed to
+    start, and that is ``_RECALC_MINIMUM_BUDGET_SHARE``.
+
+    This function never raises on an unreadable count; it returns
+    ``page_count=None``. Errors from ``read`` itself still propagate, because a
+    COM read that throws is a broken connection, not a slow layout.
+    """
+    budget = (
+        PAGE_COUNT_SETTLE_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    )
+    deadline = monotonic() + budget
+    page_count = read()
+    if page_count >= 1:
+        return SettledPageCount(page_count=page_count, waited=False)
+    recalculated = False
+    while True:
+        # 상한은 상한이다. 남은 예산이 없으면 다음 호출을 시작하지 않는다.
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return SettledPageCount(page_count=None, waited=True)
+        if not recalculated:
+            recalculated = True
+            if (
+                isinstance(source, PageCountRecalculator)
+                and remaining >= budget * _RECALC_MINIMUM_BUDGET_SHARE
+            ):
+                try:
+                    _ = source.RecalcPageCount()
+                except (OSError, RuntimeError, TypeError, ValueError, _COM_ERROR):
+                    pass
+        # 방금 재계산을 마쳤다면 그 결과는 예산이 넘었더라도 한 번 읽는다: 비용은
+        # 이미 치렀고 읽기 하나를 아껴서 되찾을 시간이 없다. 그 밖의 모든 읽기는
+        # 바로 위 예산 검사를 통과한 것뿐이다.
+        page_count = read()
+        if page_count >= 1:
+            return SettledPageCount(page_count=page_count, waited=True)
+        # 마지막 폴링이 상한을 넘기지 않도록 남은 예산까지만 잔다.
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return SettledPageCount(page_count=None, waited=True)
+        sleep(min(PAGE_COUNT_SETTLE_POLL_SECONDS, remaining))
+
+
+def confirmed_page_count(page_count: int | None) -> int | None:
+    """Fold every "not a real page count" reading onto ``None``.
+
+    0 쪽인 문서는 없다. 0 이나 음수는 "쪽이 없다"가 아니라 "아직 모른다"이므로
+    사실처럼 응답에 싣지 않는다.
+    """
+    return page_count if page_count is not None and page_count >= 1 else None
+
 
 def _normalized_full_name(full_name: str) -> str:
     return ntpath.normcase(ntpath.normpath(full_name)) if full_name else ""
@@ -174,12 +313,14 @@ class HwpDocumentCandidate:
         title = (
             ntpath.basename(self.full_name) if self.full_name else "저장되지 않은 문서"
         )
+        # 비활성 탭은 쪽 수를 읽을 방법이 없다. 예전에는 그때 0 을 실어 보냈는데
+        # 0 쪽인 문서는 없으므로 그건 거짓이었다. 모르면 null 로 답한다.
         pages = (
             self.page_count
             if self.page_count is not None
-            else self.application.PageCount
+            else int(self.application.PageCount)
             if self.active
-            else 0
+            else None
         )
         return OpenDocument(
             selector=self.selector,
@@ -189,7 +330,7 @@ class HwpDocumentCandidate:
             format=self.document_format,
             edit_mode=self.edit_mode,
             modified=bool(self.document.Modified),
-            page_count=pages,
+            page_count=confirmed_page_count(pages),
             active=self.active,
             window_handle=self.window_handle,
         )
@@ -206,20 +347,18 @@ class HwpDocumentIdentity:
     modified: bool
     active: bool
     window_handle: int
-    page_count: int
+    page_count: int | None
 
     @classmethod
     def from_candidate(
         cls,
         candidate: HwpDocumentCandidate,
         *,
-        page_count: int,
+        page_count: int | None,
         selector: str | None = None,
         modified: bool | None = None,
         active: bool | None = None,
     ) -> HwpDocumentIdentity:
-        if page_count < 0:
-            raise HwpLiveError("한컴 문서의 본문 쪽 수가 올바르지 않습니다")
         return cls(
             selector=candidate.selector if selector is None else selector,
             moniker_name=candidate.moniker_name,
@@ -245,8 +384,6 @@ class HwpDocumentIdentity:
         *,
         selector: str | None = None,
     ) -> HwpDocumentIdentity:
-        if document.page_count < 0:
-            raise HwpLiveError("한컴 문서의 본문 쪽 수가 올바르지 않습니다")
         return cls(
             selector=document.selector if selector is None else selector,
             moniker_name=candidate.moniker_name,
@@ -295,27 +432,42 @@ class _ComRuntime:
 
 
 class _RotThreadState(local):
+    """Per-thread state that genuinely cannot leave its COM apartment.
+
+    ``cached_candidates`` holds references to live cross-process COM objects and
+    ``initialized`` tracks this thread's ``CoInitialize``, so both must stay
+    thread-local. Remembered page counts are plain integers and deliberately do
+    not live here -- see ``HwpRotCatalog._page_counts``.
+    """
+
     cache_deadline: float
     cached_candidates: tuple[ReferenceType[HwpDocumentCandidate], ...] | None
     initialized: bool
-    page_counts: dict[tuple[str, int, int], int]
 
     def __init__(self) -> None:
         self.cache_deadline = 0.0
         self.cached_candidates = None
         self.initialized = False
-        self.page_counts = {}
 
 
 @final
 class HwpRotCatalog:
     __slots__ = (
         "_cache_ttl_seconds",
+        "_page_counts",
+        "_page_counts_lock",
         "_runtime",
         "_thread_state",
     )
 
     _cache_ttl_seconds: float
+    # 확인된 쪽 수의 기억. 한 도구 호출과 다음 호출은 서로 다른 작업 스레드에서
+    # 돌기 때문에(MCP 작업 실행기 8개) 이 기억이 스레드 지역이면 hwp_open_document
+    # 가 읽어 둔 값이 바로 뒤의 hwp_list_open_documents 에서 사라진다. 실제로
+    # "열 때 28, 직후 목록에서 0" 이 그 증상이었다. COM 포인터가 아니라 정수뿐이라
+    # 아파트먼트에 묶일 이유가 없으므로 프로세스 단위로 두고 잠금으로 지킨다.
+    _page_counts: dict[tuple[str, int, int], int]
+    _page_counts_lock: Lock
     _runtime: _ComRuntime | None
     _thread_state: _RotThreadState
 
@@ -327,6 +479,8 @@ class HwpRotCatalog:
         self._cache_ttl_seconds = cache_ttl_seconds
         self._cached_candidates = None
         self._initialized = False
+        self._page_counts = {}
+        self._page_counts_lock = Lock()
         self._runtime = None
 
     @property
@@ -384,21 +538,36 @@ class HwpRotCatalog:
         full_name: str,
         document_id: int,
         window_handle: int,
-        page_count: int,
+        page_count: int | None,
     ) -> None:
-        if page_count < 1:
-            raise HwpLiveError("한컴 문서의 본문 쪽 수를 정확히 읽지 못했습니다")
+        # 확정되지 않은 쪽 수는 기억하지 않는다. 기억할 값이 없다는 것이 호출을
+        # 거부할 이유는 아니므로 조용히 넘어간다.
+        confirmed = confirmed_page_count(page_count)
+        if confirmed is None:
+            return
         key = self._page_count_key(
             full_name=full_name,
             document_id=document_id,
             window_handle=window_handle,
         )
-        self._thread_state.page_counts[key] = page_count
+        with self._page_counts_lock:
+            self._page_counts[key] = confirmed
 
     def _resolve_page_counts(
         self,
         candidates: tuple[HwpDocumentCandidate, ...],
+        *,
+        prune: bool = False,
     ) -> tuple[HwpDocumentCandidate, ...]:
+        """Fill in what each candidate's page count is, or that it is unknown.
+
+        ``prune`` may only be set by a caller that just enumerated *every* open
+        document, because pruning drops the memory of anything not in
+        ``candidates``. ``resolve_identity`` resolves one document at a time and
+        must never prune -- doing so would erase every other document's
+        confirmed page count and put ``hwp_list_open_documents`` right back to
+        answering "unknown" for tabs it had already measured.
+        """
         resolved: list[HwpDocumentCandidate] = []
         visible_keys: set[tuple[str, int, int]] = set()
         for candidate in candidates:
@@ -409,23 +578,30 @@ class HwpRotCatalog:
             )
             visible_keys.add(key)
             page_count = candidate.page_count
-            if page_count is None:
-                page_count = self._thread_state.page_counts.get(key)
+            if page_count is None and not candidate.active:
+                # 비활성 탭은 활성화하지 않고는 쪽 수를 읽을 수 없다. 이 문서에서
+                # 앞서 직접 확인해 둔 값이 있으면 그것을 쓴다.
+                with self._page_counts_lock:
+                    page_count = self._page_counts.get(key)
             if page_count is None and candidate.active:
                 page_count = int(candidate.application.PageCount)
+            # 활성 탭이 0 을 돌려주면 쪽 나누기가 아직 끝나지 않은 것이다. 그때
+            # 예전에 기억한 값을 지금 값인 척 싣지 않는다. 목록 조회는 기다리지
+            # 않고 모른다고 답하며, 쪽 수가 필요한 호출자가 그 자리에서 기다린다.
+            page_count = confirmed_page_count(page_count)
             if page_count is not None:
-                if page_count < 1:
-                    raise HwpLiveError(
-                        "한컴 문서의 본문 쪽 수를 정확히 읽지 못했습니다"
-                    )
-                self._thread_state.page_counts[key] = page_count
+                with self._page_counts_lock:
+                    self._page_counts[key] = page_count
+            if page_count != candidate.page_count:
                 candidate = replace(candidate, page_count=page_count)
             resolved.append(candidate)
-        self._thread_state.page_counts = {
-            key: page_count
-            for key, page_count in self._thread_state.page_counts.items()
-            if key in visible_keys
-        }
+        if prune:
+            with self._page_counts_lock:
+                self._page_counts = {
+                    key: page_count
+                    for key, page_count in self._page_counts.items()
+                    if key in visible_keys
+                }
         return tuple(resolved)
 
     def scan(self, *, force: bool = False) -> tuple[HwpDocumentCandidate, ...]:
@@ -615,7 +791,7 @@ class HwpRotCatalog:
                     )
                 )
             )
-        result = self._resolve_page_counts(tuple(candidates.values()))
+        result = self._resolve_page_counts(tuple(candidates.values()), prune=True)
         self._cached_candidates = tuple(ref(candidate) for candidate in result)
         self._cache_deadline = time.monotonic() + self._cache_ttl_seconds
         return result
@@ -747,7 +923,8 @@ class HwpRotCatalog:
 
     def close(self) -> None:
         self.release_com_references()
-        self._thread_state.page_counts.clear()
+        with self._page_counts_lock:
+            self._page_counts.clear()
         if not self._initialized:
             return
         self._loaded_runtime().pythoncom.CoUninitialize()
@@ -797,17 +974,23 @@ def activate_candidate(
             native=candidate_supports_native_activation(candidate),
         )
         try:
-            if restore.native:
-                try:
-                    if not activate_native_document(
-                        candidate.window_handle,
-                        candidate.document_id,
-                    ):
+            # SetActive_XHwpDocument은 한컴 UI 스레드로 마샬링되어 창을
+            # 올린다. 네이티브 활성화(activate_native_document)는 브리지
+            # Invoke를 거치므로 이미 가드 안이지만, 그게 실패했을 때의 폴백과
+            # 비네이티브 경로는 Invoke를 거치지 않는다. 그래서 구간 전체를
+            # 브리지 가드로 감싼다. 중첩은 브리지가 깊이로 처리한다.
+            with native_foreground_guard(candidate.window_handle):
+                if restore.native:
+                    try:
+                        if not activate_native_document(
+                            candidate.window_handle,
+                            candidate.document_id,
+                        ):
+                            candidate.document.SetActive_XHwpDocument()
+                    except NativeActivationCallError:
                         candidate.document.SetActive_XHwpDocument()
-                except NativeActivationCallError:
+                else:
                     candidate.document.SetActive_XHwpDocument()
-            else:
-                candidate.document.SetActive_XHwpDocument()
             activated = application.XHwpDocuments.Active_XHwpDocument
             if int(
                 activated.DocumentID
@@ -827,17 +1010,20 @@ def restore_active_document(restore: ActiveDocumentRestore | None) -> None:
     if restore is None:
         return
     try:
-        if restore.native:
-            try:
-                if not activate_native_document(
-                    restore.window_handle,
-                    restore.document_id,
-                ):
+        # activate_candidate과 같은 이유로 가드 안에서 되돌린다. 복원도 탭을
+        # 바꾸는 활성화라 창을 올릴 수 있다.
+        with native_foreground_guard(restore.window_handle):
+            if restore.native:
+                try:
+                    if not activate_native_document(
+                        restore.window_handle,
+                        restore.document_id,
+                    ):
+                        restore.document.SetActive_XHwpDocument()
+                except NativeActivationCallError:
                     restore.document.SetActive_XHwpDocument()
-            except NativeActivationCallError:
+            else:
                 restore.document.SetActive_XHwpDocument()
-        else:
-            restore.document.SetActive_XHwpDocument()
         active = restore.application.XHwpDocuments.Active_XHwpDocument
         if int(active.DocumentID) != restore.document_id or _normalized_full_name(
             str(active.FullName)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from hwp_errors import HwpLiveError
@@ -75,9 +76,7 @@ def _fit_column_widths(
 ) -> tuple[float, ...]:
     if not width_points or any(width < 0 for width in width_points):
         raise ValueError("Excel column widths must be non-negative")
-    minimums = minimum_widths_mm or tuple(
-        _MIN_COLUMN_WIDTH_MM for _ in width_points
-    )
+    minimums = minimum_widths_mm or tuple(_MIN_COLUMN_WIDTH_MM for _ in width_points)
     if len(minimums) != len(width_points):
         raise ValueError("minimum widths must match the Excel column count")
     if any(width < _MIN_COLUMN_WIDTH_MM for width in minimums):
@@ -101,9 +100,7 @@ def _fit_column_widths(
             index: remaining_width * width_points[index] / source_total
             for index in active
         }
-        narrow = {
-            index for index, width in scaled.items() if width < minimums[index]
-        }
+        narrow = {index for index, width in scaled.items() if width < minimums[index]}
         wide = {
             index for index, width in scaled.items() if width > _MAX_COLUMN_WIDTH_MM
         }
@@ -177,6 +174,16 @@ def trim_blank_edges(source: ExcelRangeData) -> ExcelRangeData:
     last_row = max(row for row, _ in occupied)
     first_column = min(column for _, column in occupied)
     last_column = max(column for _, column in occupied)
+    return _crop_excel_range(source, first_row, first_column, last_row, last_column)
+
+
+def _crop_excel_range(
+    source: ExcelRangeData,
+    first_row: int,
+    first_column: int,
+    last_row: int,
+    last_column: int,
+) -> ExcelRangeData:
     merges: list[ExcelMergeData] = []
     for merge in source.merges:
         top = max(merge.row, first_row)
@@ -201,20 +208,66 @@ def trim_blank_edges(source: ExcelRangeData) -> ExcelRangeData:
             tuple(row[first_column : last_column + 1])
             for row in source.rows[first_row : last_row + 1]
         ),
-        column_width_points=source.column_width_points[
-            first_column : last_column + 1
-        ],
+        column_width_points=source.column_width_points[first_column : last_column + 1],
         row_height_points=source.row_height_points[first_row : last_row + 1],
         merges=tuple(merges),
     )
 
 
+def _row_is_gutter(source: ExcelRangeData, row: int) -> bool:
+    if any(cell.text.strip() for cell in source.rows[row]):
+        return False
+    return all(
+        not (merge.row < row < merge.row + merge.row_span - 1)
+        for merge in source.merges
+    )
+
+
+def _column_is_gutter(source: ExcelRangeData, column: int) -> bool:
+    if any(row[column].text.strip() for row in source.rows):
+        return False
+    return all(
+        not (merge.column < column < merge.column + merge.column_span - 1)
+        for merge in source.merges
+    )
+
+
+def _bands(count: int, is_gutter: Callable[[int], bool]) -> tuple[tuple[int, int], ...]:
+    bands: list[tuple[int, int]] = []
+    start: int | None = None
+    for index in range(count):
+        if is_gutter(index):
+            if start is not None:
+                bands.append((start, index - 1))
+                start = None
+            continue
+        if start is None:
+            start = index
+    if start is not None:
+        bands.append((start, count - 1))
+    return tuple(bands)
+
+
+def split_excel_by_gutters(source: ExcelRangeData) -> tuple[ExcelRangeData, ...]:
+    if not source.rows:
+        return (source,)
+    row_bands = _bands(len(source.rows), lambda row: _row_is_gutter(source, row))
+    pieces: list[ExcelRangeData] = []
+    for top, bottom in row_bands or ((0, len(source.rows) - 1),):
+        band = _crop_excel_range(source, top, 0, bottom, len(source.rows[0]) - 1)
+        column_bands = _bands(
+            len(band.rows[0]),
+            lambda column: _column_is_gutter(band, column),
+        )
+        for left, right in column_bands or ((0, len(band.rows[0]) - 1),):
+            pieces.append(_crop_excel_range(band, 0, left, len(band.rows) - 1, right))
+    return tuple(pieces) if pieces else (source,)
+
+
 def _excel_column_minimums(source: ExcelRangeData) -> tuple[float, ...]:
     columns = len(source.rows[0])
     minimums = [5.0] * columns
-    merge_by_owner = {
-        (merge.row, merge.column): merge for merge in source.merges
-    }
+    merge_by_owner = {(merge.row, merge.column): merge for merge in source.merges}
     for row_index, row in enumerate(source.rows):
         for column, cell in enumerate(row):
             if cell.covered or not cell.text.strip():
@@ -239,29 +292,17 @@ def _excel_column_minimums(source: ExcelRangeData) -> tuple[float, ...]:
     return tuple(round(width, 2) for width in minimums)
 
 
-def table_block_from_excel(
-    path: Path,
+def _table_block_from_range(
+    source: ExcelRangeData,
     *,
-    sheet_name: str | None = None,
-    sheet_index: int = 0,
-    cell_range: str | None = None,
-    target_width_mm: float | None = None,
-    base_style_name: str | None = None,
-    caption: str | None = None,
-    caption_style_name: str | None = None,
-    repeat_header: bool = False,
-    preserve_font: bool = False,
-    preserve_row_heights: bool = True,
-    trim_unused_edges: bool = True,
+    target_width_mm: float | None,
+    base_style_name: str | None,
+    caption: str | None,
+    caption_style_name: str | None,
+    repeat_header: bool,
+    preserve_font: bool,
+    preserve_row_heights: bool,
 ) -> TableBlock:
-    source = read_excel_range(
-        path,
-        sheet_name=sheet_name,
-        sheet_index=sheet_index,
-        cell_range=cell_range,
-    )
-    if trim_unused_edges:
-        source = trim_blank_edges(source)
     minimums = _excel_column_minimums(source)
     widths = (
         None
@@ -282,21 +323,22 @@ def table_block_from_excel(
         if preserve_row_heights
         else None
     )
+    wide = len(source.rows[0]) > 1
     return TableBlock(
         kind="table",
         caption=caption,
         caption_style_name=caption_style_name,
         base_style_name=base_style_name,
-        rows=tuple(tuple(_cell(cell, preserve_font) for cell in row) for row in source.rows),
+        rows=tuple(
+            tuple(_cell(cell, preserve_font) for cell in row) for row in source.rows
+        ),
         column_widths_mm=widths,
         column_width_weights=weights,
         minimum_column_widths_mm=minimums,
         row_heights_mm=heights,
         repeat_header=repeat_header,
-        split_wide_table=len(source.merges) == 0 and len(source.rows[0]) > 1,
-        repeat_key_columns=(
-            1 if len(source.merges) == 0 and len(source.rows[0]) > 1 else 0
-        ),
+        split_wide_table=wide,
+        repeat_key_columns=1 if wide and not source.merges else 0,
         merges=tuple(
             TableMerge(
                 row=merge.row,
@@ -310,3 +352,76 @@ def table_block_from_excel(
         right_margin_mm=0,
         indentation_mm=0,
     )
+
+
+def table_block_from_excel(
+    path: Path,
+    *,
+    sheet_name: str | None = None,
+    sheet_index: int = 0,
+    cell_range: str | None = None,
+    target_width_mm: float | None = None,
+    base_style_name: str | None = None,
+    caption: str | None = None,
+    caption_style_name: str | None = None,
+    repeat_header: bool = False,
+    preserve_font: bool = False,
+    preserve_row_heights: bool = True,
+    trim_unused_edges: bool = True,
+) -> TableBlock:
+    return table_blocks_from_excel(
+        path,
+        sheet_name=sheet_name,
+        sheet_index=sheet_index,
+        cell_range=cell_range,
+        target_width_mm=target_width_mm,
+        base_style_name=base_style_name,
+        caption=caption,
+        caption_style_name=caption_style_name,
+        repeat_header=repeat_header,
+        preserve_font=preserve_font,
+        preserve_row_heights=preserve_row_heights,
+        trim_unused_edges=trim_unused_edges,
+        split_gutters=False,
+    )[0]
+
+
+def table_blocks_from_excel(
+    path: Path,
+    *,
+    sheet_name: str | None = None,
+    sheet_index: int = 0,
+    cell_range: str | None = None,
+    target_width_mm: float | None = None,
+    base_style_name: str | None = None,
+    caption: str | None = None,
+    caption_style_name: str | None = None,
+    repeat_header: bool = False,
+    preserve_font: bool = False,
+    preserve_row_heights: bool = True,
+    trim_unused_edges: bool = True,
+    split_gutters: bool = True,
+) -> tuple[TableBlock, ...]:
+    source = read_excel_range(
+        path,
+        sheet_name=sheet_name,
+        sheet_index=sheet_index,
+        cell_range=cell_range,
+    )
+    if trim_unused_edges:
+        source = trim_blank_edges(source)
+    pieces = split_excel_by_gutters(source) if split_gutters else (source,)
+    blocks = [
+        _table_block_from_range(
+            piece,
+            target_width_mm=target_width_mm,
+            base_style_name=base_style_name,
+            caption=caption if len(pieces) == 1 else None,
+            caption_style_name=caption_style_name if len(pieces) == 1 else None,
+            repeat_header=repeat_header,
+            preserve_font=preserve_font,
+            preserve_row_heights=preserve_row_heights,
+        )
+        for piece in pieces
+    ]
+    return tuple(blocks)

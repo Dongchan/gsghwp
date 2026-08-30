@@ -76,6 +76,56 @@ bool IsMarginOnlyTablePropertyDialog(const Command& command) noexcept {
     return hasShapeType && hasDisabledCellSize && hasCellMargin;
 }
 
+// MOVE_DOC_END is only ever emitted to append: every caller that sends it is
+// about to add paragraphs, a table or a picture after everything the document
+// already has. MoveDocEnd alone leaves the caret at the *end of the last
+// paragraph*, so the first INSERT_TEXT lands inside it and the appended block
+// runs on from the sentence that was already there -- observed live as the
+// previous paragraph and the first appended bullet sharing one line.
+//
+// So the command means "put the caret where an append starts": at the
+// beginning of an empty paragraph at the end of the document. If the document
+// already ends with an empty paragraph, character offset 0 says so and nothing
+// is inserted, which is what keeps repeated appends from stacking blank lines.
+//
+// The check is a caret offset, not a text read: after MoveDocEnd the offset is
+// the length of the last paragraph, so 0 means empty for a paragraph of plain
+// text and for one holding a control alike.
+bool MoveDocumentEndForAppend(Context* const context) {
+    if (!RunAction(
+            context->action,
+            L"MoveDocEnd",
+            context->result,
+            L"MOVE_DOC_END")) {
+        return false;
+    }
+    Position end;
+    if (!GetPosition(context->hwp, &end, context->result)) {
+        return false;
+    }
+    // Recorded before the break so an atomic rollback deletes the break too
+    // and cannot leave an empty paragraph behind.
+    context->appendAnchor = end;
+    context->hasAppendAnchor = true;
+    if (end.character == 0) {
+        return true;
+    }
+    if (!RunAction(
+            context->action,
+            L"BreakPara",
+            context->result,
+            L"MOVE_DOC_END")) {
+        return false;
+    }
+    // The break is a real edit. CommandMayMutate cannot say so -- it only sees
+    // the command, not whether the document already ended with an empty
+    // paragraph -- so record it here, where the answer is known. A later
+    // failure must not report an untouched document.
+    context->result->partialMutation = true;
+    context->topology.Clear();
+    return true;
+}
+
 }
 
 bool ExecuteCommand(Context* const context, const Command& command) {
@@ -142,6 +192,8 @@ bool ExecuteCommand(Context* const context, const Command& command) {
         return CopyControl(context, command.first);
     case CommandKind::SaveDocumentFile:
         return SaveDocumentFile(context, command.first);
+    case CommandKind::CaptureDocumentBlockProbe:
+        return ProbeDocumentBlock(context, command.first);
     case CommandKind::RestoreDocumentFile:
         return RestoreDocumentFile(context, command.first, command.page);
     case CommandKind::ApplyCopiedTableAnchor:
@@ -151,7 +203,7 @@ bool ExecuteCommand(Context* const context, const Command& command) {
     case CommandKind::CaptureTable:
         return CaptureCurrentTable(context);
     case CommandKind::MoveDocumentEnd:
-        return RunAction(context->action, L"MoveDocEnd", context->result, L"MOVE_DOC_END");
+        return MoveDocumentEndForAppend(context);
     case CommandKind::DeleteTail:
         return DeleteTail(context, command);
     case CommandKind::InsertText:
@@ -186,7 +238,19 @@ bool ValidateCommandOrder(const Request& request, ExecutionResult* const result)
             L"atomic rollback requires an append batch starting with MOVE_DOC_END");
     }
     bool copiedTable = false;
+    bool restoreSeen = false;
     for (const Command& command : request.commands) {
+        if (request.requiresContentAuthorization && !restoreSeen) {
+            if (command.kind == CommandKind::RestoreDocumentFile) {
+                restoreSeen = true;
+            } else if (CommandMayMutate(command)) {
+                return SetError(
+                    result,
+                    L"CHECKED_RESTORE_REQUIRED",
+                    L"POLICY",
+                    L"ExecuteActionsChecked requires checkpoint restore before any mutation");
+            }
+        }
         if (command.kind == CommandKind::CopyControl) {
             copiedTable = true;
             continue;
@@ -203,6 +267,13 @@ bool ValidateCommandOrder(const Request& request, ExecutionResult* const result)
                 command.kind == CommandKind::PasteTable ? L"table" : command.first,
                 std::wstring(name) + L" requires a preceding COPY_CONTROL command");
         }
+    }
+    if (request.requiresContentAuthorization && !restoreSeen) {
+        return SetError(
+            result,
+            L"CHECKED_RESTORE_REQUIRED",
+            L"POLICY",
+            L"ExecuteActionsChecked requires one checkpoint restore command");
     }
     return true;
 }
@@ -236,6 +307,8 @@ std::wstring CommandStep(const Command& command) {
         return L"COPY_CONTROL";
     case CommandKind::SaveDocumentFile:
         return L"SAVE_DOCUMENT_FILE";
+    case CommandKind::CaptureDocumentBlockProbe:
+        return L"CAPTURE_DOCUMENT_BLOCK_PROBE";
     case CommandKind::RestoreDocumentFile:
         return L"RESTORE_DOCUMENT_FILE";
     case CommandKind::ApplyCopiedTableAnchor:
@@ -294,6 +367,10 @@ bool CommandMayMutate(const Command& command) {
     case CommandKind::SelectControl:
     case CommandKind::CopyControl:
     case CommandKind::SaveDocumentFile:
+    // Reads the document and writes the answer to a file the caller named. It
+    // is the one command here that exists only to measure, so it must never be
+    // able to report a mutation.
+    case CommandKind::CaptureDocumentBlockProbe:
     case CommandKind::CaptureTable:
     case CommandKind::MoveDocumentEnd:
     case CommandKind::Cell:

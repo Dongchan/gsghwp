@@ -62,6 +62,13 @@ def _formatting(parameters: Mapping[str, OperationInputValue]) -> dict[str, Json
                 payload[name] = _JSON_VALUE.validate_python(
                     [int(piece.strip()) for piece in pieces]
                 )
+    # ``cells`` crosses the operation layer as one comma-joined string because
+    # OperationInputValue holds scalars only, but hwp_format_table's own
+    # ``cells`` is an array. A retry suggestion has to be callable as written,
+    # so it goes back to a list here, exactly like the RGB fields above.
+    joined = payload.get("cells")
+    if isinstance(joined, str):
+        payload["cells"] = _JSON_VALUE.validate_python(joined.split(","))
     return payload
 
 

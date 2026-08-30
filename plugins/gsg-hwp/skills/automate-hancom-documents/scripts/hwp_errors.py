@@ -1,6 +1,19 @@
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, Literal
+
+
+type HwpPhaseTimingName = Literal[
+    "validation",
+    "planning_preflight",
+    "checkpoint_before",
+    "mutation",
+    "readback",
+    "checkpoint_after_history",
+    "rollback",
+    "total",
+]
+type HwpPhaseTimingSource = Literal["python", "native"]
 
 
 _RPC_S_SERVER_UNAVAILABLE: Final = -2_147_023_174
@@ -48,16 +61,37 @@ class HwpRuntimeSafetyError(DocumentAutomationError):
 class HwpLiveError(DocumentAutomationError):
     reason: str
     mutation_started: bool | None
+    # Whether running the very same call again is free. None means "no opinion",
+    # which is every failure that has not thought about it, and leaves the
+    # existing rule alone: retry is offered when nothing was mutated.
+    #
+    # False is for the failures where that rule is wrong — the document did not
+    # change, so the mutation test says "retry", but something outside the
+    # document did and a retry would spend it again. 한/글's own undo stack is
+    # the case that exists: the engine reports a step applied, no probe can see
+    # any difference in the document, and each retry quietly eats another step.
+    #
+    # It can only ever take retry-safety away (`transport_error_result` ands it
+    # in), never grant it. Deliberately not named `retry_safe`: `NativeActionFailure`
+    # already owns that attribute with a different meaning.
+    safe_to_repeat: bool | None
+    phase_timings: tuple[tuple[HwpPhaseTimingName, HwpPhaseTimingSource, int], ...]
 
     def __init__(
         self,
         reason: str,
         *,
         mutation_started: bool | None = None,
+        safe_to_repeat: bool | None = None,
+        phase_timings: tuple[
+            tuple[HwpPhaseTimingName, HwpPhaseTimingSource, int], ...
+        ] = (),
     ) -> None:
         super().__init__(reason)
         self.reason = reason
         self.mutation_started = mutation_started
+        self.safe_to_repeat = safe_to_repeat
+        self.phase_timings = phase_timings
 
 
 class HwpTargetProcessLostError(HwpLiveError):

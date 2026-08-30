@@ -1,0 +1,43 @@
+# Hancom MCP ribbon tab (custom actions, Stage 2)
+
+When the user asks to put a repeated job on the Hangul ribbon — “툴바에 넣어줘”, “버튼으로 만들어”, “단축 기능 등록” — save the *already-decided* public tool calls as a custom action. Seven tools own this surface, and none of them open, read, or modify a document. They touch one JSON registry (`%LOCALAPPDATA%\HancomDocumentAutomation\custom-actions-v1\custom-actions.json`) and the ribbon.
+
+| Task | Tool |
+|---|---|
+| List custom actions, optionally observe the live tab | `hwp_list_custom_actions` |
+| Read one definition | `hwp_get_custom_action` |
+| Add one and rebuild the tab | `hwp_register_custom_action` |
+| Change label, description, or steps | `hwp_update_custom_action` |
+| Remove one | `hwp_delete_custom_action` |
+| Change button order | `hwp_reorder_custom_actions` |
+| Uninstall the tab (`purge_registry` optionally drops the definitions) | `hwp_remove_custom_action_tab` |
+
+Removing the tab is not permanent by itself: the worker rebuilds it the next time it attaches to that Hangul process, or on the next custom-action call. Say so when the user asks for it gone.
+
+## What a recipe can hold
+
+- A step is a public tool name plus its argument object, nothing else. The schema has no field for a raw HAction, COM member, or script macro. `step.tool` must belong to the current profile's forwardable public tools; `hwp_execute` and the seven custom-action tools themselves are refused, so a recipe can never express what `hwp_execute` could not, and can never call itself. The store re-validates the *whole* registry against the allowlist before every write, so a hand-edited file that smuggled in a forbidden tool cannot be laundered by a later `update`/`reorder` — those writes refuse until the tampered entry is deleted.
+- Argument shapes are validated by the target tool at run time, not at save time, so a saved call with wrong arguments fails on click rather than on save. Natural-language prompts are deliberately not storable in v1.
+- `hwp_list_custom_actions` marks any step whose tool no longer exists (or was never allowed) in this profile as `resolved: false` and repeats it in `unresolved_step_tools`.
+
+## How a click executes
+
+- **Clicks run the recipe.** The bridge DLL (0.5.173) advertises a pool of 32 slot action IDs. A custom action's registry position *is* its slot, so a click carries a slot number, and the MCP worker maps that number back to the recipe and runs its steps through the same public tool path `hwp_execute` uses — same session scope, same argument normalization, same verification delegates, same operation journal. Outcomes land in `%LOCALAPPDATA%\HancomDocumentAutomation\custom-actions-v1\click-journal.jsonl` and in `runtime.recent_outcomes` on `hwp_list_custom_actions(include_tab_state=true)`.
+- **The worker must be alive for a button to be pressable.** The worker writes a heartbeat into the bridge's shared memory; `UpdateUI` reads its age and returns a disabled state once it goes stale. The DLL side is verified, and Hangul **does** poll `UpdateUI` for slot buttons once they exist on the ribbon — observed live (`slot_ui_enabled` flipped false→true after the tab was built, with a fresh worker heartbeat; a process with no buttons shows `updateUiCount=0` because there is nothing to poll). What remains unproven is only the visual: that a stale heartbeat actually renders the button grey (worker-death rendering has not been exercised live). Treat greying as expected but not yet demonstrated.
+- **One click runs once, even with two MCP servers open.** Click sequences are claimed atomically in `click-claims.json` before execution, so a second worker attached to the same Hangul consumes nothing. The shared memory's `heartbeatWorkerPid` is last-writer-wins and cannot identify which worker holds the right to execute — only the claim ledger does.
+
+## How the tab appears and changes
+
+- **The tab is there before you add anything.** The click loop composes the tab the moment the worker attaches to a Hangul process, straight from the registry. With zero registered actions that is a **default tab**: the `한컴MCP` tab carrying one seed button (`한컴MCP 연결`, the bridge's bootstrap AID, which re-publishes the ROT moniker when pressed) and `tab.default_tab = true`. Measured live: a tab with no toolbox at all *does* appear in the tab strip, but selecting it shows an empty ribbon body, so the seed button is there to make the tab mean something. The same attach path restores the tab after a Hangul restart — the new process is discovered and composed on its own, with no tool call. Composing is idempotent: if the ribbon already shows exactly what the registry says, nothing is torn down and `tab.rebuilt` comes back `false`. That matters because attach fires on every worker restart, and rebuilding a correct tab is pure COM work on Hangul's UI thread.
+- **Edits reach the ribbon immediately; no Hangul restart.** Hangul caches the toolbox tab tree by tab key for the life of the process (measured live), so a key is poisoned once used. Every rebuild therefore deletes the old tab and stands a new one up under a **random, never-before-used key** (`{GSG-HWP-MCP-TAB-R…}`). Register, update, reorder, and delete all show up at once — verified live end to end. `tab.tab_key` and `tab.previous_tab_key` report exactly which keys were used; `tab.rebuilt` is `false` when the ribbon already matched and nothing was touched.
+- Mutating calls rebuild the whole tab (delete the old key, then build under a new one) so the ribbon mirrors the registry. If Hangul is not running, the registry change still succeeds and the response carries `tab.status = "deferred"` with a `reason_code`; the tab appears by itself once Hangul is up and the worker discovers it. If a COM call fails while the live UI is being touched, `tab.status = "failed"`; `reason_code = "process_died"` means Hangul went away — do not treat that as a benign deferral.
+
+## What the runtime cannot see, and reports instead
+
+- **When the tab-key ledger is lost, say so.** The toolbar exposes no way to enumerate tabs, so the current key per process lives in `tab-keys.json` beside the registry. Keys are random precisely so that losing that file can never make the composer re-pick a burned key — adversarial testing showed the old sequential scheme restarting at 0, resurrecting Hangul's cached tree, and then reporting `absent`/`removed` for a tab that was still on screen. The cost is that a lost ledger leaves an **orphan tab** we can no longer find. That is reported, not hidden: `tab.tab_key_known` goes `false` and stays false for that process (the suspicion is written into the ledger record, so it survives later rebuilds and idempotent no-ops). The rebuild itself still succeeds — measured shape is `status="applied"` with `tab_key_known=false`. `status="unknown"` is narrower: it is what `observe`/`remove` return when they cannot find a tab *and* cannot rule one out, instead of claiming absence. The advisory says a Hangul restart clears the orphan. Only tabs from the older sequential scheme can still be swept (`tab.swept_tab_keys`). Two residual limits, stated plainly: the witness that tells "first attach" apart from "lost memory" is `slot-bindings.json`, which sits in the same folder as the ledger — deleting the whole folder takes both, and the next rebuild then looks like a clean first attach with no warning; and a PID reused by a new Hangul can be judged against whatever record survived for that number. Both end at the next Hangul restart, which clears every tab we could no longer see.
+- **A ribbon that disagrees routes by what it shows.** If observation ever diverges from what was inserted (`tab.status="stale"`), the click bindings are derived from the **observed** buttons — the label on the button decides which recipe runs, and a slot whose label no longer matches any action is left unmapped rather than guessed. Adversarial testing had the intended ordering published instead, so an `ALPHA` button ran `bravo`.
+
+## Stage 2 limits
+
+1. There are **32 slots**. Registration is capped at 32, so nothing is normally pending, but any action past the pool comes back in `tab.pending_actions` — registered and ordered, with no button.
+2. `tab.status = "stale"` means Hangul handed back a tree it had cached under that tab key instead of what was just inserted — reproduced live by forcing a burned key to be reused. Random keys make that unreachable in normal operation, but the verdict is still made by *observing* the ribbon rather than trusting the inserts, so it is reported if it ever happens. `tab.ribbon_stale_labels` carries the measured labels, and click routing follows them.

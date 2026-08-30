@@ -3,6 +3,7 @@ from __future__ import annotations
 import ntpath
 
 from hwp_errors import HwpLiveError
+from hwp_live_native_action_models import is_structural_inspection_error
 from hwp_live_native_batch import inspect_native_page
 from hwp_live_structure_contract import (
     DocumentStructure,
@@ -63,11 +64,14 @@ def refresh_native_table_snapshot(
         raise HwpLiveError("한컴 표 앵커가 조회 이후 바뀌었습니다")
     if control.rows != table.rows or control.columns != table.columns:
         raise HwpLiveError("한컴 표 행·열 구조가 조회 이후 바뀌었습니다")
+    # Only an error about the table's own records may stop the refresh. An
+    # unreadable appearance sample leaves every cell record usable.
     control_error = next(
         (
             error
             for error in inspected.inspection_errors
             if error.control_instance_id == control.instance_id
+            and is_structural_inspection_error(error.code)
         ),
         None,
     )

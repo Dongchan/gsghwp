@@ -249,7 +249,13 @@ std::wstring SaveVerify(IDispatch* const hwp) {
 
     std::wstring afterPath;
     const HRESULT afterPathStatus = ReadFullName(hwp, &afterPath);
-    const DocumentFingerprint after = CaptureDocumentFingerprint(hwp);
+    // A document the engine could not serialize before the save is a document
+    // it cannot serialize after it either, and the attempt is the expensive
+    // half of this capture on exactly those documents. Skipping it leaves the
+    // verdict untouched: SameFingerprint already answers false the moment the
+    // first capture came back incomplete.
+    const DocumentFingerprint after =
+        CaptureDocumentFingerprint(hwp, before.documentCaptured);
     const FileEvidence fileEvidence =
         SUCCEEDED(afterPathStatus) ? ReadFileEvidence(afterPath) : FileEvidence{};
     const bool saveCompleted = SUCCEEDED(saveStatus) &&

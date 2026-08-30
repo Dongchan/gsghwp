@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Lock
 from time import monotonic_ns
-from typing import Literal, cast, final
+from typing import Final, Literal, cast, final
 
 from hwp_errors import HwpLiveError
 from hwp_live_native_batch_contract import NativeLifecycleResult, NativeSaveResult
@@ -13,6 +13,13 @@ from hwp_live_process_lane import (
 )
 from hwp_operation_contract import OperationResult
 from hwp_operation_registry import operation_registry
+
+
+# C++ 이 "부르지 않았다"를 적어 보내는 두 자리. E_PENDING 은 HRESULT 변수의
+# 초기값이고(DocumentLifecycle.cpp:306-320), E_ABORT 는 저장은 끝났으나
+# 복원원이 없어 Clear 를 건너뛴 자리다(:340-341).
+_E_PENDING: Final = -2_147_483_638  # 0x8000000A
+_E_ABORT: Final = -2_147_467_260  # 0x80004004
 
 
 SavePhase = Literal[
@@ -296,6 +303,30 @@ def _native_lifecycle_save_state(
     return state.snapshot()
 
 
+def _reopen_baseline_unavailable(native: NativeLifecycleResult) -> bool:
+    # DocumentLifecycle.cpp:337-341 — 저장이 끝난 뒤 재개방 검증의 복원원이
+    # 없으면 C++ 은 Clear 를 **부르지 않고** clear_hresult 자리에 E_ABORT 를
+    # 적어 보낸다. 복원원은 둘이다: 저장 전 문서 지문(before.captured,
+    # OfficialApiState.cpp:718-740)과 SetTextFile 로 되돌릴 HWP 블록
+    # (ReadDocumentBlock, DocumentLifecycle.cpp:212-223). 엔진은 자기 메모리
+    # 한계를 넘는 문서를 직렬화하지 않으므로 그 크기에서는 둘 다 항상 없다.
+    # 그러면 Clear 도 Open 도 시도되지 않아 문서는 그대로 열려 있는데,
+    # clear_hresult < 0 만 보는 쪽은 그것을 "Clear 호출 실패"로 부르고
+    # partial_mutation 을 세운다 — 아무것도 건드리지 않은 호출에 대해.
+    #
+    # 시도되지 않았다는 증인을 함께 요구한다. Clear 가 실제로 돌았다면
+    # clear_return 이 -1 이 아니고, Open 이 돌았다면 open_hresult 가 초기값
+    # E_PENDING 이 아니다. 하나라도 어긋나면 기존 "clear" 로 되돌아간다.
+    return (
+        native.clear_hresult == _E_ABORT
+        and native.clear_return == -1
+        and native.open_hresult == _E_PENDING
+        and native.open_return == -1
+        and native.recovered is False
+        and native.recovery_hresult == _E_PENDING
+    )
+
+
 def _lifecycle_failure_stage(native: NativeLifecycleResult) -> str | None:
     if native.verified:
         return None
@@ -310,7 +341,11 @@ def _lifecycle_failure_stage(native: NativeLifecycleResult) -> str | None:
     if not save_completed:
         return "save"
     if native.clear_hresult < 0:
-        return "clear"
+        return (
+            "reopen_baseline_unavailable"
+            if _reopen_baseline_unavailable(native)
+            else "clear"
+        )
     if native.open_hresult < 0 or native.open_return != 1:
         return "reopen"
     if native.reopened_path is None:
@@ -332,6 +367,15 @@ def _lifecycle_failure_stage(native: NativeLifecycleResult) -> str | None:
 
 
 def _lifecycle_failure_message(stage: str, recovered: bool) -> str:
+    if stage == "reopen_baseline_unavailable":
+        # "실패했습니다"로 부르지 않는다. 실패한 호출이 없다.
+        return (
+            "Save 호출과 저장 직후 수정 상태는 확인했지만, 재개방 검증의 "
+            "복원원(저장 전 문서 지문·복구 블록)을 엔진이 만들지 못해 "
+            "Clear·재개방을 시도하지 않았습니다. 문서는 그대로 열려 있고 "
+            "디스크 영속성만 이 경로에서 확인되지 않았습니다. 저장 여부는 "
+            "operation status의 저장 전후 파일 지문으로 확인하세요"
+        )
     descriptions = {
         "save": "Save 호출 또는 저장 직후 수정 상태 확인",
         "clear": "저장 문서 Clear 호출",
@@ -414,6 +458,17 @@ def _native_save_completed(native: NativeSaveResult) -> bool:
     )
 
 
+def _document_hash_evidence_absent(native: NativeSaveResult) -> bool:
+    # 엔진은 자기 메모리 한계를 넘는 문서를 직렬화하지 않는다. 그때
+    # CaptureDocumentFingerprint 의 GetTextFile(HWPML2X) 가 S_OK 와 빈 문자열을
+    # 돌려주고(OfficialApiState.cpp:539-551), C++ 은 문서 해시를 0 으로 적어
+    # 보내며 파이썬은 그것을 None 으로 읽는다. 즉 저장 전후 둘 다 없다는 것은
+    # "문서가 달라졌다"가 아니라 "이 증인은 이 문서 크기에서 애초에 존재하지
+    # 않는다"이다. 한쪽만 없으면 그 사이에 무엇이 있었는지 모르므로 여기가
+    # 아니다.
+    return native.before_document_hash is None and native.after_document_hash is None
+
+
 def _observable_live_state_stable(native: NativeSaveResult) -> bool:
     return (
         native.before_page_count is not None
@@ -423,8 +478,13 @@ def _observable_live_state_stable(native: NativeSaveResult) -> bool:
         and native.before_control_hash == native.after_control_hash
         and native.before_text_hash is not None
         and native.before_text_hash == native.after_text_hash
-        and native.before_document_hash is not None
-        and native.after_document_hash is not None
+        # 없는 증인을 불일치로 세지 않는다. 문서 해시가 서로 "다른" 경우는
+        # 이미 여기를 통과해 파일 지문(SHA-256) 판정으로 넘어간다
+        # (test_lv6_save_uses_strict_file_fingerprint_without_claiming_live_state).
+        # 아예 "못 만든" 경우만 실패로 묶어 둘 근거가 없었다. 대용량 문서에서
+        # 그 조합이 성공한 저장을 통째로 operation_failed 로 만들었다.
+        and (native.before_document_hash is None)
+        == (native.after_document_hash is None)
     )
 
 
@@ -435,11 +495,46 @@ def _save_metadata_observed(save_state: SaveStateSnapshot) -> bool:
     )
 
 
+_NATIVE_READBACK_UNCERTAINTY_SOURCES: Final = frozenset(
+    {
+        "native_readback",
+        "native_reopen_readback",
+        "metadata_evidence_missing",
+    }
+)
+
+
 def _save_state_has_external_uncertainty(save_state: SaveStateSnapshot) -> bool:
     return any(
         transition.phase == "uncertain"
         and transition.source not in {"native_readback", "metadata_evidence_missing"}
         for transition in save_state.transitions
+    )
+
+
+def save_state_uncertainty_is_native_readback_only(
+    save_state: SaveStateSnapshot,
+) -> bool:
+    """미확정의 출처가 네이티브 readback 하나뿐인지 본다.
+
+    네이티브 readback 의 판정은 저장 전후 문서 지문 대조를 요구하고
+    (DocumentLifecycle.cpp:258-267 → SameFingerprint :147-158), 그 함수는
+    첫 줄에서 ``before.captured && after.captured`` 를 본다. 엔진이 자기
+    메모리 한계 위의 문서를 직렬화하지 못하면 이 증인은 애초에 존재하지
+    않으므로, 그 크기에서는 저장할 때마다 미확정이 새로 찍힌다.
+
+    감시견 관측, 대화상자, 프로세스 소실, 마감 같은 **바깥** 출처는 저장이
+    실제로 어디까지 갔는지 모른다는 뜻이라 이 함수가 거짓을 낸다. 그런
+    미확정은 더 강한 디스크 증거가 나와도 걷어내면 안 된다.
+    """
+    uncertain = tuple(
+        transition
+        for transition in save_state.transitions
+        if transition.phase == "uncertain"
+    )
+    return len(uncertain) > 0 and all(
+        transition.source in _NATIVE_READBACK_UNCERTAINTY_SOURCES
+        for transition in uncertain
     )
 
 
@@ -510,6 +605,10 @@ def _live_state_verification_stage(native: NativeSaveResult) -> str:
         or native.before_text_hash != native.after_text_hash
     ):
         return "text_fingerprint"
+    if _document_hash_evidence_absent(native):
+        # 대조에 실패한 것이 아니라 엔진이 이 크기의 문서에 대해 지문을 만들지
+        # 못했다. 두 경우를 같은 이름으로 부르면 읽는 쪽이 문서가 변했다고 읽는다.
+        return "document_fingerprint_unavailable"
     if (
         native.before_document_hash is None
         or native.before_document_hash != native.after_document_hash
@@ -654,7 +753,12 @@ def lifecycle_result(
         after_document_hash=native.after_document_hash,
         live_state_preserved_after_save=verified or native.recovered,
         disk_persistence_verified=verified,
-        partial_mutation=False if verified or native.recovered else True,
+        # 시도되지 않은 Clear·Open 은 문서를 반쯤 바꿔 놓을 수 없다.
+        partial_mutation=not (
+            verified
+            or native.recovered
+            or failure_stage == "reopen_baseline_unavailable"
+        ),
         retry_safe=verified,
         reconcile_required=not verified,
     )

@@ -13,6 +13,31 @@ def mm_to_hwpunit(value: float) -> int:
     return round(value * HWPUNITS_PER_INCH / MILLIMETERS_PER_INCH)
 
 
+# ParaShape's length fields -- LeftMargin, RightMargin, Indentation,
+# PrevSpacing, NextSpacing, and LineSpacing when the type is fixed or
+# margin-only -- are URC, not plain HWPUNIT. Bit 0 selects the representation:
+# 0 is an absolute length in HWPUNIT shifted up one bit, 1 is relative to the
+# character size. Writing a plain HWPUNIT therefore lands at half the requested
+# length, or lands in the relative representation whenever the value is odd.
+# Reading one back as a plain HWPUNIT doubles it. Both directions have to agree
+# or an agent that reads a document's own margin and asks for the same margin
+# gets twice it.
+def absolute_urc(millimeters: float) -> int:
+    return mm_to_hwpunit(millimeters) << 1
+
+
+def urc_to_mm(value: int | None) -> float | None:
+    """An absolute URC length in mm, or ``None`` when it is a relative one.
+
+    A relative length is a multiple of the character size, which is not a
+    length in millimetres at all. Answering with a number would be inventing
+    one, so callers are told there is nothing to report instead.
+    """
+    if value is None or value & 1:
+        return None
+    return round((value >> 1) * MILLIMETERS_PER_INCH / HWPUNITS_PER_INCH, 3)
+
+
 @dataclass(frozen=True, slots=True)
 class UsablePageArea:
     left: int

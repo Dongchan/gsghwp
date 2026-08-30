@@ -46,6 +46,11 @@ struct Context {
     bool hasCopiedTableBlock = false;
     const Request* request = nullptr;
     ExecutionResult* result = nullptr;
+    // Where an append actually starts: the caret right after MoveDocEnd and
+    // before the paragraph break that MOVE_DOC_END may add. An atomic rollback
+    // deletes from here, so the break is inside what it removes.
+    Position appendAnchor;
+    bool hasAppendAnchor = false;
 };
 
 struct TextFormatFingerprint {
@@ -130,6 +135,11 @@ bool RestoreTextPosition(
     Context* context,
     const Selection& original,
     const std::wstring& location);
+
+bool ValidateDocumentIdentity(
+    IDispatch* hwp,
+    const Request& request,
+    ExecutionResult* result);
 bool ReadSelectedText(
     Context* context,
     std::wstring* text,
@@ -154,7 +164,7 @@ bool ApplySetter(
 bool ExecuteParameterAction(
     Context* context,
     const Command& command,
-    bool verifyCellFormat = true);
+    bool verifyFormat = true);
 bool MoveToPage(Context* context, LONG requestedPage);
 
 bool SelectControl(
@@ -211,6 +221,7 @@ bool DeleteTail(Context* context, const Command& command);
 bool RollbackAppendTail(Context* context, const Position& start);
 bool ExecuteCall(Context* context, const Command& command);
 bool SaveDocumentFile(Context* context, const std::wstring& pathText);
+bool ProbeDocumentBlock(Context* context, const std::wstring& pathText);
 bool RestoreDocumentFile(
     Context* context,
     const std::wstring& pathText,

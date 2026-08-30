@@ -1,7 +1,9 @@
 #include "ActionExecutorInternal.h"
 #include "ParagraphText.h"
+#include "TextPatchReadback.h"
 
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <set>
 #include <sstream>
@@ -11,8 +13,10 @@
 
 namespace hancom::actions::detail {
 
-using hancom::text::NormalizeParagraphText;
 using hancom::text::SameParagraphText;
+using hancom::text_patch::MatchesExpectedReadback;
+using hancom::text_patch::MatchesReplacementReadback;
+using hancom::text_patch::ReadbackPolicy;
 
 bool FormatLongProperty(
     IDispatch* const object,
@@ -129,6 +133,102 @@ bool CaptureTextFormat(
              L"TEXT_FORMAT_READBACK",
              location,
              L"character or paragraph format could not be captured"));
+}
+
+bool CapturePreparedTextFormat(
+    Context* const context,
+    const Request& request,
+    const size_t patchIndex,
+    PreparedTextPatchTarget* const captured,
+    const std::wstring& location) {
+    std::set<std::wstring> characterProperties;
+    std::set<std::wstring> paragraphProperties;
+    for (size_t index = patchIndex + 1; index < request.commands.size(); ++index) {
+        const Command& command = request.commands[index];
+        if (command.kind == CommandKind::TextPatch) {
+            break;
+        }
+        if (command.kind != CommandKind::Action) {
+            continue;
+        }
+        std::set<std::wstring>* properties = nullptr;
+        if (command.name == L"CharShape") {
+            properties = &characterProperties;
+        } else if (command.name == L"ParagraphShape") {
+            properties = &paragraphProperties;
+        } else {
+            continue;
+        }
+        for (const Setter& setter : command.setters) {
+            properties->insert(setter.path);
+        }
+    }
+
+    CComPtr<IDispatch> parameter;
+    CComPtr<IDispatch> set;
+    if (!characterProperties.empty()) {
+        if (!DefaultTextFormatParameter(
+                context,
+                L"CharShape",
+                L"HCharShape",
+                parameter,
+                set,
+                location)) {
+            return false;
+        }
+        for (const std::wstring& property : characterProperties) {
+            const bool read =
+                property == L"Bold"
+                    ? FormatBooleanProperty(parameter, L"Bold", &captured->bold)
+                : property == L"Height"
+                    ? FormatLongProperty(parameter, L"Height", &captured->height)
+                : property == L"TextColor"
+                    ? FormatLongProperty(
+                          parameter, L"TextColor", &captured->textColor)
+                : property.rfind(L"FaceName", 0) == 0
+                    ? FormatTextProperty(
+                          parameter, L"FaceNameHangul", &captured->faceName)
+                : property.rfind(L"FontType", 0) == 0;
+            if (!read) {
+                return SetError(
+                    context->result,
+                    L"TEXT_FORMAT_READBACK",
+                    location,
+                    property + L" could not be captured");
+            }
+        }
+    }
+    if (!paragraphProperties.empty()) {
+        parameter.Release();
+        set.Release();
+        if (!DefaultTextFormatParameter(
+                context,
+                L"ParagraphShape",
+                L"HParaShape",
+                parameter,
+                set,
+                location)) {
+            return false;
+        }
+        for (const std::wstring& property : paragraphProperties) {
+            const bool read =
+                property == L"AlignType"
+                    ? FormatLongProperty(
+                          parameter, L"AlignType", &captured->alignment)
+                : property == L"LineSpacing"
+                    ? FormatLongProperty(
+                          parameter, L"LineSpacing", &captured->lineSpacing)
+                : false;
+            if (!read) {
+                return SetError(
+                    context->result,
+                    L"TEXT_FORMAT_READBACK",
+                    location,
+                    property + L" could not be captured");
+            }
+        }
+    }
+    return true;
 }
 
 bool ExecuteCapturedFormat(
@@ -279,8 +379,8 @@ bool SetCellText(Context* const context, const Command& command) {
     if (!replaced) {
         return false;
     }
+    context->result->partialMutation = true;
     if (command.second.empty()) {
-        context->result->partialMutation = true;
         if (!GoToCell(context, address) ||
             !RunAction(context->action, L"SelectAll", context->result, address)) {
             return false;
@@ -401,18 +501,18 @@ bool TextMatchesAt(
     return expected.size() == actual.size() - offset;
 }
 
-bool TextMatches(
-    const std::wstring& actual,
-    const std::wstring& expected,
-    const bool matchCase) {
-    const std::wstring normalizedActual = NormalizeParagraphText(actual);
-    const std::wstring normalizedExpected = NormalizeParagraphText(expected);
-    return normalizedActual.size() == normalizedExpected.size() &&
-        TextMatchesAt(
-            normalizedActual,
-            normalizedExpected,
-            0,
-            matchCase);
+// The number HWP draws in front of the caret's paragraph, or an empty
+// string when the paragraph has none and when the call is unavailable. Read
+// only after a plain readback comparison already failed, because that is
+// the only case in which the drawn number can be what made it fail.
+std::wstring ReadAutomaticNumber(Context* const context) {
+    CComVariant raw;
+    std::wstring automaticNumber;
+    HRESULT status = Method(context->hwp, L"GetHeadingString", {}, &raw);
+    if (SUCCEEDED(status)) {
+        status = AsString(raw, &automaticNumber);
+    }
+    return SUCCEEDED(status) ? automaticNumber : std::wstring();
 }
 
 bool PatchSelectedText(
@@ -422,7 +522,8 @@ bool PatchSelectedText(
     const bool matchCase,
     const std::wstring& replacement,
     const std::wstring& location,
-    const bool preserveFormat = false) {
+    const bool preserveFormat,
+    const ReadbackPolicy readbackPolicy) {
     Selection before;
     if (!GetSelection(context->hwp, &before, context->result)) {
         return false;
@@ -445,7 +546,18 @@ bool PatchSelectedText(
     if (!ReadSelectedText(context, &selected, location)) {
         return false;
     }
-    if (requireExpected && !TextMatches(selected, expected, matchCase)) {
+    if (requireExpected &&
+        !MatchesExpectedReadback(
+            selected,
+            expected,
+            matchCase,
+            readbackPolicy) &&
+        !MatchesExpectedReadback(
+            selected,
+            expected,
+            ReadAutomaticNumber(context),
+            matchCase,
+            readbackPolicy)) {
         return SetError(
             context->result,
             L"STALE_SELECTION_TEXT",
@@ -474,9 +586,7 @@ bool PatchSelectedText(
     if (!replaced) {
         return false;
     }
-    if (replacement.empty()) {
-        context->result->partialMutation = true;
-    }
+    context->result->partialMutation = true;
     Position end;
     if (!GetPosition(context->hwp, &end, context->result)) {
         return false;
@@ -503,7 +613,15 @@ bool PatchSelectedText(
     }
     std::wstring inserted;
     if (!ReadSelectedText(context, &inserted, location) ||
-        !SameParagraphText(inserted, replacement)) {
+        (!MatchesReplacementReadback(
+             inserted,
+             replacement,
+             readbackPolicy) &&
+         !MatchesReplacementReadback(
+             inserted,
+             replacement,
+             ReadAutomaticNumber(context),
+             readbackPolicy))) {
         return SetError(
             context->result,
             L"TEXT_PATCH_READBACK",
@@ -526,7 +644,8 @@ bool PatchCurrentText(Context* const context, const Command& command) {
             true,
             command.second,
             L"current",
-            command.preserveFormat);
+            command.preserveFormat,
+            ReadbackPolicy::Exact);
     }
     if ((before.mode & kSelectionModeMask) != kSelectionNone) {
         return SetError(
@@ -547,6 +666,7 @@ bool PatchCurrentText(Context* const context, const Command& command) {
         !InsertText(context, command.second, L"current")) {
         return false;
     }
+    context->result->partialMutation = true;
     Position end;
     if (!GetPosition(context->hwp, &end, context->result)) {
         return false;
@@ -641,6 +761,9 @@ bool SelectCellTextPatchMatch(
             L"TEXT_FIND_STATE",
             location,
             L"table cell did not expose one text selection");
+    }
+    if (!command.hasExpectedText) {
+        return true;
     }
     std::vector<TextMatch> matches;
     for (size_t offset = 0;
@@ -766,6 +889,103 @@ bool PrepareForwardFind(
                L"text.find");
 }
 
+// ForwardFind answers with the coordinates it matched at, and the replacement
+// deletes whatever those coordinates span. The block readback is not the same
+// measure: an automatically numbered paragraph draws its number in front of
+// every readback taken inside it while occupying no character cell, so the
+// readback is routinely wider than the span and can never say what a deletion
+// would destroy. Only the span can. A span that is already the literal is left
+// untouched -- that is the ordinary match, numbered paragraphs included, and it
+// costs no call. A wider span is pulled back onto the literal so the surplus
+// survives, and a wider span that cannot be mapped back onto the readback fails
+// closed, because a surplus that cannot be located is a surplus that must not
+// be deleted.
+bool NarrowForwardFindSelection(
+    Context* const context,
+    const Command& command,
+    Selection* const selection) {
+    const auto stale = [context](const wchar_t* const message) {
+        return SetError(
+            context->result, L"STALE_SELECTION_TEXT", L"text.find", message);
+    };
+    if (selection == nullptr || command.first.empty() ||
+        selection->start.list != selection->end.list ||
+        selection->start.paragraph != selection->end.paragraph ||
+        selection->end.character < selection->start.character) {
+        return stale(
+            L"ForwardFind did not select one paragraph range of text");
+    }
+    const size_t span = static_cast<size_t>(
+        selection->end.character - selection->start.character);
+    if (span == command.first.size()) {
+        return true;
+    }
+    if (span < command.first.size()) {
+        return stale(
+            L"ForwardFind selected fewer characters than the requested text");
+    }
+    std::wstring readback;
+    if (!ReadSelectedText(context, &readback, L"text.find")) {
+        return false;
+    }
+    // One character per cell holds only once the paragraph's drawn number --
+    // the single prefix known to carry no cells -- is off the front. If the two
+    // still disagree after that, the surplus cannot be placed and the range
+    // cannot be narrowed onto the literal.
+    const std::wstring automaticNumber = ReadAutomaticNumber(context);
+    const std::wstring prefix =
+        automaticNumber.empty() ? std::wstring() : automaticNumber + L' ';
+    std::wstring body = readback;
+    if (!prefix.empty() && body.size() > prefix.size() &&
+        body.compare(0, prefix.size(), prefix) == 0) {
+        body = body.substr(prefix.size());
+    }
+    if (body.size() != span ||
+        body.find_first_of(L"\r\n") != std::wstring::npos ||
+        command.first.find_first_of(L"\r\n") != std::wstring::npos) {
+        return stale(
+            L"ForwardFind selected more than the requested text and the "
+            L"surplus could not be located");
+    }
+    size_t matchOffset = 0;
+    size_t matchCount = 0;
+    for (size_t offset = 0; offset + command.first.size() <= body.size();
+         ++offset) {
+        if (TextMatchesAt(body, command.first, offset, command.matchCase)) {
+            matchOffset = offset;
+            if (++matchCount > 1) {
+                return stale(
+                    L"ForwardFind selected more than the requested text, which "
+                    L"the surplus repeats");
+            }
+        }
+    }
+    if (matchCount != 1) {
+        return stale(
+            L"ForwardFind selected a range that does not hold the requested "
+            L"text once");
+    }
+    const Position literalStart{
+        selection->start.list,
+        selection->start.paragraph,
+        selection->start.character + static_cast<LONG>(matchOffset)};
+    const Position literalEnd{
+        literalStart.list,
+        literalStart.paragraph,
+        literalStart.character + static_cast<LONG>(command.first.size())};
+    Selection confirmed;
+    if (!SelectTextRange(context, literalStart, literalEnd, L"text.find") ||
+        !GetSelection(context->hwp, &confirmed, context->result)) {
+        return false;
+    }
+    if (!confirmed.selected || !SamePosition(confirmed.start, literalStart) ||
+        !SamePosition(confirmed.end, literalEnd)) {
+        return stale(L"the range narrowed onto the requested text did not hold");
+    }
+    *selection = confirmed;
+    return true;
+}
+
 bool SelectTextPatchMatch(
     Context* const context,
     const Command& command,
@@ -822,6 +1042,9 @@ bool SelectTextPatchMatch(
         if (!seen.insert(key).second) {
             exhausted = true;
             break;
+        }
+        if (!NarrowForwardFindSelection(context, command, &current)) {
+            return false;
         }
         if (listFilter < 0 || current.start.list == listFilter) {
             matches.push_back(TextMatch{current});
@@ -909,42 +1132,13 @@ bool PatchSearchedText(
             command.matchCase,
             command.second,
             location,
-            command.preserveFormat);
+            command.preserveFormat,
+            ReadbackPolicy::Find);
 }
 
 using ShadowCellKey = std::pair<std::wstring, std::wstring>;
 
 static thread_local const Request* reusableTableTextFillRequest = nullptr;
-
-bool SameControlIdentity(
-    IDispatch* const left,
-    IDispatch* const right) {
-    if (left == nullptr || right == nullptr) {
-        return false;
-    }
-    if (left == right) {
-        return true;
-    }
-    IUnknown* leftIdentity = nullptr;
-    IUnknown* rightIdentity = nullptr;
-    const HRESULT leftStatus = left->QueryInterface(
-        IID_IUnknown,
-        reinterpret_cast<void**>(&leftIdentity));
-    const HRESULT rightStatus = right->QueryInterface(
-        IID_IUnknown,
-        reinterpret_cast<void**>(&rightIdentity));
-    const bool same =
-        SUCCEEDED(leftStatus) &&
-        SUCCEEDED(rightStatus) &&
-        leftIdentity == rightIdentity;
-    if (leftIdentity != nullptr) {
-        leftIdentity->Release();
-    }
-    if (rightIdentity != nullptr) {
-        rightIdentity->Release();
-    }
-    return same;
-}
 
 bool SelectTableForCellPatch(
     Context* const context,
@@ -953,11 +1147,25 @@ bool SelectTableForCellPatch(
     if (!SelectControl(context, tableId, selectedControl)) {
         return false;
     }
+    // SelectControl already read the freshly selected control's instance id
+    // and refused anything but tableId, so the selection is proven to be the
+    // requested table. Asking on top of that whether it is the *same dispatch
+    // wrapper* we cached is a question HWP always answers no to: every
+    // CurSelectedCtrl read hands back a new wrapper. That never-true term made
+    // each cell of a fill batch fall into CaptureCurrentTable, whose
+    // topology.Clear made the next GoToCell re-inspect every cell of the
+    // table -- an O(commands x table cells) walk before a single character was
+    // written.
     const bool safeToReuse =
         context->request == reusableTableTextFillRequest &&
-        context->tableId == tableId &&
-        SameControlIdentity(context->table, selectedControl);
-    if (!safeToReuse && !CaptureCurrentTable(context)) {
+        context->table != nullptr &&
+        context->tableId == tableId;
+    if (safeToReuse) {
+        // Keep the cell map; only refresh the wrapper to the live selection.
+        context->table = selectedControl;
+        return true;
+    }
+    if (!CaptureCurrentTable(context)) {
         return false;
     }
     return context->tableId == tableId ||
@@ -969,6 +1177,13 @@ bool SelectTableForCellPatch(
 }
 
 bool PatchText(Context* const context, const Command& command) {
+    if (command.preflightOnly) {
+        return SetError(
+            context->result,
+            L"TEXT_PATCH_PREFLIGHT_ONLY",
+            command.name,
+            L"prepared text target records cannot execute as mutations");
+    }
     if (command.name == L"CURRENT") {
         return PatchCurrentText(context, command);
     }
@@ -986,7 +1201,8 @@ bool PatchText(Context* const context, const Command& command) {
                 true,
                 command.second,
                 L"range",
-                command.preserveFormat);
+                command.preserveFormat,
+                ReadbackPolicy::Exact);
     }
     Selection original;
     if (!GetSelection(context->hwp, &original, context->result)) {
@@ -1030,7 +1246,8 @@ bool PatchText(Context* const context, const Command& command) {
                 command.matchCase,
                 command.second,
                 address,
-                command.preserveFormat);
+                command.preserveFormat,
+                ReadbackPolicy::Exact);
     }
     return SetError(
         context->result,
@@ -1325,6 +1542,288 @@ bool PreflightTableTextCommands(
     }
     context->result->failedStep.clear();
     return true;
+}
+
+bool PositionBefore(const Position& left, const Position& right) noexcept {
+    if (left.list != right.list) {
+        return left.list < right.list;
+    }
+    if (left.paragraph != right.paragraph) {
+        return left.paragraph < right.paragraph;
+    }
+    return left.character < right.character;
+}
+
+bool SelectionsOverlap(const Selection& left, const Selection& right) noexcept {
+    return left.start.list == right.start.list &&
+        PositionBefore(left.start, right.end) &&
+        PositionBefore(right.start, left.end);
+}
+
+bool VerifyPreflightSelection(
+    Context* const context,
+    const Command& command,
+    const ReadbackPolicy policy,
+    const std::wstring& location) {
+    if (!command.hasExpectedText) {
+        return true;
+    }
+    std::wstring selected;
+    return ReadSelectedText(context, &selected, location) &&
+        (MatchesExpectedReadback(
+             selected,
+             command.first,
+             command.matchCase,
+             policy) ||
+         MatchesExpectedReadback(
+             selected,
+             command.first,
+             ReadAutomaticNumber(context),
+             command.matchCase,
+             policy) ||
+         SetError(
+             context->result,
+             L"STALE_SELECTION_TEXT",
+             location,
+             L"selected text changed before text.patch preflight"));
+}
+
+bool ResolveTextPatchTarget(
+    Context* const context,
+    const Command& command,
+    const Selection& original,
+    Selection* const resolved) {
+    ReadbackPolicy policy = ReadbackPolicy::Exact;
+    std::wstring location = L"current";
+    if (command.name == L"CURRENT") {
+        Selection current;
+        if (!GetSelection(context->hwp, &current, context->result)) {
+            return false;
+        }
+        if (current.selected) {
+            *resolved = current;
+        } else if ((current.mode & kSelectionModeMask) != kSelectionNone) {
+            return SetError(
+                context->result,
+                L"NON_TEXT_SELECTION",
+                location,
+                L"text.patch cannot use a non-text selection");
+        } else if (command.hasExpectedText && !command.first.empty()) {
+            return SetError(
+                context->result,
+                L"NO_SELECTION",
+                location,
+                L"expected old text requires a current selection");
+        } else {
+            Position cursor;
+            if (!GetPosition(context->hwp, &cursor, context->result)) {
+                return false;
+            }
+            *resolved = Selection{false, kSelectionNone, cursor, cursor};
+            return true;
+        }
+    } else if (command.name == L"RANGE") {
+        location = L"range";
+        const Position start{command.list, command.paragraph, command.character};
+        const Position end{
+            command.endList,
+            command.endParagraph,
+            command.endCharacter};
+        if (!SelectTextRange(context, start, end, location)) {
+            return false;
+        }
+    } else if (command.name == L"FIND") {
+        if (command.occurrence < 0 || command.occurrence > 20'000) {
+            return SetError(
+                context->result,
+                L"TEXT_OCCURRENCE",
+                L"text.find",
+                L"text occurrence must be between 1 and 20000 when supplied");
+        }
+        LONG listFilter = -1;
+        location = L"text.find";
+        if (!command.tableInstanceId.empty()) {
+            if (command.cellAddress.empty() ||
+                !SelectTableForCellPatch(context, command.tableInstanceId) ||
+                !GoToCell(context, command.cellAddress)) {
+                return false;
+            }
+            Position cell;
+            if (!GetPosition(context->hwp, &cell, context->result)) {
+                return false;
+            }
+            listFilter = cell.list;
+            location = NormalizeAddress(command.cellAddress);
+        }
+        policy = ReadbackPolicy::Find;
+        if (!SelectTextPatchMatch(context, command, original, listFilter)) {
+            return false;
+        }
+    } else if (command.name == L"CELL") {
+        if (command.occurrence < 0 || command.occurrence > 20'000) {
+            return SetError(
+                context->result,
+                L"TEXT_OCCURRENCE",
+                command.cellAddress,
+                L"text occurrence must be between 1 and 20000 when supplied");
+        }
+        location = NormalizeAddress(command.cellAddress);
+        if (!SelectTableForCellPatch(context, command.tableInstanceId) ||
+            !GoToCell(context, command.cellAddress) ||
+            !SelectCellTextPatchMatch(context, command, original, location)) {
+            return false;
+        }
+    } else {
+        return SetError(
+            context->result,
+            L"TEXT_PATCH_TARGET",
+            command.name,
+            L"unsupported text.patch preflight target");
+    }
+    if (!GetSelection(context->hwp, resolved, context->result) ||
+        !resolved->selected) {
+        return SetError(
+            context->result,
+            L"TEXT_FIND_STATE",
+            location,
+            L"text.patch preflight did not resolve one text selection");
+    }
+    return VerifyPreflightSelection(context, command, policy, location);
+}
+
+ExecutionResult PreflightTextPatchTargets(
+    IDispatch* const hwp,
+    const Request& request) noexcept {
+    const auto started = std::chrono::steady_clock::now();
+    ExecutionResult result;
+    Context context;
+    context.hwp = hwp;
+    context.request = &request;
+    context.result = &result;
+    const auto finish = [&]() {
+        result.elapsedMicroseconds = std::chrono::duration_cast<
+            std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started).count();
+        result.retrySafe = !result.partialMutation;
+        return result;
+    };
+    try {
+        if (hwp == nullptr ||
+            !ValidateCommandOrder(request, &result) ||
+            !ValidateDocumentIdentity(hwp, request, &result) ||
+            !GetDispatchProperty(hwp, L"HAction", context.action, &result)) {
+            return finish();
+        }
+        Position cursor;
+        Selection original;
+        if (!GetPosition(hwp, &cursor, &result) ||
+            !GetSelection(
+                hwp,
+                &original,
+                &result,
+                SelectionCapturePolicy::RequiredControl) ||
+            !hancom::com_state::CanRestoreSelection(original)) {
+            SetError(
+                &result,
+                L"UNSUPPORTED_SELECTION",
+                L"text.patch.preflight",
+                L"the active selection cannot be restored after preflight");
+            return finish();
+        }
+        std::vector<Selection> targets;
+        size_t requestIndex = 0;
+        for (size_t commandIndex = 0;
+             commandIndex < request.commands.size();
+             ++commandIndex) {
+            const Command& command = request.commands[commandIndex];
+            if (command.kind != CommandKind::TextPatch) {
+                continue;
+            }
+            result.failedRequestIndex = requestIndex;
+            Selection target;
+            bool resolved = ResolveTextPatchTarget(
+                &context,
+                command,
+                original,
+                &target);
+            PreparedTextPatchTarget captured;
+            if (resolved) {
+                captured.startList = target.start.list;
+                captured.startParagraph = target.start.paragraph;
+                captured.startCharacter = target.start.character;
+                captured.endList = target.end.list;
+                captured.endParagraph = target.end.paragraph;
+                captured.endCharacter = target.end.character;
+                resolved = ReadSelectedText(
+                    &context,
+                    &captured.text,
+                    L"text.patch.preflight.inverse") &&
+                    CapturePreparedTextFormat(
+                        &context,
+                        request,
+                        commandIndex,
+                        &captured,
+                        L"text.patch.preflight.inverse");
+            }
+            const Error resolutionError = result.error;
+            const bool restored = hancom::com_state::RestoreSelection(
+                hwp,
+                cursor,
+                original);
+            context.table = nullptr;
+            context.tableId.clear();
+            context.currentCell.clear();
+            context.topology.Clear();
+            if (!restored) {
+                result.retrySafe = false;
+                SetError(
+                    &result,
+                    L"STATE_RESTORE",
+                    L"text.patch.preflight",
+                    L"cursor or selection restoration failed after preflight");
+                return finish();
+            }
+            if (!resolved) {
+                result.error = resolutionError;
+                return finish();
+            }
+            if (std::any_of(
+                    targets.begin(),
+                    targets.end(),
+                    [&target](const Selection& prior) {
+                        return SelectionsOverlap(prior, target);
+                    })) {
+                SetError(
+                    &result,
+                    L"OVERLAPPING_TEXT_TARGET",
+                    L"text.patch.preflight",
+                    L"text.patch targets overlap in the prepared document state");
+                return finish();
+            }
+            targets.push_back(target);
+            result.preparedTextPatchTargets.push_back(std::move(captured));
+            ++requestIndex;
+        }
+        result.preflightTargetCount = targets.size();
+        result.succeeded = true;
+    } catch (...) {
+        SetError(
+            &result,
+            L"NATIVE_EXCEPTION",
+            L"text.patch.preflight",
+            L"text.patch preflight failed unexpectedly");
+    }
+    return finish();
+}
+
+}
+
+namespace hancom::actions {
+
+ExecutionResult PreflightTextPatches(
+    IDispatch* const hwp,
+    const Request& request) noexcept {
+    return detail::PreflightTextPatchTargets(hwp, request);
 }
 
 }

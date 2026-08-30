@@ -6,9 +6,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from hwp_errors import HwpLiveError
-from hwp_live_edit_history import LiveEditHistoryStore
+from hwp_live_edit_history import NO_CHECKPOINT_EVIDENCE, LiveEditHistoryStore
 from hwp_live_edit_history_policy import should_capture_full_document_checkpoint
 from hwp_live_edit_history_runtime import (
+    deletion_without_checkpoint_notice,
     execute_document_edit_history,
     execute_grouped_native_control_deletion,
     execute_grouped_native_page_deletion,
@@ -21,11 +22,7 @@ from hwp_live_edit_history_runtime import (
 from hwp_live_document_edit_commands import (
     build_delete_page_commands,
 )
-from hwp_live_document_edit_verification import (
-    capture_history_structure_snapshot,
-    verify_control_deletion,
-    verify_history_structure_change,
-)
+from hwp_live_document_edit_verification import verify_control_deletion
 from hwp_live_native_action_models import (
     NativeActionCommand,
     NativePageControl,
@@ -49,13 +46,21 @@ from hwp_operation_registry import operation_registry
 _WORKFLOWS = frozenset[HwpWorkflowId](
     ("document.delete_page", "document.undo", "document.redo", "control.delete")
 )
-_EXHAUSTED_MESSAGES: dict[HwpWorkflowId, str] = {
+# MCP 기록이 없어 한/글 자신의 실행 이력으로 처리한 경우. 능력은 유지하고
+# (거절하면 사용자는 되돌릴 방법 자체를 잃는다) 무엇을 확인하지 못했는지 말한다.
+# 이 문구는 성공 문장을 대체한다(`history_notice` 규약).
+_UNMANAGED_NATIVE_HISTORY_NOTICES: dict[HwpWorkflowId, str] = {
     "document.undo": (
-        "되돌릴 한컴 실행 이력이 없습니다. 이력 끝이므로 문서를 변경하지 않았습니다"
+        "현재 문서에 MCP가 기록한 되돌리기 목표 상태가 없어, 한/글 자신의 실행 "
+        "이력을 {applied}단계 되돌렸습니다. 대조할 목표 상태가 없으므로 문서가 "
+        "어떤 상태가 됐는지는 MCP가 확인하지 못했습니다. 한/글에서 문서를 "
+        "확인하세요"
     ),
     "document.redo": (
-        "다시 실행할 한컴 실행 이력이 없습니다. 이력 끝이므로 문서를 변경하지 "
-        "않았습니다"
+        "현재 문서에 MCP가 기록한 다시 실행 목표 상태가 없어, 한/글 자신의 실행 "
+        "이력을 {applied}단계 다시 실행했습니다. 대조할 목표 상태가 없으므로 "
+        "문서가 어떤 상태가 됐는지는 MCP가 확인하지 못했습니다. 한/글에서 문서를 "
+        "확인하세요"
     ),
 }
 
@@ -198,9 +203,10 @@ def operate_native_document_edit(
     control_targets: tuple[NativePageControl, ...] = ()
     commands: tuple[NativeActionCommand, ...] = ()
     history: tuple[HistoryDirection, int] | None = None
-    native_applied_steps: int | None = None
-    native_requested_steps: int | None = None
-    native_content_changed = False
+    history_notice = ""
+    history_state_confirmed: bool | None = True
+    history_changed_pages: tuple[int, ...] = ()
+    checkpoint_evidence = NO_CHECKPOINT_EVIDENCE
     if workflow == "document.delete_page":
         prepared = _page_commands(request)
         if isinstance(prepared, OperationResult):
@@ -220,22 +226,6 @@ def operate_native_document_edit(
     before = read_native_snapshot(request.candidate.window_handle)
     if before is None:
         raise HwpLiveError("실시간 편집 전 문서 상태를 읽지 못했습니다")
-    history_structure_before = None
-    if history is not None:
-        direction, _steps = history
-        if (
-            request.history.available(
-                direction,
-                request.routing_page.document_id,
-                request.routing_page.full_name,
-            )
-            == 0
-        ):
-            history_structure_before = capture_history_structure_snapshot(
-                request.candidate,
-                request.routing_page.page,
-                before.page_count,
-            )
     custom_history = False
     managed_history = False
     checkpoint_history = should_capture_full_document_checkpoint(
@@ -243,8 +233,12 @@ def operate_native_document_edit(
     )
     if workflow == "control.delete":
         assert page_target is not None
-        if checkpoint_history:
-            prepared_deletion = prepare_control_deletion(
+        # None means the checkpoint could not be taken. That costs the document
+        # checkpoint undo entry, never the deletion the caller asked for: the
+        # grouped path below is what large documents already use, and it records
+        # an undo entry backed by 한/글's own history instead.
+        prepared_deletion = (
+            prepare_control_deletion(
                 request.candidate,
                 request.history,
                 request.routing_page.document_id,
@@ -253,6 +247,10 @@ def operate_native_document_edit(
                 before.page_count,
                 control_targets,
             )
+            if checkpoint_history
+            else None
+        )
+        if prepared_deletion is not None:
             history_execution = execute_prepared_control_deletion(
                 request.candidate,
                 request.history,
@@ -268,14 +266,20 @@ def operate_native_document_edit(
                 before.page_count,
                 control_targets,
             )
+            history_notice = deletion_without_checkpoint_notice("control.delete")
         commands_executed = history_execution.commands_executed
         elapsed_microseconds = history_execution.elapsed_microseconds
         custom_history = history_execution.custom_history
+        checkpoint_evidence = history_execution.checkpoint_evidence
+        history_notice = "; ".join(
+            notice for notice in (history_notice, history_execution.notice) if notice
+        )
+        history_state_confirmed = history_execution.state_confirmed
         managed_history = True
     elif workflow == "document.delete_page":
         assert page_target is not None
-        if checkpoint_history:
-            prepared_deletion = prepare_page_deletion(
+        prepared_deletion = (
+            prepare_page_deletion(
                 request.candidate,
                 request.history,
                 request.routing_page.document_id,
@@ -283,6 +287,10 @@ def operate_native_document_edit(
                 page_target,
                 before.page_count,
             )
+            if checkpoint_history
+            else None
+        )
+        if prepared_deletion is not None:
             history_execution = execute_prepared_page_deletion(
                 request.candidate,
                 request.history,
@@ -299,9 +307,15 @@ def operate_native_document_edit(
                 before.page_count,
                 commands,
             )
+            history_notice = deletion_without_checkpoint_notice("document.delete_page")
         commands_executed = history_execution.commands_executed
         elapsed_microseconds = history_execution.elapsed_microseconds
         custom_history = history_execution.custom_history
+        checkpoint_evidence = history_execution.checkpoint_evidence
+        history_notice = "; ".join(
+            notice for notice in (history_notice, history_execution.notice) if notice
+        )
+        history_state_confirmed = history_execution.state_confirmed
         managed_history = True
     else:
         assert history is not None
@@ -315,57 +329,54 @@ def operate_native_document_edit(
             steps,
         )
         if custom_result is None:
-            history_result = execute_native_history(
+            # MCP 가 기록한 목표 상태가 없다. 한/글 자신의 이력은 그래도 돌린다
+            # (b733c58: 목표 상태가 없다는 이유로 되돌리기를 거절하면 사용자는
+            # 되돌릴 방법 자체를 잃는다). 대신 이 경로가 무엇을 확인하지 못했는지
+            # 답이 말한다.
+            #
+            # 예전에는 여기서 `history_state_confirmed = True` 를 박았다. 그
+            # 한 줄이 `verified: true` 가 되어, 되돌아갈 목표 상태가 없어 아무것도
+            # 대조하지 못한 호출이 "확인했다"고 답했다 — 165쪽 문서가 1쪽이 되는
+            # 되돌리기도 그렇게 통과했다.
+            native = execute_native_history(
                 request.candidate.window_handle,
                 direction,
                 steps,
             )
-            if history_result.applied == 0:
-                # The engine reports an empty history stack. Nothing was
-                # executed and nothing changed, so this is neither a success
-                # nor a failure — report the fact and stop before the
-                # before/after comparison, which would find no change and
-                # raise as if something had gone wrong.
-                return _result(
-                    request,
-                    "unsupported",
-                    _EXHAUSTED_MESSAGES[workflow],
+            commands_executed = native.applied
+            elapsed_microseconds = native.elapsed_microseconds
+            custom_history = False
+            history_notice = (
+                (
+                    f"한컴 실행 이력이 더 남아 있지 않아 {native.applied}단계를 "
+                    + "적용했습니다. 문서는 이 호출로 바뀌지 않았습니다"
                 )
-            native_applied_steps = history_result.applied
-            native_requested_steps = history_result.steps
-            native_content_changed = history_result.content_changed
-            commands_executed = history_result.applied
-            elapsed_microseconds = history_result.elapsed_microseconds
+                if native.applied == 0
+                else _UNMANAGED_NATIVE_HISTORY_NOTICES[workflow].format(
+                    applied=native.applied
+                )
+            )
+            # None: 확인하지 못했다. False(확인해 보니 아니다)도 True(확인했다)도
+            # 아니다. 대조할 목표 상태가 없었으므로 이 경로는 어느 쪽도 말할 수
+            # 없다.
+            history_state_confirmed = None
+            history_changed_pages = ()
+            checkpoint_evidence = NO_CHECKPOINT_EVIDENCE
+            managed_history = False
         else:
             commands_executed = custom_result.commands_executed
             elapsed_microseconds = custom_result.elapsed_microseconds
             custom_history = custom_result.custom_history
+            history_notice = custom_result.notice
+            history_state_confirmed = custom_result.state_confirmed
+            history_changed_pages = custom_result.changed_pages
+            checkpoint_evidence = custom_result.checkpoint_evidence
             managed_history = True
     after = read_native_snapshot(request.candidate.window_handle)
     if after is None:
         raise HwpLiveError("실시간 편집 후 문서 상태를 읽지 못했습니다")
     if before.document_id != after.document_id or before.full_name != after.full_name:
         raise HwpLiveError("실시간 편집 중 대상 문서가 바뀌었습니다")
-    if history_structure_before is not None:
-        history_structure_after = capture_history_structure_snapshot(
-            request.candidate,
-            request.routing_page.page,
-            after.page_count,
-        )
-        if not native_content_changed:
-            # The routing page state token covers that page's body text,
-            # paragraphs, controls and table cell text, and it is taken from an
-            # inspection that restores the caret and selection, so a selection
-            # that merely got dropped cannot move it. An unchanged token with no
-            # native content evidence therefore means no restored edit was
-            # observed anywhere we can see, and claiming success is not allowed.
-            verify_history_structure_change(
-                history_structure_before,
-                history_structure_after,
-            )
-        # Otherwise the native before/after state already proved that page,
-        # control count or control hash changed. The edit was restored outside
-        # the inspected page, so an unchanged token here is not a failure.
     if managed_history and workflow == "document.undo":
         restored_entry = request.history.peek(
             "redo",
@@ -385,27 +396,20 @@ def operate_native_document_edit(
             after.page_count,
         )
 
-    applied = (
-        commands_executed if native_applied_steps is None else native_applied_steps
-    )
+    applied = commands_executed
     messages = {
         "document.delete_page": "지정한 쪽을 삭제하고 페이지 수 감소를 확인했습니다",
         "document.undo": f"한컴 실행 이력을 {applied}단계 되돌렸습니다",
         "document.redo": f"취소한 한컴 실행 이력을 {applied}단계 다시 실행했습니다",
         "control.delete": "지정한 기존 개체를 삭제하고 빠른 구조에서 제거를 확인했습니다",
     }
-    if (
-        native_applied_steps is not None
-        and native_requested_steps is not None
-        and native_applied_steps < native_requested_steps
-    ):
-        # Report the number that actually applied, not the number requested.
-        messages[workflow] = (
-            f"{messages[workflow]}. 요청한 {native_requested_steps}단계 중 "
-            f"{native_applied_steps}단계에서 한컴 실행 이력이 끝나 "
-            "나머지는 실행하지 않았습니다"
-        )
-    if managed_history and not custom_history and commands_executed == 0:
+    if history_notice:
+        # The managed history path could not reach the recorded boundary. It
+        # already knows exactly what happened to the document — including that
+        # nothing did, or that it could not tell — and that is the whole answer.
+        # None of the stock lines below may overwrite or decorate it.
+        messages[workflow] = history_notice
+    elif managed_history and not custom_history and commands_executed == 0:
         # The grouped native path found the document already at the recorded
         # operation boundary and ran no Undo/Redo at all. The bookkeeping entry
         # moved, but saying "되돌렸습니다" here would be the same lie as
@@ -427,20 +431,27 @@ def operate_native_document_edit(
             if custom_history
             else "취소한 MCP 작업 단위를 한컴 이력으로 다시 실행하고 빠른 구조로 확인했습니다"
         )
-    changed = not (managed_history and not custom_history and commands_executed == 0)
+    changed = (
+        commands_executed > 0
+        if not managed_history
+        else not (not custom_history and commands_executed == 0)
+    )
     return _result(request, "executed", messages[workflow]).model_copy(
         update={
             "changed": changed,
             "execution_mode": "native_in_process",
             "native_protocol": 9,
             "verification": "native_snapshot_before_after",
-            "verified": True,
+            # Tri-state on purpose: None means the managed history path could not
+            # prove where the document ended up, False means it proved the
+            # document is not where the stock line would claim. Never promoted.
+            "verified": history_state_confirmed,
             "commands_executed": commands_executed,
             "commands_completed": commands_executed,
             "native_elapsed_microseconds": elapsed_microseconds,
             "current_page": after.current_page,
             "page_count": after.page_count,
-            "modified": True,
+            "modified": after.modified,
             "before_page_count": before.page_count,
             "after_page_count": after.page_count,
             "before_modified": before.modified,
@@ -448,5 +459,14 @@ def operate_native_document_edit(
             "partial_mutation": False,
             "retry_safe": False,
             "resolved_target_id": control_ids[0] if len(control_ids) == 1 else None,
+            # Empty means no checkpoint was written on this path, which is a
+            # different statement from "the disk copy was not used".
+            "document_checkpoint_capture": (checkpoint_evidence.capture_method or None),
+            "document_identity_restored": (
+                checkpoint_evidence.identity_restored
+                if checkpoint_evidence.capture_method
+                else None
+            ),
+            "changed_pages": history_changed_pages,
         }
     )

@@ -8,12 +8,15 @@ from hwp_errors import HwpLiveError
 from hwp_live_native_action_models import (
     CaptureTableCommand,
     InsertTextCommand,
+    IntegerValue,
     NativeActionCommand,
     NativeActionRequest,
     NativeDetailedControl,
     NativePageInspection,
     NativePosition,
+    NativeSetter,
     NativeSnapshot,
+    ParameterActionCommand,
     RunCommand,
     SelectControlCommand,
 )
@@ -31,6 +34,33 @@ from hwp_operation_registry import operation_registry
 
 
 _HWPUNITS_PER_MILLIMETER: Final = 7_200 / 25.4
+
+# ShapeObjAttachCaption 은 그림에서도 캡션 모양을 지정값이 아니라 물려받은
+# 값으로 만든다. 실측(artifacts/live-defects/defect2-picture): 새 프로세스
+# 기본은 Side=3·Width=8504 인데, 그림 A 의 캡션을 왼쪽·6mm 로 바꾼 뒤 만든
+# 그림 B 의 캡션은 Side=0·Width=1700 으로 나왔고 렌더에서 문장이 잘려
+# 나갔다. 상속원은 같은 종류(그림은 그림, 표는 표)의 마지막 캡션 모양이고,
+# 오염 캡션을 문서에서 지운 실행에서는 새 캡션이 기본 모양으로 돌아왔다
+# (defect2-picture-before 의 중간 실행). 어느 쪽이든 우리가 값을 지정하지
+# 않는 한 새 캡션의 위치는 남이 정한다.
+# 그래서 캡션을 새로 만든 직후 위치 하나만 명시한다. Side=3 은 우리 관례가
+# 아니라 새 프로세스가 주는 한/글 자신의 기본 위치이고, 아래쪽 캡션에서 Width 는
+# 쓰이지 않으므로 그 이상은 고정하지 않는다(표의 defect2-minimal-pin 과 동일).
+#
+# 액션 이름은 표와 다르다. 선택된 그림에는 TablePropertyDialog 의 GetDefault 가
+# False 를 돌려주며 아무것도 채우지 않고, ShapeObjDialog 가 캡션 모양을 읽고
+# 쓴다(같은 실측의 P1_default_tableprop / pin_P2).
+_CAPTION_SIDE_BELOW: Final = 3
+
+
+def _picture_caption_geometry_action() -> ParameterActionCommand:
+    return ParameterActionCommand(
+        action="ShapeObjDialog",
+        parameter_set="HShapeObject",
+        setters=(NativeSetter("ShapeCaption/Side", IntegerValue(_CAPTION_SIDE_BELOW)),),
+    )
+
+
 _BRACKETED_PICTURE_CAPTION: Final = re.compile(
     r"^(?P<prefix>\s*(?:\(\s*그림\b[^)\r\n]*\)"
     + r"|\[\s*그림\b[^\]\r\n]*\]|<\s*그림\b[^>\r\n]*>))(?P<literal>.*)$"
@@ -45,6 +75,12 @@ class PictureInsertExpectation:
     fitted_width_mm: float | None
     fitted_height_mm: float | None
     document_end_pages: frozenset[int] = frozenset()
+    # 자르기를 요청했을 때만 채운다. 브리지가 붙은 한/글이 그림 개체의
+    # OriginalSizeX/OriginalSizeY 를 내주지 않으면 C++/ATL 은 자르기를 건너뛰고
+    # 종전대로 원본 비율에 맞춰 넣는다. 그 크기가 여기 들어간다. 둘 중 어느
+    # 쪽인지는 검증이 실제로 읽은 크기로 판정한다.
+    uncropped_width_mm: float | None = None
+    uncropped_height_mm: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +95,9 @@ class VerifiedPicture:
     instance_id: str
     width_mm: float
     height_mm: float
+    # 자르기를 요청하지 않았으면 None. 요청했으면 실제로 잘려 들어갔는지를
+    # 읽은 크기로 판정한 결과다.
+    cropped: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +138,16 @@ def _matches_dimension(actual: int | None, expected_mm: float) -> bool:
     expected = round(expected_mm * _HWPUNITS_PER_MILLIMETER)
     tolerance = max(2, round(abs(expected) * 0.005))
     return abs(actual - expected) <= tolerance
+
+
+def _matches_picture_box(
+    picture: NativeDetailedControl,
+    width_mm: float | None,
+    height_mm: float | None,
+) -> bool:
+    return (
+        width_mm is None or _matches_dimension(picture.width_hwpunit, width_mm)
+    ) and (height_mm is None or _matches_dimension(picture.height_hwpunit, height_mm))
 
 
 def parse_picture_caption_selection(selected_text: str) -> PictureCaptionText | None:
@@ -176,6 +225,11 @@ def picture_caption_commands(
             RunCommand("SelectAll"),
             style_command(style_id),
             RunCommand("CloseEx"),
+            # CloseEx 뒤 선택 상태는 보장이 없으므로 그림을 다시 선택한 채로
+            # 새 캡션의 위치를 못 박는다. 기존 캡션을 고쳐 쓰는 경로는 사용자가
+            # 둔 위치를 그대로 존중하므로 여기(새로 만든 캡션)에만 붙인다.
+            SelectControlCommand(control_id),
+            _picture_caption_geometry_action(),
         )
     delete_literal: tuple[NativeActionCommand, ...] = (
         (
@@ -209,21 +263,22 @@ def verify_inserted_picture(
             f"그림 삽입 후 새 그림을 정확히 하나 확인하지 못했습니다: {len(created)}개"
         )
     picture = created[0]
-    if (
-        expectation.fitted_width_mm is not None
-        and not _matches_dimension(
-            picture.width_hwpunit,
-            expectation.fitted_width_mm,
-        )
-    ) or (
-        expectation.fitted_height_mm is not None
-        and not _matches_dimension(
-            picture.height_hwpunit,
-            expectation.fitted_height_mm,
-        )
-    ):
+    requested = _matches_picture_box(
+        picture,
+        expectation.fitted_width_mm,
+        expectation.fitted_height_mm,
+    )
+    wants_crop = expectation.uncropped_width_mm is not None
+    fell_back = wants_crop and _matches_picture_box(
+        picture,
+        expectation.uncropped_width_mm,
+        expectation.uncropped_height_mm,
+    )
+    if not requested and not fell_back:
         raise HwpLiveError(
-            "삽입된 그림 크기가 원본 비율을 유지한 요청 상자 맞춤 크기와 다릅니다"
+            "삽입된 그림 크기가 요청 상자에 맞춘 크기와 다릅니다"
+            if wants_crop
+            else "삽입된 그림 크기가 원본 비율을 유지한 요청 상자 맞춤 크기와 다릅니다"
         )
     if picture.width_hwpunit is None or picture.height_hwpunit is None:
         raise HwpLiveError("삽입된 그림의 실제 크기를 상세 구조에서 읽지 못했습니다")
@@ -236,6 +291,10 @@ def verify_inserted_picture(
         instance_id=picture.instance_id,
         width_mm=picture.width_hwpunit / _HWPUNITS_PER_MILLIMETER,
         height_mm=picture.height_hwpunit / _HWPUNITS_PER_MILLIMETER,
+        # 두 기대치가 같은 값으로 겹치면(정사각형 상자에 정사각형 원본처럼
+        # 자를 것이 없는 경우) 잘렸다고 단정할 수 없다. 그때는 requested 가
+        # 아니라 겹침을 우선해 "자르지 않음"으로 보고한다.
+        cropped=(requested and not fell_back) if wants_crop else None,
     )
 
 

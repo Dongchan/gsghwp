@@ -36,7 +36,11 @@ def capture_hwp_process_ids() -> frozenset[int]:
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if completed.returncode != 0:
-        return frozenset()
+        # 스캐너 실패는 "한/글이 하나도 없다"와 구별돼야 한다. 빈 집합을 돌려주면
+        # 발견 루프가 살아 있는 한/글 전부를 떼었다 붙이며 리본을 전면 재구성한다
+        # (프로세스 사망 사고의 재발 경로 — 적대 검증 exp5_flap 실측).
+        detail = completed.stderr.strip()[:200]
+        raise OSError(f"tasklist.exe exited {completed.returncode}: {detail}")
     return parse_hwp_process_ids(completed.stdout)
 
 
@@ -53,7 +57,13 @@ def wait_for_new_hwp_process_ids(
 ) -> tuple[int, ...]:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        process_ids = new_process_ids(baseline, capture_hwp_process_ids())
+        try:
+            current = capture_hwp_process_ids()
+        except OSError:
+            # 일시적 스캐너 실패는 마감까지 재시도한다.
+            time.sleep(0.05)
+            continue
+        process_ids = new_process_ids(baseline, current)
         if process_ids:
             return process_ids
         time.sleep(0.05)

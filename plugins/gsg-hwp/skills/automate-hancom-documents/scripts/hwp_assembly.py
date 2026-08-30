@@ -94,8 +94,6 @@ class AssemblyWriterHwp(PageSetupHwp, Protocol):
         height: float = 0.0,
     ) -> PictureControl | None: ...
 
-    def ParagraphShapeAlignLeft(self) -> bool: ...
-
     def insert_text(self, text: str) -> bool: ...
 
 
@@ -132,17 +130,7 @@ def _asset(base: Path, relative: str) -> Path:
 
 
 def normalize_hwp_text(text: str) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    paragraphs: list[str] = []
-    for block in normalized.split("\n\n"):
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if not lines:
-            continue
-        if len(lines) > 1 and len(lines[0]) <= 60 and not lines[0].endswith((".", ",")):
-            paragraphs.extend((lines[0], " ".join(lines[1:])))
-        else:
-            paragraphs.append(" ".join(lines))
-    return "\r\n\r\n".join(paragraphs)
+    return text.replace("\n", "")
 
 
 def _raster_page(page: PageRecord, base: Path) -> RasterPage:
@@ -152,7 +140,9 @@ def _raster_page(page: PageRecord, base: Path) -> RasterPage:
         with Image.open(path) as image:
             fitted = fit_raster(image.size, geometry.content)
     except OSError as error:
-        raise DocumentAutomationError(f"래스터 이미지를 읽을 수 없습니다: {path}") from error
+        raise DocumentAutomationError(
+            f"래스터 이미지를 읽을 수 없습니다: {path}"
+        ) from error
     return RasterPage(
         number=page.number,
         geometry=geometry,
@@ -165,7 +155,9 @@ def _text_page(page: PageRecord, base: Path, relative: str) -> TextPage:
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
-        raise DocumentAutomationError(f"텍스트 파일을 읽을 수 없습니다: {path}") from error
+        raise DocumentAutomationError(
+            f"텍스트 파일을 읽을 수 없습니다: {path}"
+        ) from error
     return TextPage(page.number, page_geometry(page), normalize_hwp_text(text))
 
 
@@ -211,7 +203,6 @@ def write_assembly(hwp: AssemblyWriterHwp, plan: AssemblyPlan) -> None:
                     height_mm=raster.height_mm,
                 )
             case TextPage(text=text):
-                _ = hwp.ParagraphShapeAlignLeft()
                 if not hwp.insert_text(text):
                     raise DocumentAutomationError(f"텍스트 삽입 실패: {page.number}")
 
@@ -224,8 +215,6 @@ def assemble_hybrid(manifest_path: Path, output: Path, *, visible: bool) -> Path
             raise DocumentAutomationError("HWP 조립 API를 사용할 수 없습니다")
         destination.parent.mkdir(parents=True, exist_ok=True)
         write_assembly(raw_hwp, plan)
-        if not raw_hwp.save_as(
-            str(destination), format=destination.suffix[1:].upper()
-        ):
+        if not raw_hwp.save_as(str(destination), format=destination.suffix[1:].upper()):
             raise DocumentAutomationError(f"혼합형 HWP 저장 실패: {destination}")
     return destination

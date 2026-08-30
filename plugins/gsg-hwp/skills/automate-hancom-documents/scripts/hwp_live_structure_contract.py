@@ -44,6 +44,59 @@ class FastPageControl(ContractModel):
     )
 
 
+class CellBorderObservation(ContractModel):
+    """One side of one cell as the open document carries it.
+
+    ``None`` is "the bridge did not report it" (older bridge, or a property
+    this HWP build does not expose), never "there is no border": HWP's own
+    "no line" is ``line_type`` 0 and is a real observation.
+    """
+
+    line_type: int | None = Field(default=None, ge=0)
+    width: int | None = Field(default=None, ge=0)
+    color: int | None = Field(default=None, ge=0)
+
+
+class CellFormatObservation(ContractModel):
+    """How some sampled cells of an existing table actually look.
+
+    Read from the document, not derived. The sample is chosen by position
+    alone -- first row first column, first row last column, second row first
+    column, last row first column -- so nothing here asserts which row is a
+    header. ``addresses`` lists the sampled cells that reported these exact
+    values; they share a record only because the document gave them the same
+    numbers. Compare the addresses and decide.
+
+    **A cell that is not listed was not looked at.** At most four cells of a
+    table are sampled, so a table whose third row is shaded reports nothing
+    about that row -- absence here is not evidence of a plain cell. A live run
+    read a table whose A1/A3/A5 are all grey and returned records for A1 and
+    A2 only; A3 and A5 were never sampled. Read ``addresses`` as the whole of
+    what was measured.
+    """
+
+    addresses: tuple[str, ...] = Field(min_length=1)
+    fill_color: int | None = Field(default=None, ge=0)
+    fill_brush: int | None = Field(default=None, ge=0)
+    border_left: CellBorderObservation = CellBorderObservation()
+    border_right: CellBorderObservation = CellBorderObservation()
+    border_top: CellBorderObservation = CellBorderObservation()
+    border_bottom: CellBorderObservation = CellBorderObservation()
+    margin_left_hwpunit: int | None = Field(default=None, ge=0)
+    margin_right_hwpunit: int | None = Field(default=None, ge=0)
+    margin_top_hwpunit: int | None = Field(default=None, ge=0)
+    margin_bottom_hwpunit: int | None = Field(default=None, ge=0)
+    vertical_align: int | None = Field(default=None, ge=0)
+    alignment: int | None = Field(default=None, ge=0)
+    face_name: str | None = Field(default=None, max_length=100)
+    character_height: int | None = Field(default=None, ge=0)
+    bold: bool | None = None
+
+
+class FastPageCellFormat(CellFormatObservation):
+    table_instance_id: str = Field(max_length=100)
+
+
 class FastPageCell(ContractModel):
     table_instance_id: str = Field(max_length=100)
     address: str = Field(pattern=r"^[A-Z]+[1-9][0-9]*$")
@@ -72,6 +125,7 @@ class FastPageInspection(ContractModel):
     controls: tuple[FastPageControl, ...]
     cells: tuple[FastPageCell, ...] = ()
     inspection_errors: tuple[FastControlInspectionError, ...] = ()
+    cell_formats: tuple[FastPageCellFormat, ...] = ()
 
     @model_validator(mode="after")
     def link_control_cells(self) -> FastPageInspection:
@@ -91,9 +145,40 @@ class FastPageInspection(ContractModel):
         return self
 
 
+class PageCharacterStyle(ContractModel):
+    face_name: str | None = Field(default=None, max_length=100)
+    height_hwpunit: int | None = Field(default=None, ge=0)
+    bold: bool | None = None
+    text_color: int | None = Field(default=None, ge=0, le=0xFF_FF_FF)
+
+
+class PageParagraphStyle(ContractModel):
+    alignment: int | None = Field(default=None, ge=0)
+    line_spacing: int | None = Field(default=None, ge=0)
+    left_margin_hwpunit: int | None = None
+    right_margin_hwpunit: int | None = None
+    indentation_hwpunit: int | None = None
+    previous_spacing_hwpunit: int | None = None
+    next_spacing_hwpunit: int | None = None
+    heading_type: int | None = Field(default=None, ge=0, le=3)
+    heading_level: int | None = Field(default=None, ge=0, le=6)
+
+
 class PageParagraph(ContractModel):
     index: int = Field(ge=0)
     text: str = Field(max_length=200_000)
+    position: StructurePosition | None = None
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
+    text_available: bool = False
+    style_id: int | None = Field(default=None, ge=0, le=4095)
+    character_style: PageCharacterStyle = PageCharacterStyle()
+    paragraph_style: PageParagraphStyle = PageParagraphStyle()
+
+
+class UnsupportedStructureRecord(ContractModel):
+    record_type: str = Field(min_length=1, max_length=100)
+    payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class StructureCaption(ContractModel):
@@ -138,6 +223,14 @@ class StructureTable(ContractModel):
     merges: tuple[StructureMerge, ...]
     cells: tuple[StructureCell, ...]
     caption: StructureCaption | None = None
+    preceding_paragraph: StructurePosition | None = None
+    following_paragraph: StructurePosition | None = None
+    # At most four cells of this table, with the appearance they actually
+    # carry. A cell missing from here was not sampled, not proven plain --
+    # see CellFormatObservation. Empty when the bridge reports no cell
+    # appearance at all; when it tried and could not, the table carries a
+    # CELL_FORMAT inspection error instead of falling silent.
+    cell_formats: tuple[CellFormatObservation, ...] = ()
 
 
 ControlKind = Literal["table", "picture", "shape", "unknown"]
@@ -155,6 +248,8 @@ class StructureControl(ContractModel):
     height_hwpunit: int | None = Field(default=None, ge=0)
     width_mm: float | None = Field(default=None, ge=0)
     height_mm: float | None = Field(default=None, ge=0)
+    preceding_paragraph: StructurePosition | None = None
+    following_paragraph: StructurePosition | None = None
 
 
 class DocumentStructure(ContractModel):
@@ -167,6 +262,11 @@ class DocumentStructure(ContractModel):
     state_token: str = Field(min_length=16, max_length=80)
     page_text: str = Field(max_length=200_000)
     paragraphs: tuple[PageParagraph, ...]
+    paragraphs_complete: bool = False
+    paragraph_scan_error: str | None = Field(default=None, max_length=2_000)
+    tables_complete: bool = True
+    table_scan_error: str | None = Field(default=None, max_length=2_000)
+    unsupported_records: tuple[UnsupportedStructureRecord, ...] = ()
     controls: tuple[StructureControl, ...]
     tables: tuple[StructureTable, ...]
 

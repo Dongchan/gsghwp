@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -128,6 +129,26 @@ bool GetSelection(IDispatch* const hwp, Selection* const selection) {
         selection,
         SelectionCapturePolicy::BestEffortControl,
         nullptr);
+}
+
+bool PrepareReadSelection(
+    IDispatch* const hwp,
+    Position* const cursor,
+    Selection* const selection) {
+    if (cursor == nullptr || selection == nullptr) {
+        return false;
+    }
+    if (!GetPosition(hwp, cursor) || !GetSelection(hwp, selection)) {
+        return false;
+    }
+    if (CanRestoreSelection(*selection)) {
+        return true;
+    }
+    if (!hancom::com_state::CollapseSelectionToCursor(hwp, *cursor)) {
+        return false;
+    }
+    *selection = Selection{};
+    return true;
 }
 
 
@@ -525,8 +546,79 @@ bool RunHwpAction(IDispatch* const hwp, const wchar_t* const actionName) {
         CallBoolean(action, L"Run", {CComVariant(actionName)}, &result) && result;
 }
 
+// Hancom finishes paginating a freshly opened document in the background and
+// PageCount answers 0 until it does. That is "not known yet", not "no pages":
+// no document has zero body pages. So a reader asks the engine to finish
+// pagination once and reads again, instead of taking the 0 at face value.
+// RecalcPageCount is IHwpObject's own synchronous method for exactly this and
+// is what the preview path already calls; a call that does not land is a hint
+// that failed, not a failure of the read. Only one call is made, because the
+// method is synchronous: if the count is still below one afterwards, waiting
+// longer inside a bridge call would only hold the caller's tab.
+//
+// Budget asymmetry, stated because it is real and undocumented elsewhere. The
+// Python wait that does the same job (hwp_live_rot.settle_page_count) carries a
+// 1.0s budget and will decline to *start* RecalcPageCount when less than half
+// of it is left, on the grounds that the caller's tab stays switched for the
+// duration. The three native callers -- this one, ActionLifecycle
+// ReadPageCount and ActionExecutor MoveToPage -- carry no budget at all: they
+// call synchronously, without an upper bound, and refuse if the count is still
+// unknown. Nothing here can shorten the call once it starts (a synchronous
+// in-process COM call is not interruptible), so the only thing a budget could
+// control is whether to start it, which would require timing the preceding
+// PageCount read the way the Python side does. That is a behaviour change and
+// a rebuild, so it is recorded here rather than assumed.
+//
+// *pageCount is left at whatever was read, so a still-unconfirmed count stays
+// 0 and callers must treat it as unknown -- see PageIsOutsideDocument.
+bool ReadSettledPageCount(IDispatch* const hwp, LONG* const pageCount) {
+    if (!LongProperty(hwp, L"PageCount", pageCount)) {
+        return false;
+    }
+    if (*pageCount >= 1) {
+        return true;
+    }
+    CComVariant recalculated;
+    static_cast<void>(Method(hwp, L"RecalcPageCount", {}, &recalculated));
+    return LongProperty(hwp, L"PageCount", pageCount);
+}
 
+// A page number is outside the document only when there is a range for it to
+// be outside of. A page number that is impossible under any count is still
+// refused, and so is one past a count that is known; an unconfirmed count
+// simply is not a range, so it does not make every request "out of range".
+//
+// This does not by itself let an unconfirmed count through -- PageCountIsUnsettled
+// below stops it a line later. What it does is keep the two facts apart, so a
+// document that has not finished paginating stops saying "the page you asked
+// for is outside the document", which was never true and sent readers looking
+// for the wrong problem.
+bool PageIsOutsideDocument(const LONG requestedPage, const LONG pageCount) {
+    return requestedPage < 1 || (pageCount >= 1 && requestedPage > pageCount);
+}
 
+// The one thing an inspection still cannot carry past this point. Every reader
+// downstream states a real total -- FastPageInspection and DocumentStructure
+// both declare page_count >= 1 -- so sending 0 up would trade this message for
+// a schema error further away from the cause, which is not an improvement.
+//
+// Reaching here is a different fact from "the page you asked for is out of
+// range" and now says so instead of BAD_PAGE: Hancom could not tell how many
+// pages the document has even after being asked to finish paginating. In the
+// case this whole change is about -- a large document inspected the instant it
+// opened -- ReadSettledPageCount has already settled the count and nothing
+// reaches this.
+bool PageCountIsUnsettled(const LONG pageCount) {
+    return pageCount < 1;
+}
+
+std::wstring UnsettledPageCountResponse() {
+    return ErrorResponse(
+        L"PAGE_COUNT_UNSETTLED",
+        L"Hangul has not finished paginating this document, so its page count is "
+        L"still unavailable after RecalcPageCount; retry the same inspection in a "
+        L"moment");
+}
 
 
 bool ReadCurrentStyle(
@@ -695,6 +787,12 @@ void WriteDetailedControl(
            << columns << L'\t' << control.width << L'\t' << control.height << L'\n';
 }
 
+void AppendPageParagraphRecords(
+    IDispatch* hwp,
+    IDispatch* info,
+    LONG targetPage,
+    std::wostringstream* output);
+
 std::wstring RestoreInspectionState(
     IDispatch* const hwp,
     const Position& cursor,
@@ -716,6 +814,43 @@ std::wstring RestoreInspectionState(
     return response;
 }
 
+class InspectionStateGuard final {
+public:
+    InspectionStateGuard(
+        IDispatch* const hwp,
+        const Position& cursor,
+        const Selection& selection,
+        const bool modified) noexcept
+        : hwp_(hwp),
+          cursor_(cursor),
+          selection_(selection),
+          modified_(modified) {}
+
+    ~InspectionStateGuard() noexcept {
+        if (active_) {
+            static_cast<void>(RestoreSelection(hwp_, cursor_, selection_));
+        }
+    }
+
+    std::wstring Restore(const std::wstring& response) {
+        const std::wstring restored = RestoreInspectionState(
+            hwp_,
+            cursor_,
+            selection_,
+            modified_,
+            response);
+        active_ = false;
+        return restored;
+    }
+
+private:
+    IDispatch* const hwp_;
+    Position cursor_;
+    Selection selection_;
+    bool modified_;
+    bool active_ = true;
+};
+
 }
 
 std::wstring Snapshot(IDispatch* const hwp) noexcept {
@@ -736,9 +871,14 @@ std::wstring Snapshot(IDispatch* const hwp) noexcept {
         Position cursor;
         Selection selection;
         Formatting formatting;
+        // The snapshot settles the count for the same reason the page readers
+        // do, and it has to settle it the same way: hwp_inspect reads a
+        // snapshot and a page in one go and refuses when the two page counts
+        // disagree, so leaving one of them on the raw property would turn an
+        // unfinished pagination into that disagreement.
         if (!LongProperty(document, L"DocumentID", &documentId) ||
             !StringProperty(document, L"FullName", &fullName) ||
-            !LongProperty(hwp, L"PageCount", &pageCount) ||
+            !ReadSettledPageCount(hwp, &pageCount) ||
             !CurrentPageFromInfo(info, &currentPage) ||
             !BoolProperty(hwp, L"IsModified", &modified) ||
             !GetPosition(hwp, &cursor) ||
@@ -843,6 +983,62 @@ std::wstring Snapshot(IDispatch* const hwp) noexcept {
     }
 }
 
+// One CELLFMT line per distinct appearance the sampled cells of one table
+// reported, written straight after that table's CELL lines. The address field
+// lists every sampled cell that carries those values, comma separated.
+//
+// Additive on purpose: a caller that does not know the record ignores it, and
+// a bridge that predates it simply writes none, which is how the Python side
+// tells "this build reports no cell appearance" apart from "this cell has no
+// fill". Every number is -1 when the property could not be read.
+void AppendCellFormats(
+    std::wostringstream* const controls,
+    const std::vector<TableCellFormat>& formats) {
+    for (const TableCellFormat& format : formats) {
+        std::wstring addresses;
+        for (const std::wstring& address : format.addresses) {
+            if (!addresses.empty()) {
+                addresses += L',';
+            }
+            addresses += address;
+        }
+        *controls << L"CELLFMT\t" << EncodeUtf8Base64(format.tableInstanceId)
+                  << L'\t' << EncodeUtf8Base64(addresses) << L'\t'
+                  << format.fillColor << L'\t' << format.fillBrush;
+        for (size_t side = 0; side < kCellBorderSideCount; ++side) {
+            *controls << L'\t' << format.borderType[side] << L'\t'
+                      << format.borderWidth[side] << L'\t'
+                      << format.borderColor[side];
+        }
+        *controls << L'\t' << format.marginLeft << L'\t' << format.marginRight
+                  << L'\t' << format.marginTop << L'\t' << format.marginBottom
+                  << L'\t' << format.verticalAlign << L'\t' << format.alignment
+                  << L'\t' << EncodeUtf8Base64(format.faceName) << L'\t'
+                  << format.characterHeight << L'\t' << format.bold << L'\n';
+    }
+}
+
+// Why a table reported no cell appearance. Written only when there is nothing
+// to write instead: a table that answered even one sampled cell says so with
+// CELLFMT lines and needs no excuse.
+//
+// The code is its own, CELL_FORMAT, and not one of the TABLE_* codes, because
+// the cells of this table were read fine -- only their appearance was not. A
+// reader that drops a control on any inspection error would otherwise throw
+// away a perfectly good table over a failed appearance sample.
+void AppendCellFormatError(
+    std::wostringstream* const controls,
+    const std::wstring& instance,
+    const std::vector<TableCellFormat>& formats,
+    const std::wstring& error) {
+    if (!formats.empty() || error.empty()) {
+        return;
+    }
+    *controls << L"CTRL_ERROR\t" << EncodeUtf8Base64(instance) << L'\t'
+              << EncodeUtf8Base64(L"CELL_FORMAT") << L'\t'
+              << EncodeUtf8Base64(error) << L'\n';
+}
+
 void AppendPageControl(
     IDispatch* const hwp,
     IDispatch* const control,
@@ -905,6 +1101,11 @@ void AppendPageControl(
                       << L'\t' << cell.width << L'\t' << cell.height
                       << L'\n';
         }
+        std::wstring cellFormatError;
+        const std::vector<TableCellFormat> formats =
+            ReadTableCellFormats(hwp, instance, cells, &cellFormatError);
+        AppendCellFormats(controls, formats);
+        AppendCellFormatError(controls, instance, formats, cellFormatError);
     }
 }
 
@@ -958,11 +1159,14 @@ static std::wstring InspectPagesResponse(
         if (!ActiveDocument(hwp, document, info) ||
             !LongProperty(document, L"DocumentID", &documentId) ||
             !StringProperty(document, L"FullName", &fullName) ||
-            !LongProperty(hwp, L"PageCount", &pageCount) ||
+            !ReadSettledPageCount(hwp, &pageCount) ||
             std::any_of(pages.begin(), pages.end(), [pageCount](const LONG page) {
-                return page > pageCount;
+                return PageIsOutsideDocument(page, pageCount);
             })) {
             return ErrorResponse(L"BAD_PAGE", L"requested page is outside the active document");
+        }
+        if (PageCountIsUnsettled(pageCount)) {
+            return UnsettledPageCountResponse();
         }
 
         std::vector<std::wstring> pageTexts;
@@ -983,10 +1187,7 @@ static std::wstring InspectPagesResponse(
 
         Position cursor;
         Selection selection;
-        if (!GetPosition(hwp, &cursor) || !GetSelection(hwp, &selection)) {
-            return ErrorResponse(L"POSITION", L"current cursor and selection could not be preserved");
-        }
-        if (!CanRestoreSelection(selection)) {
+        if (!PrepareReadSelection(hwp, &cursor, &selection)) {
             return ErrorResponse(
                 L"UNSUPPORTED_SELECTION",
                 L"the active HWP selection cannot be moved and restored safely");
@@ -1064,9 +1265,12 @@ static std::wstring InspectPageResponse(
         if (!ActiveDocument(hwp, document, info) ||
             !LongProperty(document, L"DocumentID", &documentId) ||
             !StringProperty(document, L"FullName", &fullName) ||
-            !LongProperty(hwp, L"PageCount", &pageCount) ||
-            requestedPage < 1 || requestedPage > pageCount) {
+            !ReadSettledPageCount(hwp, &pageCount) ||
+            PageIsOutsideDocument(requestedPage, pageCount)) {
             return ErrorResponse(L"BAD_PAGE", L"requested page is outside the active document");
+        }
+        if (PageCountIsUnsettled(pageCount)) {
+            return UnsettledPageCountResponse();
         }
         CComVariant textValue;
         std::wstring pageText;
@@ -1081,10 +1285,7 @@ static std::wstring InspectPageResponse(
 
         Position cursor;
         Selection selection;
-        if (!GetPosition(hwp, &cursor) || !GetSelection(hwp, &selection)) {
-            return ErrorResponse(L"POSITION", L"current cursor and selection could not be preserved");
-        }
-        if (!CanRestoreSelection(selection)) {
+        if (!PrepareReadSelection(hwp, &cursor, &selection)) {
             return ErrorResponse(
                 L"UNSUPPORTED_SELECTION",
                 L"the active HWP selection cannot be moved and restored safely");
@@ -1173,15 +1374,18 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
         if (!ActiveDocument(hwp, document, info) ||
             !LongProperty(document, L"DocumentID", &documentId) ||
             !StringProperty(document, L"FullName", &fullName) ||
-            !LongProperty(hwp, L"PageCount", &pageCount)) {
+            !ReadSettledPageCount(hwp, &pageCount)) {
             return ErrorResponse(L"BAD_PAGE", L"requested page is outside the active document");
         }
         LONG targetPage = requestedPage < 0 ? -requestedPage : requestedPage;
         if (targetPage == 0 && !CurrentPageFromInfo(info, &targetPage)) {
             return ErrorResponse(L"CURRENT_PAGE", L"current page could not be read");
         }
-        if (targetPage < 1 || targetPage > pageCount) {
+        if (PageIsOutsideDocument(targetPage, pageCount)) {
             return ErrorResponse(L"BAD_PAGE", L"requested page is outside the active document");
+        }
+        if (PageCountIsUnsettled(pageCount)) {
+            return UnsettledPageCountResponse();
         }
         CComVariant textValue;
         std::wstring pageText;
@@ -1197,15 +1401,13 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
         Position cursor;
         Selection selection;
         bool modified = false;
-        if (!GetPosition(hwp, &cursor) || !GetSelection(hwp, &selection) ||
+        if (!PrepareReadSelection(hwp, &cursor, &selection) ||
             !BoolProperty(hwp, L"IsModified", &modified)) {
-            return ErrorResponse(L"POSITION", L"current document state could not be preserved");
-        }
-        if (!CanRestoreSelection(selection)) {
             return ErrorResponse(
                 L"UNSUPPORTED_SELECTION",
                 L"the active HWP selection cannot be moved and restored safely");
         }
+        InspectionStateGuard stateGuard(hwp, cursor, selection, modified);
 
         std::vector<DetailedControlRecord> records;
         std::wstring error;
@@ -1216,11 +1418,7 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
                 pageCount,
                 &records,
                 &error)) {
-            return RestoreInspectionState(
-                hwp,
-                cursor,
-                selection,
-                modified,
+            return stateGuard.Restore(
                 ErrorResponse(L"CONTROL_SCAN", error));
         }
 
@@ -1300,11 +1498,7 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
             }
             CaptionRecord caption;
             if (!ReadTableCaption(hwp, control, records, &caption, &error)) {
-                return RestoreInspectionState(
-                    hwp,
-                    cursor,
-                    selection,
-                    modified,
+                return stateGuard.Restore(
                     ErrorResponse(L"CAPTION_INSPECTION", error));
             }
             if (caption.exists) {
@@ -1324,6 +1518,11 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
                      << EncodeUtf8Base64(cell.text) << L'\t' << cell.width
                      << L'\t' << cell.height << L'\n';
             }
+            std::wstring cellFormatError;
+            const std::vector<TableCellFormat> formats =
+                ReadTableCellFormats(hwp, control.instance, cells, &cellFormatError);
+            AppendCellFormats(&body, formats);
+            AppendCellFormatError(&body, control.instance, formats, cellFormatError);
             if (caption.exists) {
                 body << L"CAPTION\t" << EncodeUtf8Base64(control.instance) << L'\t'
                      << EncodeUtf8Base64(caption.text) << L'\t'
@@ -1351,19 +1550,818 @@ std::wstring InspectStructure(IDispatch* const hwp, const LONG requestedPage) no
                 -1,
                 -1);
         }
+        AppendPageParagraphRecords(hwp, info, targetPage, &body);
 
         std::wostringstream output;
         output << L"HDS1\nDOC\t" << documentId << L'\t' << EncodeUtf8Base64(fullName)
                << L"\nPAGE\t" << targetPage << L'\t' << pageCount << L'\t'
                << EncodeUtf8Base64(pageText) << L'\n' << body.str() << L"END";
-        return RestoreInspectionState(
-            hwp,
-            cursor,
-            selection,
-            modified,
-            output.str());
+        return stateGuard.Restore(output.str());
     } catch (...) {
         return ErrorResponse(L"NATIVE_EXCEPTION", L"detailed inspection failed unexpectedly");
+    }
+}
+
+namespace {
+
+// InitScan range: paragraph start (0x0030) .. paragraph end (0x0003).
+constexpr LONG kParagraphScanRange = 0x0033;
+// Only the leading run of a paragraph is needed to tell "circle bullet",
+// "(1)", "chapter N" apart, so the payload stays small on long documents.
+constexpr size_t kParagraphLeadCharacters = 24;
+constexpr size_t kParagraphConventionCharacters = 4096;
+constexpr size_t kParagraphConventionProbeCharacters =
+    kParagraphConventionCharacters + 1;
+constexpr size_t kParagraphTailCharacters = 48;
+constexpr size_t kPageParagraphCharacters = 16'000;
+constexpr size_t kPageParagraphProbeCharacters = kPageParagraphCharacters + 1;
+constexpr size_t kPageParagraphTotalCharacters = 64'000;
+constexpr size_t kPageParagraphRecordLimit = 512;
+constexpr LONG kParagraphScanHardLimit = 20000;
+constexpr LONG kParagraphScanDefaultLimit = 4000;
+constexpr size_t kParagraphScanRequestFields = 4;
+constexpr size_t kParagraphLeadChunkLimit = 64;
+constexpr size_t kParagraphTextChunkLimit = 4096;
+
+// How much of each paragraph's real appearance the scan carries back. The
+// request field kept its position and its old meaning for 0 and 1, so a caller
+// asking a bridge that predates level 2 still gets level 1 records; the SCAN
+// line echoes the level that was actually produced, which is how the caller
+// tells the two apart instead of guessing from the bridge version.
+constexpr LONG kParagraphShapeNone = 0;
+constexpr LONG kParagraphShapeCharacter = 1;
+constexpr LONG kParagraphShapeParagraph = 2;
+constexpr LONG kParagraphShapeConvention = 3;
+
+struct ParagraphStyleRequest {
+    LONG list = 0;
+    LONG start = 0;
+    LONG limit = kParagraphScanDefaultLimit;
+    LONG shapeDetail = kParagraphShapeNone;
+};
+
+// A property that may not exist on this HWP build. Absent is not zero: an
+// indentation of 0 and an indentation nobody could read are different answers,
+// and only the first one may be replayed onto a new paragraph.
+struct OptionalLong {
+    LONG value = 0;
+    bool present = false;
+};
+
+struct OptionalBool {
+    bool value = false;
+    bool present = false;
+};
+
+struct ParagraphStyleRecord {
+    LONG paragraph = 0;
+    LONG styleId = -1;
+    std::wstring lead;
+    std::wstring faceName;
+    LONG height = 0;
+    bool bold = false;
+    OptionalLong textColor;
+    OptionalLong alignment;
+    OptionalLong lineSpacing;
+    OptionalLong leftMargin;
+    OptionalLong rightMargin;
+    OptionalLong indentation;
+    OptionalLong previousSpacing;
+    OptionalLong nextSpacing;
+    // Best effort: whether HWP itself numbers or bullets this paragraph. When
+    // the property is missing the field is absent and the caller keeps its
+    // previous behaviour rather than assuming "no automatic marker".
+    OptionalLong headingType;
+    OptionalLong headingLevel;
+    std::wstring tail;
+    OptionalLong textLength;
+    bool textComplete = false;
+    std::wstring faceNameLatin;
+    std::wstring faceNameHanja;
+    std::wstring faceNameJapanese;
+    std::wstring faceNameOther;
+    std::wstring faceNameSymbol;
+    std::wstring faceNameUser;
+};
+
+struct PageParagraphRange {
+    LONG paragraph = 0;
+    LONG pageStart = 0;
+    LONG pageEnd = 0;
+};
+
+struct PageParagraphRecord {
+    PageParagraphRange range;
+    bool textAvailable = false;
+    std::wstring text;
+    LONG styleId = -1;
+    std::wstring faceName;
+    OptionalLong height;
+    OptionalBool bold;
+    OptionalLong textColor;
+    OptionalLong alignment;
+    OptionalLong lineSpacing;
+    OptionalLong leftMargin;
+    OptionalLong rightMargin;
+    OptionalLong indentation;
+    OptionalLong previousSpacing;
+    OptionalLong nextSpacing;
+    OptionalLong headingType;
+    OptionalLong headingLevel;
+};
+
+void ReadOptionalLong(
+    IDispatch* const parameter,
+    const wchar_t* const name,
+    OptionalLong* const target) {
+    LONG value = 0;
+    if (LongProperty(parameter, name, &value)) {
+        target->value = value;
+        target->present = true;
+    }
+}
+
+void WriteOptionalLong(std::wostringstream& output, const OptionalLong& value) {
+    output << L'\t';
+    if (value.present) {
+        output << value.value;
+    }
+}
+
+void WriteOptionalBool(std::wostringstream& output, const OptionalBool& value) {
+    output << L'\t';
+    if (value.present) {
+        output << (value.value ? 1 : 0);
+    }
+}
+
+// A hoisted parameter set. DefaultParameter() rebuilds HAction/HParameterSet
+// on every call, which is four extra COM calls per paragraph; the loop below
+// keeps the objects and only re-runs GetDefault at each caret position.
+struct ShapeProbe {
+    CComPtr<IDispatch> action;
+    CComPtr<IDispatch> parameter;
+    CComPtr<IDispatch> set;
+    std::wstring actionName;
+};
+
+bool PrepareShapeProbe(
+    IDispatch* const hwp,
+    const wchar_t* const actionName,
+    const wchar_t* const parameterName,
+    ShapeProbe* const probe) {
+    CComPtr<IDispatch> parameterSets;
+    if (!DispatchProperty(hwp, L"HAction", probe->action) ||
+        !DispatchProperty(hwp, L"HParameterSet", parameterSets) ||
+        !DispatchProperty(parameterSets, parameterName, probe->parameter) ||
+        !DispatchProperty(probe->parameter, L"HSet", probe->set)) {
+        return false;
+    }
+    probe->actionName = actionName;
+    return true;
+}
+
+bool RefreshShapeProbe(const ShapeProbe& probe) {
+    IDispatch* const set = probe.set;
+    CComVariant ignored;
+    return SUCCEEDED(Method(
+        probe.action,
+        L"GetDefault",
+        {CComVariant(probe.actionName.c_str()), CComVariant(set)},
+        &ignored));
+}
+
+bool ParseParagraphStyleRequest(
+    const std::wstring& payload,
+    ParagraphStyleRequest* const request) {
+    if (payload.empty()) {
+        return true;
+    }
+    std::vector<LONG> values;
+    LONG value = 0;
+    bool hasDigit = false;
+    for (size_t index = 0; index <= payload.size(); ++index) {
+        const wchar_t character = index == payload.size() ? L',' : payload[index];
+        if (character >= L'0' && character <= L'9') {
+            const LONG digit = static_cast<LONG>(character - L'0');
+            if (value > ((std::numeric_limits<LONG>::max)() - digit) / 10) {
+                return false;
+            }
+            value = value * 10 + digit;
+            hasDigit = true;
+            continue;
+        }
+        if (character != L',' || !hasDigit ||
+            values.size() >= kParagraphScanRequestFields) {
+            return false;
+        }
+        values.push_back(value);
+        value = 0;
+        hasDigit = false;
+    }
+    request->list = values[0];
+    if (values.size() > 1) {
+        request->start = values[1];
+    }
+    if (values.size() > 2 && values[2] > 0) {
+        request->limit = values[2];
+    }
+    if (values.size() > 3) {
+        request->shapeDetail = values[3] > kParagraphShapeConvention
+            ? kParagraphShapeConvention
+            : values[3];
+    }
+    if (request->limit > kParagraphScanHardLimit) {
+        request->limit = kParagraphScanHardLimit;
+    }
+    return true;
+}
+
+bool ReadParagraphText(
+    IDispatch* const hwp,
+    const size_t characterLimit,
+    const size_t chunkLimit,
+    std::wstring* const text) {
+    text->clear();
+    bool started = false;
+    if (!CallBoolean(
+            hwp,
+            L"InitScan",
+            {CComVariant(0L), CComVariant(kParagraphScanRange), CComVariant(0L),
+             CComVariant(0L), CComVariant(0L), CComVariant(0L)},
+            &started) ||
+        !started) {
+        return false;
+    }
+    bool valid = true;
+    bool finished = false;
+    for (size_t iteration = 0; iteration < chunkLimit; ++iteration) {
+        BSTR chunk = nullptr;
+        CComVariant chunkArgument;
+        chunkArgument.vt = VT_BSTR | VT_BYREF;
+        chunkArgument.pbstrVal = &chunk;
+        CComVariant rawState;
+        const HRESULT status = Method(hwp, L"GetText", {chunkArgument}, &rawState);
+        LONG state = 0;
+        valid = SUCCEEDED(status) && SUCCEEDED(AsLong(rawState, &state));
+        if (chunk != nullptr) {
+            if (valid) {
+                text->append(chunk, SysStringLen(chunk));
+            }
+            SysFreeString(chunk);
+        }
+        if (!valid || state >= 101) {
+            valid = false;
+            break;
+        }
+        if (state <= 1 || text->size() >= characterLimit) {
+            finished = true;
+            break;
+        }
+    }
+    static_cast<void>(Method(hwp, L"ReleaseScan", {}, nullptr));
+    if (!valid || !finished) {
+        text->clear();
+        return false;
+    }
+    const size_t breakIndex = text->find_first_of(L"\r\n");
+    if (breakIndex != std::wstring::npos) {
+        text->erase(breakIndex);
+    }
+    if (text->size() > characterLimit) {
+        text->erase(characterLimit);
+    }
+    return true;
+}
+
+bool ReadParagraphLead(IDispatch* const hwp, std::wstring* const lead) {
+    return ReadParagraphText(
+        hwp,
+        kParagraphLeadCharacters,
+        kParagraphLeadChunkLimit,
+        lead);
+}
+
+void ReadParagraphConventionText(
+    IDispatch* const hwp,
+    ParagraphStyleRecord* const record) {
+    std::wstring text;
+    if (!ReadParagraphText(
+            hwp,
+            kParagraphConventionProbeCharacters,
+            kParagraphLeadChunkLimit,
+            &text) ||
+        text.size() > kParagraphConventionCharacters) {
+        return;
+    }
+    record->textLength.value = static_cast<LONG>(text.size());
+    record->textLength.present = true;
+    record->textComplete = true;
+    size_t tailStart = text.size() > kParagraphTailCharacters
+        ? text.size() - kParagraphTailCharacters
+        : 0;
+    if (tailStart > 0 &&
+        text[tailStart] >= static_cast<wchar_t>(0xDC00) &&
+        text[tailStart] <= static_cast<wchar_t>(0xDFFF) &&
+        text[tailStart - 1] >= static_cast<wchar_t>(0xD800) &&
+        text[tailStart - 1] <= static_cast<wchar_t>(0xDBFF)) {
+        --tailStart;
+    }
+    record->tail = text.substr(tailStart);
+}
+
+void NoteParagraphObservationFailure(
+    const wchar_t* const message,
+    bool* const complete,
+    std::wstring* const error) {
+    *complete = false;
+    if (error->empty()) {
+        *error = message;
+    }
+}
+
+bool ReadPageParagraphRange(
+    IDispatch* const hwp,
+    IDispatch* const info,
+    const LONG paragraph,
+    PageParagraphRange* const range) {
+    Position target;
+    target.list = 0;
+    target.paragraph = paragraph;
+    target.character = 0;
+    Position reached;
+    if (!SetPosition(hwp, target) || !GetPosition(hwp, &reached) ||
+        reached.list != target.list || reached.paragraph != target.paragraph) {
+        return false;
+    }
+    range->paragraph = paragraph;
+    if (!CurrentPageFromInfo(info, &range->pageStart) ||
+        !RunHwpAction(hwp, L"MoveParaEnd") ||
+        !CurrentPageFromInfo(info, &range->pageEnd)) {
+        return false;
+    }
+    if (range->pageEnd < range->pageStart) {
+        std::swap(range->pageStart, range->pageEnd);
+    }
+    return true;
+}
+
+void ReadPageParagraphRecord(
+    IDispatch* const hwp,
+    const ShapeProbe& styleProbe,
+    const ShapeProbe& characterProbe,
+    const ShapeProbe& paragraphProbe,
+    const PageParagraphRange& range,
+    PageParagraphRecord* const record,
+    bool* const complete,
+    std::wstring* const error) {
+    record->range = range;
+    Position target;
+    target.list = 0;
+    target.paragraph = range.paragraph;
+    target.character = 0;
+    if (!SetPosition(hwp, target)) {
+        NoteParagraphObservationFailure(
+            L"page paragraph position could not be restored",
+            complete,
+            error);
+        return;
+    }
+    if (!RefreshShapeProbe(styleProbe) ||
+        !LongProperty(styleProbe.parameter, L"Apply", &record->styleId)) {
+        record->styleId = -1;
+        NoteParagraphObservationFailure(
+            L"one or more page paragraph styles could not be read",
+            complete,
+            error);
+    }
+    if (RefreshShapeProbe(characterProbe)) {
+        if (!StringProperty(
+                characterProbe.parameter,
+                L"FaceNameHangul",
+                &record->faceName)) {
+            NoteParagraphObservationFailure(
+                L"one or more page paragraph character shapes could not be read",
+                complete,
+                error);
+        }
+        ReadOptionalLong(characterProbe.parameter, L"Height", &record->height);
+        ReadOptionalLong(
+            characterProbe.parameter,
+            L"TextColor",
+            &record->textColor);
+        bool bold = false;
+        if (BoolProperty(characterProbe.parameter, L"Bold", &bold)) {
+            record->bold.value = bold;
+            record->bold.present = true;
+        }
+    } else {
+        NoteParagraphObservationFailure(
+            L"one or more page paragraph character shapes could not be read",
+            complete,
+            error);
+    }
+    if (RefreshShapeProbe(paragraphProbe)) {
+        IDispatch* const shape = paragraphProbe.parameter;
+        ReadOptionalLong(shape, L"AlignType", &record->alignment);
+        ReadOptionalLong(shape, L"LineSpacing", &record->lineSpacing);
+        ReadOptionalLong(shape, L"LeftMargin", &record->leftMargin);
+        ReadOptionalLong(shape, L"RightMargin", &record->rightMargin);
+        ReadOptionalLong(shape, L"Indentation", &record->indentation);
+        ReadOptionalLong(shape, L"PrevSpacing", &record->previousSpacing);
+        ReadOptionalLong(shape, L"NextSpacing", &record->nextSpacing);
+        ReadOptionalLong(shape, L"HeadingType", &record->headingType);
+        ReadOptionalLong(shape, L"Level", &record->headingLevel);
+    } else {
+        NoteParagraphObservationFailure(
+            L"one or more page paragraph shapes could not be read",
+            complete,
+            error);
+    }
+    if (!SetPosition(hwp, target) ||
+        !ReadParagraphText(
+            hwp,
+            kPageParagraphProbeCharacters,
+            kParagraphTextChunkLimit,
+            &record->text)) {
+        record->text.clear();
+        NoteParagraphObservationFailure(
+            L"one or more page paragraph texts could not be read",
+            complete,
+            error);
+    } else {
+        record->textAvailable = true;
+    }
+}
+
+void WritePageParagraphRecord(
+    std::wostringstream& output,
+    const PageParagraphRecord& record) {
+    output << L"PARA\t0\t" << record.range.paragraph << L'\t'
+           << record.range.pageStart << L'\t' << record.range.pageEnd << L'\t'
+           << (record.textAvailable ? 1 : 0) << L'\t'
+           << EncodeUtf8Base64(record.text) << L'\t' << record.styleId << L'\t'
+           << EncodeUtf8Base64(record.faceName);
+    WriteOptionalLong(output, record.height);
+    WriteOptionalBool(output, record.bold);
+    WriteOptionalLong(output, record.textColor);
+    WriteOptionalLong(output, record.alignment);
+    WriteOptionalLong(output, record.lineSpacing);
+    WriteOptionalLong(output, record.leftMargin);
+    WriteOptionalLong(output, record.rightMargin);
+    WriteOptionalLong(output, record.indentation);
+    WriteOptionalLong(output, record.previousSpacing);
+    WriteOptionalLong(output, record.nextSpacing);
+    WriteOptionalLong(output, record.headingType);
+    WriteOptionalLong(output, record.headingLevel);
+    output << L'\n';
+}
+
+void AppendPageParagraphRecords(
+    IDispatch* const hwp,
+    IDispatch* const info,
+    const LONG targetPage,
+    std::wostringstream* const output) {
+    bool complete = true;
+    std::wstring error;
+    bool hasPrevious = false;
+    bool reachedTargetBoundary = false;
+    PageParagraphRange previous;
+    std::vector<PageParagraphRange> selected;
+    Position documentEnd;
+    const bool documentEndKnown =
+        RunHwpAction(hwp, L"MoveDocEnd") &&
+        GetPosition(hwp, &documentEnd) &&
+        documentEnd.list == 0 &&
+        documentEnd.paragraph >= 0;
+    const LONG scanLimit =
+        documentEndKnown && documentEnd.paragraph < kParagraphScanHardLimit
+        ? documentEnd.paragraph + 1
+        : kParagraphScanHardLimit;
+    for (LONG paragraph = 0; paragraph < scanLimit; ++paragraph) {
+        PageParagraphRange range;
+        if (!ReadPageParagraphRange(hwp, info, paragraph, &range)) {
+            const std::wstring message =
+                L"page paragraph range could not be read at body paragraph " +
+                std::to_wstring(paragraph);
+            NoteParagraphObservationFailure(
+                message.c_str(),
+                &complete,
+                &error);
+            break;
+        }
+        if (range.pageEnd < targetPage) {
+            previous = range;
+            hasPrevious = true;
+            continue;
+        }
+        const size_t recordsNeeded = hasPrevious ? 2 : 1;
+        if (selected.size() + recordsNeeded > kPageParagraphRecordLimit) {
+            const std::wstring message =
+                L"page paragraph record limit was reached at body paragraph " +
+                std::to_wstring(paragraph);
+            NoteParagraphObservationFailure(
+                message.c_str(),
+                &complete,
+                &error);
+            break;
+        }
+        if (hasPrevious) {
+            selected.push_back(previous);
+            hasPrevious = false;
+        }
+        selected.push_back(range);
+        if (range.pageStart > targetPage) {
+            reachedTargetBoundary = true;
+            break;
+        }
+    }
+    if (!reachedTargetBoundary && complete &&
+        (!documentEndKnown || documentEnd.paragraph >= kParagraphScanHardLimit)) {
+        NoteParagraphObservationFailure(
+            L"page paragraph scan reached its hard limit at body paragraph 20000",
+            &complete,
+            &error);
+    }
+    if (selected.empty() && hasPrevious) {
+        selected.push_back(previous);
+    }
+
+    ShapeProbe styleProbe;
+    ShapeProbe characterProbe;
+    ShapeProbe paragraphProbe;
+    const bool probesReady =
+        PrepareShapeProbe(hwp, L"Style", L"HStyle", &styleProbe) &&
+        PrepareShapeProbe(hwp, L"CharShape", L"HCharShape", &characterProbe) &&
+        PrepareShapeProbe(
+            hwp,
+            L"ParagraphShape",
+            L"HParaShape",
+            &paragraphProbe);
+    if (!probesReady && !selected.empty()) {
+        NoteParagraphObservationFailure(
+            L"page paragraph shape parameter sets could not be prepared",
+            &complete,
+            &error);
+    }
+
+    std::wostringstream records;
+    size_t textCharacters = 0;
+    for (const PageParagraphRange& range : selected) {
+        PageParagraphRecord record;
+        if (probesReady) {
+            ReadPageParagraphRecord(
+                hwp,
+                styleProbe,
+                characterProbe,
+                paragraphProbe,
+                range,
+                &record,
+                &complete,
+                &error);
+        } else {
+            record.range = range;
+            Position target;
+            target.list = 0;
+            target.paragraph = range.paragraph;
+            target.character = 0;
+            record.textAvailable =
+                SetPosition(hwp, target) &&
+                ReadParagraphText(
+                    hwp,
+                    kPageParagraphProbeCharacters,
+                    kParagraphTextChunkLimit,
+                    &record.text);
+        }
+        if (record.text.size() > kPageParagraphCharacters) {
+            record.text.erase(kPageParagraphCharacters);
+            const std::wstring message =
+                L"page paragraph character limit was reached at body paragraph " +
+                std::to_wstring(range.paragraph);
+            NoteParagraphObservationFailure(
+                message.c_str(),
+                &complete,
+                &error);
+        }
+        const size_t remainingCharacters =
+            textCharacters < kPageParagraphTotalCharacters
+            ? kPageParagraphTotalCharacters - textCharacters
+            : 0;
+        if (record.text.size() > remainingCharacters) {
+            record.text.erase(remainingCharacters);
+            const std::wstring message =
+                L"page paragraph text budget was reached at body paragraph " +
+                std::to_wstring(range.paragraph);
+            NoteParagraphObservationFailure(
+                message.c_str(),
+                &complete,
+                &error);
+        }
+        textCharacters += record.text.size();
+        WritePageParagraphRecord(records, record);
+    }
+    *output << L"PARA_SCAN\t" << (complete ? 1 : 0) << L'\t'
+            << EncodeUtf8Base64(error) << L'\n' << records.str();
+}
+
+}
+
+std::wstring InspectParagraphStyles(
+    IDispatch* const hwp,
+    const std::wstring& request) noexcept {
+    std::optional<InspectionStateGuard> stateGuard;
+    try {
+        if (hwp == nullptr) {
+            return ErrorResponse(L"NO_HWP", L"HwpObject is unavailable");
+        }
+        ParagraphStyleRequest scan;
+        if (!ParseParagraphStyleRequest(request, &scan)) {
+            return ErrorResponse(
+                L"BAD_SCAN_REQUEST",
+                L"paragraph style scan request is invalid");
+        }
+        CComPtr<IDispatch> document;
+        CComPtr<IDispatch> info;
+        LONG documentId = -1;
+        std::wstring fullName;
+        if (!ActiveDocument(hwp, document, info) ||
+            !LongProperty(document, L"DocumentID", &documentId) ||
+            !StringProperty(document, L"FullName", &fullName)) {
+            return ErrorResponse(L"NO_DOCUMENT", L"active document is unavailable");
+        }
+        Position cursor;
+        Selection selection;
+        bool modified = false;
+        if (!PrepareReadSelection(hwp, &cursor, &selection) ||
+            !BoolProperty(hwp, L"IsModified", &modified)) {
+            return ErrorResponse(
+                L"UNSUPPORTED_SELECTION",
+                L"the active HWP selection cannot be moved and restored safely");
+        }
+        stateGuard.emplace(hwp, cursor, selection, modified);
+        ShapeProbe styleProbe;
+        ShapeProbe characterProbe;
+        ShapeProbe paragraphProbe;
+        if (!PrepareShapeProbe(hwp, L"Style", L"HStyle", &styleProbe) ||
+            (scan.shapeDetail >= kParagraphShapeCharacter &&
+             !PrepareShapeProbe(hwp, L"CharShape", L"HCharShape", &characterProbe)) ||
+            (scan.shapeDetail >= kParagraphShapeParagraph &&
+             !PrepareShapeProbe(
+                 hwp,
+                 L"ParagraphShape",
+                 L"HParaShape",
+                 &paragraphProbe))) {
+            return stateGuard->Restore(
+                ErrorResponse(
+                    L"STYLE_PARAMETER",
+                    L"style parameter set could not be prepared"));
+        }
+
+        std::vector<ParagraphStyleRecord> records;
+        bool complete = false;
+        for (LONG offset = 0; offset < scan.limit; ++offset) {
+            const LONG paragraph = scan.start + offset;
+            Position target;
+            target.list = scan.list;
+            target.paragraph = paragraph;
+            target.character = 0;
+            Position reached;
+            // SetPos clamps an out-of-range paragraph to the document start
+            // instead of failing, so the reached position is the real end
+            // marker for the list.
+            if (!SetPosition(hwp, target) || !GetPosition(hwp, &reached) ||
+                reached.list != scan.list || reached.paragraph != paragraph) {
+                complete = true;
+                break;
+            }
+            ParagraphStyleRecord record;
+            record.paragraph = paragraph;
+            if (!RefreshShapeProbe(styleProbe) ||
+                !LongProperty(styleProbe.parameter, L"Apply", &record.styleId)) {
+                record.styleId = -1;
+            }
+            if (!ReadParagraphLead(hwp, &record.lead)) {
+                record.lead.clear();
+            }
+            if (scan.shapeDetail >= kParagraphShapeConvention) {
+                ReadParagraphConventionText(hwp, &record);
+            }
+            if (scan.shapeDetail >= kParagraphShapeCharacter &&
+                RefreshShapeProbe(characterProbe)) {
+                static_cast<void>(StringProperty(
+                    characterProbe.parameter,
+                    L"FaceNameHangul",
+                    &record.faceName));
+                static_cast<void>(LongProperty(
+                    characterProbe.parameter,
+                    L"Height",
+                    &record.height));
+                static_cast<void>(BoolProperty(
+                    characterProbe.parameter,
+                    L"Bold",
+                    &record.bold));
+                if (scan.shapeDetail >= kParagraphShapeParagraph) {
+                    ReadOptionalLong(
+                        characterProbe.parameter,
+                        L"TextColor",
+                        &record.textColor);
+                }
+                if (scan.shapeDetail >= kParagraphShapeConvention) {
+                    static_cast<void>(StringProperty(
+                        characterProbe.parameter,
+                        L"FaceNameLatin",
+                        &record.faceNameLatin));
+                    static_cast<void>(StringProperty(
+                        characterProbe.parameter,
+                        L"FaceNameHanja",
+                        &record.faceNameHanja));
+                    static_cast<void>(StringProperty(
+                        characterProbe.parameter,
+                        L"FaceNameJapanese",
+                        &record.faceNameJapanese));
+                    static_cast<void>(StringProperty(
+                        characterProbe.parameter,
+                        L"FaceNameOther",
+                        &record.faceNameOther));
+                    static_cast<void>(StringProperty(
+                        characterProbe.parameter,
+                        L"FaceNameSymbol",
+                        &record.faceNameSymbol));
+                    static_cast<void>(StringProperty(
+                        characterProbe.parameter,
+                        L"FaceNameUser",
+                        &record.faceNameUser));
+                }
+            }
+            if (scan.shapeDetail >= kParagraphShapeParagraph &&
+                RefreshShapeProbe(paragraphProbe)) {
+                // The same properties ReadFormatting() already reads at the
+                // caret. Reading them per paragraph is what lets a new
+                // paragraph reproduce this document's own indentation instead
+                // of only inheriting the style default.
+                IDispatch* const shape = paragraphProbe.parameter;
+                ReadOptionalLong(shape, L"AlignType", &record.alignment);
+                ReadOptionalLong(shape, L"LineSpacing", &record.lineSpacing);
+                ReadOptionalLong(shape, L"LeftMargin", &record.leftMargin);
+                ReadOptionalLong(shape, L"RightMargin", &record.rightMargin);
+                ReadOptionalLong(shape, L"Indentation", &record.indentation);
+                ReadOptionalLong(shape, L"PrevSpacing", &record.previousSpacing);
+                ReadOptionalLong(shape, L"NextSpacing", &record.nextSpacing);
+                ReadOptionalLong(shape, L"HeadingType", &record.headingType);
+                ReadOptionalLong(shape, L"Level", &record.headingLevel);
+            }
+            records.push_back(std::move(record));
+        }
+
+        std::wostringstream output;
+        output << L"HPS1\nDOC\t" << documentId << L'\t' << EncodeUtf8Base64(fullName)
+               << L"\nSCAN\t" << scan.list << L'\t' << scan.start << L'\t'
+               << static_cast<LONG>(records.size()) << L'\t' << (complete ? 1 : 0)
+               << L'\t' << scan.shapeDetail << L'\n';
+        for (const ParagraphStyleRecord& record : records) {
+            output << L"PSTYLE\t" << record.paragraph << L'\t' << record.styleId
+                   << L'\t' << EncodeUtf8Base64(record.lead);
+            if (scan.shapeDetail >= kParagraphShapeCharacter) {
+                output << L'\t' << EncodeUtf8Base64(record.faceName) << L'\t'
+                       << record.height << L'\t' << (record.bold ? 1 : 0);
+            }
+            if (scan.shapeDetail >= kParagraphShapeParagraph) {
+                WriteOptionalLong(output, record.textColor);
+                WriteOptionalLong(output, record.alignment);
+                WriteOptionalLong(output, record.lineSpacing);
+                WriteOptionalLong(output, record.leftMargin);
+                WriteOptionalLong(output, record.rightMargin);
+                WriteOptionalLong(output, record.indentation);
+                WriteOptionalLong(output, record.previousSpacing);
+                WriteOptionalLong(output, record.nextSpacing);
+                WriteOptionalLong(output, record.headingType);
+                WriteOptionalLong(output, record.headingLevel);
+            }
+            if (scan.shapeDetail >= kParagraphShapeConvention) {
+                output << L'\t' << EncodeUtf8Base64(record.tail);
+                WriteOptionalLong(output, record.textLength);
+                output << L'\t' << (record.textComplete ? 1 : 0)
+                       << L'\t' << EncodeUtf8Base64(record.faceNameLatin)
+                       << L'\t' << EncodeUtf8Base64(record.faceNameHanja)
+                       << L'\t' << EncodeUtf8Base64(record.faceNameJapanese)
+                       << L'\t' << EncodeUtf8Base64(record.faceNameOther)
+                       << L'\t' << EncodeUtf8Base64(record.faceNameSymbol)
+                       << L'\t' << EncodeUtf8Base64(record.faceNameUser);
+            }
+            output << L'\n';
+        }
+        output << L"END";
+        return stateGuard->Restore(output.str());
+    } catch (...) {
+        if (stateGuard.has_value()) {
+            return stateGuard->Restore(
+                ErrorResponse(
+                    L"NATIVE_EXCEPTION",
+                    L"paragraph style scan failed unexpectedly"));
+        }
+        return ErrorResponse(
+            L"NATIVE_EXCEPTION",
+            L"paragraph style scan failed unexpectedly");
     }
 }
 

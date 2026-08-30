@@ -29,6 +29,7 @@ class HwpPriorityRecipeInputs(ContractModel):
     style_id: int | None = Field(default=None, ge=0, le=4_095)
     picture_width_mm: float | None = Field(default=None, ge=1, le=1_000)
     picture_height_mm: float | None = Field(default=None, ge=1, le=1_000)
+    picture_fit: Literal["contain", "cover"] = "contain"
     picture_embed: bool = True
 
     @model_validator(mode="after")
@@ -36,5 +37,9 @@ class HwpPriorityRecipeInputs(ContractModel):
         if (self.picture_width_mm is None) != (self.picture_height_mm is None):
             raise PriorityRecipeValidationError(
                 "picture width and height must be provided together"
+            )
+        if self.picture_fit == "cover" and self.picture_width_mm is None:
+            raise PriorityRecipeValidationError(
+                "picture fit cover needs the picture width and height box"
             )
         return self

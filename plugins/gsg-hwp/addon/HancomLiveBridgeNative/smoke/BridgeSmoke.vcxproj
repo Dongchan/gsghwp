@@ -25,6 +25,9 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <LinkDocumentGraphReaders Condition="'$(LinkDocumentGraphReaders)'==''">true</LinkDocumentGraphReaders>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <OutDir>$(ProjectDir)bin\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)obj\$(Configuration)\</IntDir>
@@ -43,17 +46,71 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
+      <StackReserveSize>8388608</StackReserveSize>
+      <AdditionalOptions>/Brepro /PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>ole32.lib;oleaut32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>bcrypt.lib;pathcch.lib;ole32.lib;oleaut32.lib;advapi32.lib;crypt32.lib;winspool.lib;version.lib;gdi32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="BridgeSmoke.cpp" />
+    <ClCompile Include="TextPatchReadbackSmoke.cpp" />
+    <ClCompile Include="TextPatchProtocolSmoke.cpp" />
+    <ClCompile Include="NativeStructureFixtureSuite.cpp" />
+    <ClCompile Include="DocumentGraphSchemaSmoke.cpp" />
+    <ClCompile Include="DocumentGraphCodecStoreSmoke.cpp" />
+    <ClCompile Include="DocumentGraphCaptureSmoke.cpp" />
+    <ClCompile Include="DocumentGraphControlsSmoke.cpp" />
+    <ClCompile Include="DocumentGraphEffectivePropertiesSmoke.cpp" />
+    <ClCompile Include="DocumentGraphImagesSmoke.cpp" />
+    <ClCompile Include="DocumentGraphLayoutSmoke.cpp" />
+    <ClCompile Include="DocumentGraphIdentitySmoke.cpp" />
+    <ClCompile Include="DocumentGraphPatchSmoke.cpp" />
+    <ClCompile Include="DocumentGraphProtocolSmoke.cpp" />
+    <ClCompile Include="DocumentGraphContinuationSmoke.cpp" />
+    <ClCompile Include="DocumentGraphQuerySmoke.cpp" />
+    <ClCompile Include="DocumentGraphStoriesSmoke.cpp" />
+    <ClCompile Include="DocumentGraphTablesSmoke.cpp" />
+    <ClCompile Include="DocumentGraphTextSmoke.cpp" />
+    <ClCompile Include="OfficialApiCapabilitySmoke.cpp" />
+    <ClCompile Include="..\ActionProtocol.cpp" />
     <ClCompile Include="..\CellTopology.cpp" />
     <ClCompile Include="..\ComState.cpp" />
+    <ClCompile Include="..\DocumentGraphCodec.cpp" />
+    <ClCompile Include="..\DocumentGraphCapture.cpp" />
+    <ClCompile Include="..\DocumentGraphCaptureSpool.cpp" />
+    <ClCompile Include="..\DocumentGraphCaptureRecords.cpp" />
+    <ClCompile Include="..\DocumentGraphStore.cpp" />
+    <ClCompile Include="..\DocumentGraphQuery.cpp" />
+    <ClCompile Include="..\DocumentGraphIdentity.cpp" />
+    <ClCompile Include="..\DocumentGraphPatch.cpp" />
+    <ClCompile Include="..\DocumentGraphPatchExecutor.cpp" />
+    <ClCompile Include="..\DocumentGraphProtocol.cpp" />
     <ClCompile Include="..\DispatchInvoke.cpp" />
+    <ClCompile Include="..\LiveInspection.cpp" />
+    <ClCompile Include="..\ParagraphFormatting.cpp" />
+    <ClCompile Include="..\ProtocolEncoding.cpp" />
+    <ClCompile Include="..\OfficialApiCapability.cpp" />
+    <ClCompile Include="..\OfficialApiProbe.cpp" />
+    <ClCompile Include="..\OfficialApiAutomationProbe.cpp" />
+    <ClCompile Include="..\OfficialApiAutomationOwner.cpp" />
+    <ClCompile Include="..\OfficialApiAutomationArguments.cpp" />
+    <ClCompile Include="..\OfficialApiAutomationInvoke.cpp" />
+    <ClCompile Include="..\OfficialApiFixture.cpp" />
+    <ClCompile Include="..\OfficialApiParameterProbe.cpp" />
+    <ClCompile Include="..\OfficialApiParameterArray.cpp" />
+    <ClCompile Include="..\OfficialApiParameterArrayWriter.cpp" />
+    <ClCompile Include="..\OfficialApiVirtualMethod.cpp" />
+    <ClCompile Include="..\OfficialApiVariant.cpp" />
+    <ClCompile Include="..\OfficialApiState.cpp" />
     <ClCompile Include="..\TableInspection.cpp" />
+    <ClCompile Include="..\TextPatchReadback.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DocumentGraphReaders.vcxproj" Condition="'$(LinkDocumentGraphReaders)'=='true'">
+      <Project>{DE375F51-69DB-48D4-82F8-10256391A909}</Project>
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

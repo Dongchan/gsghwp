@@ -10,6 +10,7 @@ from typing import Literal, cast
 from pydantic import Field, JsonValue, RootModel, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from hwp_current_format_insert_contract import CurrentFormatInsertEvidence
 from hwp_live_contract import LayoutPlan
 from hwp_live_native_action_models import NativeActionCommand
 from hwp_live_values import ContractModel
@@ -18,8 +19,10 @@ from hwp_operation_route_contract import (
     OperationRouteMetadata,
 )
 from hwp_operation_descriptor import OperationVerificationMode
+from hwp_picture_edit_evidence import PictureEditEvidence
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
 from hwp_runtime_identity import RUNTIME_BUILD_INFO, RuntimeBuildInfo
+from hwp_visibility_template_observation import VisibilityTemplateObservation
 
 
 OperationCategory = Literal["action", "parameter_set", "automation"]
@@ -151,6 +154,21 @@ class OperationPosition(ContractModel):
     list_id: int = Field(ge=0)
     paragraph: int = Field(ge=0)
     character: int = Field(ge=0)
+
+
+class OperationPhaseTiming(ContractModel):
+    phase: Literal[
+        "validation",
+        "planning_preflight",
+        "checkpoint_before",
+        "mutation",
+        "readback",
+        "checkpoint_after_history",
+        "rollback",
+        "total",
+    ]
+    source: Literal["python", "native"]
+    elapsed_microseconds: int = Field(ge=0)
 
 
 class WorkflowCandidate(ContractModel):
@@ -396,12 +414,16 @@ class OperationResult(OperationRouteMetadata):
     next_arguments: OperationNextArguments | None = None
     message: str = Field(max_length=4_000)
     execution_mode: Literal["native_in_process"] | None = None
-    native_protocol: Literal[9, 10, 11, 12] | None = None
+    native_protocol: Literal[9, 10, 11, 12, 13, 14] | None = None
     verification: OperationVerificationMode | None = None
     verified: bool | None = None
     commands_executed: int | None = Field(default=None, ge=0)
     native_actions_executed: int | None = Field(default=None, ge=0)
     native_elapsed_microseconds: int | None = Field(default=None, ge=0)
+    phase_timings: tuple[OperationPhaseTiming, ...] = Field(
+        default=(),
+        max_length=32,
+    )
     caption_profile_elapsed_microseconds: int | None = Field(default=None, ge=0)
     clone_elapsed_microseconds: int | None = Field(default=None, ge=0)
     caption_elapsed_microseconds: int | None = Field(default=None, ge=0)
@@ -442,6 +464,16 @@ class OperationResult(OperationRouteMetadata):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    save_baseline_diagnostic_reason: (
+        Literal[
+            "file_missing",
+            "access_failed",
+            "unstable",
+            "incomplete",
+            "not_attached",
+        ]
+        | None
+    ) = None
     saved_file_size: int | None = Field(default=None, ge=0)
     saved_file_write_time_100ns: int | None = Field(default=None, ge=0)
     saved_file_mtime_ns: int | None = Field(default=None, ge=0)
@@ -454,6 +486,15 @@ class OperationResult(OperationRouteMetadata):
     save_fingerprint_verified: bool | None = None
     live_state_preserved_after_save: bool | None = None
     disk_persistence_verified: bool | None = None
+    # ActionLifecycle.cpp writes both of these into the native call results of
+    # the batch that captures a document checkpoint. Without them a caller
+    # cannot tell whether the disk-copy path ran at all or the bridge quietly
+    # fell back to the in-memory block, and -- worse -- cannot tell that
+    # `lock:false` failed to hold and the user's own file was saved to move the
+    # editing session back onto it. None means no checkpoint was captured in
+    # this operation, not that nothing happened.
+    document_checkpoint_capture: Literal["document_file", "encoded_block"] | None = None
+    document_identity_restored: bool | None = None
     structure_digest_before: str | None = Field(default=None, max_length=500)
     structure_digest_after: str | None = Field(default=None, max_length=500)
     partial_change: bool = False
@@ -482,6 +523,21 @@ class OperationResult(OperationRouteMetadata):
         default=(),
         exclude=True,
         max_length=20_000,
+    )
+    visibility_template_observation: tuple[VisibilityTemplateObservation, ...] = Field(
+        default=(),
+        max_length=20,
+    )
+    current_format_insert: CurrentFormatInsertEvidence | None = None
+    # 그림 편집(자르기·셀 이동)이 되읽은 근거. changed_pages 와 같은 이유로
+    # 스키마(SkipJsonSchema)와 직렬화(exclude) 양쪽에서 뺀다. OperationResult 는
+    # hwp_operate·hwp_copy_style·hwp_get_operation_status 의 봉인된 outputSchema
+    # 이고 additionalProperties=false 다. 여기에 보이는 필드를 하나 더하면 그
+    # 세 도구의 스키마 해시가 바뀌어 봉인 오라클을 다시 만들어야 한다.
+    # hwp_edit_picture 는 이 값을 자기 응답에 옮겨 싣는다.
+    picture_edit: SkipJsonSchema[PictureEditEvidence | None] = Field(
+        default=None,
+        exclude=True,
     )
 
 

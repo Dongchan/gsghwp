@@ -11,16 +11,19 @@ from typing_extensions import TypeIs
 
 from pydantic import Field
 
+from hwp_current_format_insert_contract import CurrentFormatInsertEvidence
 from hwp_public_cell_selector import SeriesImageCell, SeriesTextCell
 from hwp_live_values import ContractModel
 from hwp_operation_contract import (
     IdempotencyStatus,
+    OperationPhaseTiming,
     OperationResult,
     OperationStatus,
     TableFormatCandidate,
     WorkflowTargetCandidate,
 )
 from hwp_runtime_identity import RuntimeBuildInfo
+from hwp_visibility_template_observation import VisibilityTemplateObservation
 
 
 type PublicActionStatus = Literal[
@@ -120,6 +123,16 @@ class PublicSaveEvidence(ContractModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    baseline_diagnostic_reason: (
+        Literal[
+            "file_missing",
+            "access_failed",
+            "unstable",
+            "incomplete",
+            "not_attached",
+        ]
+        | None
+    ) = None
     file_size: int | None = Field(default=None, ge=0)
     file_write_time_100ns: int | None = Field(default=None, ge=0)
     file_mtime_ns: int | None = Field(default=None, ge=0)
@@ -151,6 +164,10 @@ class PublicActionResult(ContractModel):
     )
     recipe_id: str | None = Field(default=None, max_length=100)
     commands_executed: int = Field(default=0, ge=0)
+    phase_timings: tuple[OperationPhaseTiming, ...] = Field(
+        default=(),
+        max_length=32,
+    )
     updated_addresses: tuple[str, ...] = Field(default=(), max_length=20_000)
     created_target_ids: tuple[str, ...] = Field(default=(), max_length=500)
     affected_pages: tuple[int, ...] = Field(default=(), max_length=500)
@@ -162,6 +179,19 @@ class PublicActionResult(ContractModel):
     retry_safe: bool
     reconcile_required: bool = False
     save_evidence: PublicSaveEvidence | None = None
+    # Which checkpoint path the bridge actually used, straight from its own
+    # call results. null means this operation captured no checkpoint.
+    document_checkpoint_capture: Literal["document_file", "encoded_block"] | None = None
+    # true means SaveAs adopted the checkpoint copy despite lock:false and the
+    # bridge saved the user's own document to move the session back onto it —
+    # a write nobody asked for. Never omitted when a checkpoint was captured:
+    # false is the reassurance, null only means there was no checkpoint.
+    document_identity_restored: bool | None = None
+    visibility_template_observation: tuple[VisibilityTemplateObservation, ...] = Field(
+        default=(),
+        max_length=20,
+    )
+    current_format_insert: CurrentFormatInsertEvidence | None = None
 
 
 def _is_failed_status(status: OperationStatus) -> TypeIs[FailedOperationStatus]:
@@ -191,7 +221,15 @@ def _is_terminal_status(
 def _public_status(result: OperationResult) -> PublicActionStatus:
     match result.status:
         case "executed":
-            return "succeeded"
+            return (
+                "partial_failure"
+                if result.failure_stage
+                in {
+                    "image_replace_content_verification",
+                    "table_caption_visibility_verification",
+                }
+                else "succeeded"
+            )
         case "needs_input":
             return "needs_input"
         case "ambiguous":
@@ -415,6 +453,7 @@ def to_public_action_result(
         if result.save_hresult is None
         and result.saved_file_sha256 is None
         and result.save_baseline_sha256 is None
+        and result.save_baseline_diagnostic_reason is None
         else PublicSaveEvidence(
             path=result.saved_path or result.reopened_path,
             save_hresult=result.save_hresult,
@@ -423,6 +462,7 @@ def to_public_action_result(
             baseline_file_size=result.save_baseline_file_size,
             baseline_file_mtime_ns=result.save_baseline_file_mtime_ns,
             baseline_sha256=result.save_baseline_sha256,
+            baseline_diagnostic_reason=result.save_baseline_diagnostic_reason,
             file_size=result.saved_file_size,
             file_write_time_100ns=result.saved_file_write_time_100ns,
             file_mtime_ns=result.saved_file_mtime_ns,
@@ -453,6 +493,7 @@ def to_public_action_result(
         format_candidates=result.format_candidates,
         recipe_id=result.recipe_id,
         commands_executed=result.commands_executed or 0,
+        phase_timings=result.phase_timings,
         updated_addresses=result.updated_addresses,
         created_target_ids=result.created_control_ids,
         affected_pages=affected_pages,
@@ -464,4 +505,8 @@ def to_public_action_result(
         retry_safe=retry_safe,
         reconcile_required=result.reconcile_required,
         save_evidence=save_evidence,
+        document_checkpoint_capture=result.document_checkpoint_capture,
+        document_identity_restored=result.document_identity_restored,
+        visibility_template_observation=result.visibility_template_observation,
+        current_format_insert=result.current_format_insert,
     )

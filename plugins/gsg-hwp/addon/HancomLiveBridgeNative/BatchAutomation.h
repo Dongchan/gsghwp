@@ -11,7 +11,8 @@ class BatchAutomation final : public IDispatch {
 public:
     explicit BatchAutomation(
         IDispatch* hwp,
-        LONG targetDocumentId = 0) noexcept;
+        LONG targetDocumentId = 0,
+        HWND windowHandle = nullptr) noexcept;
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID interfaceId, void** object) override;
     ULONG STDMETHODCALLTYPE AddRef() override;
@@ -46,6 +47,10 @@ private:
     HRESULT VerifyTarget();
     static HRESULT ReturnString(const std::wstring& value, VARIANT* result) noexcept;
 
+    // No foreground guard state lives here. BeginForegroundGuard and
+    // EndForegroundGuard drive one process wide bracket in ForegroundGuard.h
+    // instead, because the caller can reach a different published object
+    // between opening and closing it.
     volatile LONG references_ = 1;
     volatile LONG activationDocumentId_ = 0;
     volatile LONG activationHresult_ = E_PENDING;
@@ -55,4 +60,5 @@ private:
     std::wstring activationToken_;
     IDispatch* hwp_ = nullptr;
     LONG targetDocumentId_ = 0;
+    HWND windowHandle_ = nullptr;
 };

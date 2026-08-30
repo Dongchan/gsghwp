@@ -5,6 +5,7 @@
 #include "BatchAutomation.h"
 #include "BridgeStatus.h"
 #include "DispatchInvoke.h"
+#include "DocumentGraphProtocol.h"
 
 #include <algorithm>
 #include <cstring>
@@ -17,6 +18,60 @@ namespace {
 constexpr char kOnInitialLoad[] = "{B91A2981-A001-44a9-933F-5BF70A747967}";
 constexpr char kOnLoad[] = "{3E4DC866-051C-4989-820E-DADC1E6264B9}";
 constexpr char kBootstrapAction[] = "{CFB0F99F-3589-4A85-9D8B-2D6BCE5B35D1}";
+
+// The three actions above are this module's lifecycle contract with Hancom and
+// keep the ROT publication alive. Nothing below changes them.
+constexpr int kLifecycleActionCount = 3;
+constexpr const char* kLifecycleActions[kLifecycleActionCount] = {
+    kOnInitialLoad,
+    kOnLoad,
+    kBootstrapAction,
+};
+
+// Stage 2 slot AID pool. EnumAction advertises these 32 forever; a recipe is
+// bound to a slot at runtime by the worker, so adding, renaming, reordering or
+// deleting a recipe never touches this DLL. The trailing four hex digits are the
+// slot index -- the family is one generated GUID with its last 16 bits used as a
+// counter, so the strings are still globally unique but stay readable.
+//
+// This table is the *authority*: hwp_custom_action_store.CUSTOM_ACTION_SLOT_AIDS
+// mirrors it, and tests/test_hwp_custom_action_slot_runtime.py parses this file to
+// prove the two sides agree byte for byte.
+constexpr char kSlotActions[bridge_status::kSlotCount][39] = {
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0000}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0001}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0002}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0003}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0004}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0005}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0006}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0007}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0008}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0009}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB000A}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB000B}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB000C}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB000D}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB000E}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB000F}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0010}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0011}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0012}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0013}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0014}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0015}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0016}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0017}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0018}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB0019}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB001A}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB001B}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB001C}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB001D}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB001E}",
+    "{2C445309-901C-49B2-BED1-D2D9CFFB001F}",
+};
+
 constexpr wchar_t kMonikerDelimiter[] = L"!";
 constexpr wchar_t kMonikerPrefix[] = L"HancomLiveBridge.";
 constexpr wchar_t kBatchMonikerPrefix[] = L"HancomLiveBatch.";
@@ -36,16 +91,12 @@ class UserActionModule final : public IHncUserActionModule {
 public:
     LPCSTR EnumAction(const int iterator) override {
         const char* action = nullptr;
-        switch (iterator) {
-        case 0:
-            action = kOnInitialLoad;
-            break;
-        case 1:
-            action = kOnLoad;
-            break;
-        case 2:
-            action = kBootstrapAction;
-            break;
+        if (iterator >= 0 && iterator < kLifecycleActionCount) {
+            action = kLifecycleActions[iterator];
+        } else if (
+            iterator >= kLifecycleActionCount &&
+            iterator < kLifecycleActionCount + bridge_status::kSlotCount) {
+            action = kSlotActions[iterator - kLifecycleActionCount];
         }
         bridge_status::NoteEnum(action);
         return action;
@@ -70,6 +121,18 @@ public:
         LPDISPATCH const object,
         UINT* const state) override {
         bridge_status::NoteUpdateUi(action);
+        if (SlotIndexOf(action) >= 0) {
+            if (state == nullptr) {
+                return FALSE;
+            }
+            // A slot button is only pressable while a worker is alive to consume
+            // the click. No COM here: UpdateUI runs on the UI thread and is
+            // called for every visible button on every idle pass.
+            *state = bridge_status::SlotsEnabled()
+                ? bridge_status::kSlotStateEnabled
+                : bridge_status::kSlotStateDisabled;
+            return TRUE;
+        }
         if (!IsRecognizedAction(action) || state == nullptr) {
             return FALSE;
         }
@@ -92,6 +155,14 @@ public:
 
     int DoAction(LPCSTR const action, LPDISPATCH const object) override {
         bridge_status::NoteDoAction(action);
+        const int slot = SlotIndexOf(action);
+        if (slot >= 0) {
+            // Queue and return. Running the recipe here would block the Hancom
+            // UI thread and would have to re-implement the whole validation and
+            // journalling stack that the worker's tool path already has.
+            bridge_status::NoteSlotClick(static_cast<LONG>(slot));
+            return TRUE;
+        }
         if (!IsRecognizedAction(action)) {
             return FALSE;
         }
@@ -180,6 +251,20 @@ private:
             (std::strcmp(action, kOnInitialLoad) == 0 ||
              std::strcmp(action, kOnLoad) == 0 ||
              std::strcmp(action, kBootstrapAction) == 0);
+    }
+
+    // Slot index for a pool AID, -1 for anything else (including the three
+    // lifecycle actions, which keep their own path).
+    static int SlotIndexOf(LPCSTR const action) noexcept {
+        if (action == nullptr) {
+            return -1;
+        }
+        for (int index = 0; index < bridge_status::kSlotCount; ++index) {
+            if (std::strcmp(action, kSlotActions[index]) == 0) {
+                return index;
+            }
+        }
+        return -1;
     }
 
     HRESULT FinishPublish(const HRESULT result) noexcept {
@@ -513,7 +598,10 @@ private:
             return result;
         }
         BatchAutomation* const batch =
-            new (std::nothrow) BatchAutomation(object, documentId);
+            new (std::nothrow) BatchAutomation(
+                object,
+                documentId,
+                windowHandle);
         if (batch == nullptr) {
             const HRESULT revokeStatus =
                 RevokeCookie(table, *registrationCookie);
@@ -674,4 +762,32 @@ GetBridgeLastHRESULT() noexcept {
 extern "C" __declspec(dllexport) HRESULT __stdcall
 ReleaseBridgePublication() noexcept {
     return Module().Revoke();
+}
+
+extern "C" __declspec(dllexport) void __stdcall
+ResetGraphLifecycleDiagnostics() noexcept {
+    hancom::graph::protocol::ResetDebugLifecycleInstrumentation();
+}
+
+extern "C" __declspec(dllexport) BOOL __stdcall
+ReadGraphLifecycleDiagnostics(
+    hancom::graph::protocol::DebugLifecycleCounters* const counters,
+    hancom::graph::protocol::DebugLifecycleEvent* const events,
+    const std::uint32_t capacity,
+    std::uint32_t* const eventCount) noexcept {
+    return hancom::graph::protocol::ReadDebugLifecycleInstrumentation(
+        counters, events, capacity, eventCount) ? TRUE : FALSE;
+}
+
+extern "C" __declspec(dllexport) BOOL __stdcall
+QueryGraphCapabilitySession(
+    const hancom::graph::identity::DocumentSessionId* const session,
+    const LONG documentId,
+    const std::uintptr_t windowHandle,
+    std::uint64_t* const requestedBits,
+    std::uint64_t* const negotiatedBits) noexcept {
+    return session != nullptr &&
+        hancom::graph::protocol::DebugQueryCapabilitySession(
+            *session, {documentId, windowHandle}, requestedBits,
+            negotiatedBits) ? TRUE : FALSE;
 }

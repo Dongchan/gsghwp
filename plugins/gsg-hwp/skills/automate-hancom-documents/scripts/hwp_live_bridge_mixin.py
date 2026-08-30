@@ -59,9 +59,11 @@ class HancomBridgeSessionRuntime(HancomBridgeMutationRuntime):
         operation: Callable[[LiveHwpController], T],
         *,
         session_id: str,
+        degrade: Callable[[T], T] | None = None,
     ) -> T:
         _ = operation
         _ = session_id
+        _ = degrade
         raise NotImplementedError
 
     def _style_state_token(self, session_id: str) -> str:

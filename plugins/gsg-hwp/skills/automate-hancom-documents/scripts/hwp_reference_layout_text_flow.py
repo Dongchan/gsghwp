@@ -58,16 +58,35 @@ def reference_line_height(style: ReferenceStyle) -> int:
     return font_height + spacing
 
 
+def character_em_width(character: str) -> float:
+    """How many ems of advance one character asks for.
+
+    Unicode East Asian Width, not a fudge factor: ``W``/``F`` are full width
+    by definition (every Hangul syllable, every Hanja, the fullwidth forms)
+    and everything else is half. Combining and formatting marks advance
+    nothing.
+
+    Lifted out of ``_character_width`` so ``hwp_layout_preflight`` can measure
+    the same way. That module counted ``len(text)`` against a flat 0.92em,
+    which is close enough for spaced Korean prose (0.79-0.91 em/char MEASURED)
+    but reads 8% narrow wherever full-width runs are dense. Having two wrap
+    models in one repository that answer differently about the same paragraph
+    is the defect regardless of which is closer on average.
+    """
+    if category(character) in {"Cf", "Mn", "Me"}:
+        return 0.0
+    if character == "\t":
+        return 2.0
+    return 1.0 if east_asian_width(character) in {"W", "F"} else 0.5
+
+
 def _character_width(character: str, style: ReferenceStyle) -> float:
-    if style.font_size_pt is None or category(character) in {"Cf", "Mn", "Me"}:
+    if style.font_size_pt is None:
+        return 0
+    em_width = character_em_width(character)
+    if em_width == 0:
         return 0
     font_height = style.font_size_pt * 100
-    if character == "\t":
-        em_width = 2.0
-    elif east_asian_width(character) in {"W", "F"}:
-        em_width = 1.0
-    else:
-        em_width = 0.5
     glyph_width = font_height * em_width * style.width_ratio_percent / 100
     character_spacing = (
         font_height * max(0, style.letter_spacing_percent) / 100

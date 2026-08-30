@@ -23,11 +23,19 @@ from typing import Literal, Protocol, final, runtime_checkable
 
 from hwp_errors import HwpLiveError
 from hwp_live_bridge_contract import (
+    HancomDialogActionResult,
+    HancomDialogControlState,
     HancomDialogDismissResult,
     HancomDialogState,
+    HancomPopupStructure,
     HancomWindowChildState,
     HancomWindowState,
     HancomWindowStateList,
+)
+from hwp_live_uia import (
+    PowerShellUiAutomationReader,
+    UiAutomationControlState,
+    UiAutomationReader,
 )
 
 
@@ -198,6 +206,14 @@ class WindowStateReader(Protocol):
 
     def dismiss_dialogs(self, window_handle: int) -> HancomDialogDismissResult: ...
 
+    def inspect_dialog(self, dialog_window_handle: int) -> HancomPopupStructure: ...
+
+    def invoke_dialog_action(
+        self,
+        dialog_window_handle: int,
+        control_id: int,
+    ) -> HancomDialogActionResult: ...
+
 
 @runtime_checkable
 class DialogSafetyReader(Protocol):
@@ -233,6 +249,10 @@ def _load_process() -> Win32ProcessModule:
     return module
 
 
+def _load_uia() -> UiAutomationReader:
+    return PowerShellUiAutomationReader()
+
+
 def _load_process_api() -> Win32ApiModule:
     module = import_module("win32api")
     if not isinstance(module, Win32ApiModule):
@@ -259,12 +279,116 @@ _GW_OWNER = 4
 _GW_ENABLEDPOPUP = 6
 _GA_ROOTOWNER = 3
 _GWL_STYLE = -16
+_WS_SYSMENU = 0x0008_0000
 _WM_CLOSE = 0x0010
 _DM_GETDEFID = 0x0400
 _DC_HASDEFID = 0x534B
+_BM_CLICK = 0x00F5
 _SMTO_ABORTIFHUNG = 0x0002
 _SMTO_ERRORONEXIT = 0x0020
 _MESSAGE_TIMEOUT_MILLISECONDS = 25
+_ACTION_MESSAGE_TIMEOUT_MILLISECONDS = 1_000
+
+
+def _dialog_control_role(class_name: str) -> str:
+    normalized = class_name.casefold()
+    if normalized == "button":
+        return "button"
+    if normalized in {"static", "text"}:
+        return "label"
+    if normalized == "edit":
+        return "text_input"
+    if normalized == "combobox":
+        return "combo_box"
+    if normalized == "listbox":
+        return "list"
+    if normalized == "systabcontrol32":
+        return "tab_list"
+    return "custom"
+
+
+def _dialog_control_accelerator(title: str) -> str | None:
+    match = re.search(r"&([A-Za-z0-9])", title)
+    if match is None:
+        match = re.search(r"\(([A-Za-z0-9])\)\s*$", title)
+    return match.group(1).upper() if match is not None else None
+
+
+def _public_dialog_control(
+    control: DialogControlState,
+    default_button_id: int | None,
+) -> HancomDialogControlState:
+    role = _dialog_control_role(control.class_name)
+    return HancomDialogControlState(
+        window_handle=control.window_handle,
+        title=control.title,
+        class_name=control.class_name,
+        control_id=control.control_id,
+        style=control.style,
+        visible=control.visible,
+        enabled=control.enabled,
+        role=role,
+        actionable=(
+            role == "button"
+            and control.control_id >= 0
+            and control.visible
+            and control.enabled
+        ),
+        default=(
+            default_button_id is not None and control.control_id == default_button_id
+        ),
+        accelerator=_dialog_control_accelerator(control.title),
+    )
+
+
+def _public_uia_control(
+    dialog_window_handle: int,
+    control: UiAutomationControlState,
+) -> HancomDialogControlState:
+    return HancomDialogControlState(
+        window_handle=dialog_window_handle,
+        title=control.title,
+        class_name=control.class_name,
+        control_id=control.control_id,
+        style=0,
+        visible=control.visible,
+        enabled=control.enabled,
+        source="uia",
+        automation_id=control.automation_id or None,
+        control_type=control.control_type,
+        focused=control.focused,
+        role=_dialog_control_role(control.control_type),
+        actionable=control.actionable,
+        default=control.focused and control.actionable,
+        accelerator=control.accelerator or _dialog_control_accelerator(control.title),
+    )
+
+
+def _window_close_control(
+    dialog_window_handle: int,
+    *,
+    visible: bool,
+    enabled: bool,
+) -> HancomDialogControlState:
+    return HancomDialogControlState(
+        window_handle=dialog_window_handle,
+        title="window_close",
+        class_name="title_bar",
+        control_id=-1,
+        style=0,
+        visible=visible,
+        enabled=enabled,
+        source="window",
+        automation_id="SC_CLOSE",
+        control_type="WindowClose",
+        focused=False,
+        role="window_close",
+        actionable=visible and enabled,
+        default=False,
+        accelerator=None,
+    )
+
+
 _SYNCHRONIZE = 0x0010_0000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _WAIT_OBJECT_0 = 0
@@ -903,14 +1027,16 @@ def stalled_hwp_call_diagnostic(
 
 @final
 class Win32WindowStateReader:
-    __slots__ = ("_gui", "_process")
+    __slots__ = ("_gui", "_process", "_uia")
 
     _gui: Win32GuiModule
     _process: Win32ProcessModule
+    _uia: UiAutomationReader
 
     def __init__(self) -> None:
         self._gui = _load_gui()
         self._process = _load_process()
+        self._uia = _load_uia()
 
     def _dialog(
         self,
@@ -1320,6 +1446,179 @@ class Win32WindowStateReader:
         return HancomWindowStateList(
             windows=tuple(self.read(handle) for handle in sorted(set(handles)))
         )
+
+    def inspect_dialog(self, dialog_window_handle: int) -> HancomPopupStructure:
+        try:
+            if not self._gui.IsWindow(dialog_window_handle):
+                raise ValueError(
+                    f"dialog window does not exist: {dialog_window_handle}"
+                )
+            _, process_id = self._process.GetWindowThreadProcessId(dialog_window_handle)
+            owner_handle = self._gui.GetWindow(dialog_window_handle, _GW_OWNER)
+            root_owner_handle = self._gui.GetAncestor(
+                dialog_window_handle,
+                _GA_ROOTOWNER,
+            )
+            class_name = self._gui.GetClassName(dialog_window_handle)
+            controls, controls_complete = self._dialog_controls(dialog_window_handle)
+            default_button_id, default_complete = self._default_button_id(
+                dialog_window_handle,
+                class_name,
+            )
+            public_controls = tuple(
+                _public_dialog_control(control, default_button_id)
+                for control in controls
+            )
+            if not public_controls and class_name.startswith("HwndWrapper[Hwp.exe;"):
+                public_controls = tuple(
+                    _public_uia_control(dialog_window_handle, control)
+                    for control in self._uia.inspect(dialog_window_handle)
+                )
+                default_button_id = next(
+                    (
+                        control.control_id
+                        for control in public_controls
+                        if control.default
+                    ),
+                    None,
+                )
+            if (
+                not any(control.actionable for control in public_controls)
+                and self._gui.GetWindowLong(dialog_window_handle, _GWL_STYLE)
+                & _WS_SYSMENU
+            ):
+                public_controls += (
+                    _window_close_control(
+                        dialog_window_handle,
+                        visible=self._gui.IsWindowVisible(dialog_window_handle),
+                        enabled=self._gui.IsWindowEnabled(dialog_window_handle),
+                    ),
+                )
+            return HancomPopupStructure(
+                window_handle=dialog_window_handle,
+                process_id=process_id,
+                owner_handle=owner_handle,
+                root_owner_handle=root_owner_handle,
+                title=self._gui.GetWindowText(dialog_window_handle),
+                class_name=class_name,
+                visible=self._gui.IsWindowVisible(dialog_window_handle),
+                enabled=self._gui.IsWindowEnabled(dialog_window_handle),
+                controls=public_controls,
+                default_button_id=default_button_id,
+                structure_complete=controls_complete and default_complete,
+            )
+        except _WINDOW_ERROR as error:
+            raise HwpLiveError("한컴 팝업 구조를 읽을 수 없습니다") from error
+
+    def invoke_dialog_action(
+        self,
+        dialog_window_handle: int,
+        control_id: int,
+    ) -> HancomDialogActionResult:
+        before = self.inspect_dialog(dialog_window_handle)
+        matches = tuple(
+            control for control in before.controls if control.control_id == control_id
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                f"dialog action requires exactly one requested control_id; found {len(matches)}"
+            )
+        selected = matches[0]
+        if not selected.actionable:
+            raise ValueError(f"control_id {control_id} is not an actionable control")
+        if selected.source == "window":
+            if (
+                not self._gui.IsWindow(dialog_window_handle)
+                or not self._gui.IsWindowVisible(dialog_window_handle)
+                or not self._gui.IsWindowEnabled(dialog_window_handle)
+                or not self._gui.GetWindowLong(dialog_window_handle, _GWL_STYLE)
+                & _WS_SYSMENU
+            ):
+                raise ValueError(
+                    "dialog title-bar close action changed before delivery"
+                )
+            delivered, _ = self._gui.SendMessageTimeout(
+                dialog_window_handle,
+                _WM_CLOSE,
+                0,
+                0,
+                _SMTO_ABORTIFHUNG | _SMTO_ERRORONEXIT,
+                _ACTION_MESSAGE_TIMEOUT_MILLISECONDS,
+            )
+            dialog_present_after = self._gui.IsWindow(dialog_window_handle)
+            after = (
+                self.inspect_dialog(dialog_window_handle)
+                if dialog_present_after
+                else None
+            )
+            return HancomDialogActionResult(
+                before=before,
+                selected_control=selected,
+                message_delivered=bool(delivered),
+                dialog_present_after=dialog_present_after,
+                after=after,
+            )
+        if selected.source == "uia":
+            current = self.inspect_dialog(dialog_window_handle)
+            current_matches = tuple(
+                control
+                for control in current.controls
+                if control.control_id == control_id
+            )
+            if len(current_matches) != 1 or current_matches[0] != selected:
+                raise ValueError(
+                    "dialog or selected UI Automation control changed before action delivery"
+                )
+            delivered = self._uia.invoke(dialog_window_handle, selected)
+            dialog_present_after = self._gui.IsWindow(dialog_window_handle)
+            after = (
+                self.inspect_dialog(dialog_window_handle)
+                if dialog_present_after
+                else None
+            )
+            return HancomDialogActionResult(
+                before=before,
+                selected_control=selected,
+                message_delivered=delivered,
+                dialog_present_after=dialog_present_after,
+                after=after,
+            )
+        try:
+            if (
+                not self._gui.IsWindow(dialog_window_handle)
+                or not self._gui.IsWindow(selected.window_handle)
+                or self._gui.GetDlgCtrlID(selected.window_handle) != control_id
+                or self._gui.GetClassName(selected.window_handle) != selected.class_name
+                or self._gui.GetWindowText(selected.window_handle) != selected.title
+                or not self._gui.IsWindowVisible(selected.window_handle)
+                or not self._gui.IsWindowEnabled(selected.window_handle)
+            ):
+                raise ValueError(
+                    "dialog or selected control changed before action delivery"
+                )
+            delivered, _ = self._gui.SendMessageTimeout(
+                selected.window_handle,
+                _BM_CLICK,
+                0,
+                0,
+                _SMTO_ABORTIFHUNG | _SMTO_ERRORONEXIT,
+                _ACTION_MESSAGE_TIMEOUT_MILLISECONDS,
+            )
+            dialog_present_after = self._gui.IsWindow(dialog_window_handle)
+            after = (
+                self.inspect_dialog(dialog_window_handle)
+                if dialog_present_after
+                else None
+            )
+            return HancomDialogActionResult(
+                before=before,
+                selected_control=selected,
+                message_delivered=bool(delivered),
+                dialog_present_after=dialog_present_after,
+                after=after,
+            )
+        except _WINDOW_ERROR as error:
+            raise HwpLiveError("한컴 팝업 버튼을 실행할 수 없습니다") from error
 
     def dismiss_dialogs(self, window_handle: int) -> HancomDialogDismissResult:
         before = self.read(window_handle)

@@ -204,7 +204,16 @@ _TOPOLOGY_PRESERVING_PARAMETER_ACTIONS: Final = frozenset(
     }
 )
 _TOPOLOGY_PRESERVING_RUN_ACTIONS: Final = frozenset(
-    {"TableVAlignTop", "TableVAlignCenter", "TableVAlignBottom"}
+    {
+        "TableVAlignTop",
+        "TableVAlignCenter",
+        "TableVAlignBottom",
+        "TableCellBlock",
+        "TableCellBlockExtend",
+        "TableRightCell",
+        "TableLowerCell",
+        "Cancel",
+    }
 )
 
 
@@ -335,16 +344,19 @@ def _table_format_groups(
                 )
             )
     cell_commands = cell_format_commands(formatted.formatting)
-    geometry_commands = tuple(
-        command for command in cell_commands if _invalidates_cell_topology(command)
-    )
     if cell_commands:
-        # Only a topology-certified range may move geometry out of the legacy
-        # per-cell sequence. Single-cell and complex-region fallbacks retain
-        # the exact command order and result semantics.
-        if not geometry_commands or not plan.cell_geometry_targets:
+        # A cell block is required for CharShape/ParagraphShape to change the
+        # existing text rather than only the next-input state. A topology-
+        # certified rectangle can apply the complete cell format once; complex
+        # regions keep one explicitly selected block per physical cell.
+        if not plan.cell_geometry_targets:
             for index, cell in enumerate(cells):
-                commands = (CellCommand(cell), *cell_commands)
+                commands = (
+                    CellCommand(cell),
+                    RunCommand("TableCellBlock"),
+                    *cell_commands,
+                    RunCommand("Cancel"),
+                )
                 groups.append(
                     NativeFormatCommandGroup(
                         key=f"cell:{index}:{cell}",
@@ -355,29 +367,12 @@ def _table_format_groups(
                     )
                 )
         else:
-            regular_cell_commands = tuple(
-                command
-                for command in cell_commands
-                if not _invalidates_cell_topology(command)
-            )
-            if regular_cell_commands:
-                for index, cell in enumerate(cells):
-                    commands = (CellCommand(cell), *regular_cell_commands)
-                    groups.append(
-                        NativeFormatCommandGroup(
-                            key=f"cell:{index}:{cell}",
-                            kind="cell_format",
-                            addresses=(cell,),
-                            commands=commands,
-                            readback_cost=_format_readback_cost(commands),
-                        )
-                    )
             for target in plan.cell_geometry_targets:
-                commands = _cell_range_commands(target, geometry_commands)
+                commands = _cell_range_commands(target, cell_commands)
                 groups.append(
                     NativeFormatCommandGroup(
                         key=target.key,
-                        kind="cell_geometry",
+                        kind="cell_format",
                         addresses=target.addresses,
                         commands=commands,
                         readback_cost=_format_readback_cost(commands),

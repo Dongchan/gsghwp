@@ -27,6 +27,12 @@ struct ParameterArrayInterface : IDispatch {
     virtual HRESULT STDMETHODCALLTYPE PutItem(LONG index, VARIANT value) = 0;
 };
 
+struct DispatchPropertyInterface : IDispatch {
+    virtual HRESULT STDMETHODCALLTYPE Slot7() = 0;
+    virtual HRESULT STDMETHODCALLTYPE Slot8() = 0;
+    virtual HRESULT STDMETHODCALLTYPE HAction(IDispatch** value) = 0;
+};
+
 template<typename Interface>
 class OfficialDispatch : public Interface {
 public:
@@ -145,6 +151,29 @@ public:
 };
 
 }
+
+class FakeVirtualPropertyGetDispatch final
+    : public fake_parameter_array::OfficialDispatch<
+          fake_parameter_array::DispatchPropertyInterface> {
+public:
+    FakeVirtualPropertyGetDispatch()
+        : OfficialDispatch(
+              L"HAction",
+              5,
+              9U,
+              FakeVirtualTypeInfo::Signature::GetDispatchProperty) {}
+
+    HRESULT STDMETHODCALLTYPE Slot7() override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Slot8() override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE HAction(IDispatch** const value) override {
+        if (value == nullptr) {
+            return E_POINTER;
+        }
+        *value = this;
+        static_cast<void>(AddRef());
+        return S_OK;
+    }
+};
 
 class FakeParameterArrayDispatch final
     : public fake_parameter_array::OfficialDispatch<

@@ -1,0 +1,2954 @@
+{
+  "$id": "gsg.hwp.page-plan-compile.v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "request": {
+    "$defs": {
+      "G01Observation": {
+        "additionalProperties": false,
+        "properties": {
+          "body_box": {
+            "$ref": "#/$defs/MmBox"
+          },
+          "body_geometry_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Body Geometry Hash",
+            "type": "string"
+          },
+          "convention_profile_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Convention Profile Hash",
+            "type": "string"
+          },
+          "document_revision_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Document Revision Hash",
+            "type": "string"
+          },
+          "page_setup": {
+            "$ref": "#/$defs/PageSetup"
+          },
+          "page_setup_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Page Setup Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_revision_hash",
+          "page_setup_hash",
+          "convention_profile_hash",
+          "body_geometry_hash",
+          "page_setup",
+          "body_box"
+        ],
+        "title": "G01Observation",
+        "type": "object"
+      },
+      "G03BlockBoxMapping": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_region_id": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Analysis Region Id",
+            "type": "string"
+          },
+          "block_id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+            "title": "Block Id",
+            "type": "string"
+          },
+          "box": {
+            "$ref": "#/$defs/NormalizedBox"
+          },
+          "page": {
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Slot Id"
+          }
+        },
+        "required": [
+          "page",
+          "block_id",
+          "analysis_region_id",
+          "box"
+        ],
+        "title": "G03BlockBoxMapping",
+        "type": "object"
+      },
+      "G03GroundingProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "body_geometry_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Body Geometry Hash",
+            "type": "string"
+          },
+          "convention_profile_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Convention Profile Hash",
+            "type": "string"
+          },
+          "document_revision_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Document Revision Hash",
+            "type": "string"
+          },
+          "document_selector": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Document Selector",
+            "type": "string"
+          },
+          "page_setup_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Page Setup Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_selector",
+          "document_revision_hash",
+          "page_setup_hash",
+          "convention_profile_hash",
+          "body_geometry_hash"
+        ],
+        "title": "G03GroundingProvenance",
+        "type": "object"
+      },
+      "G03GuideMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "bottom_px": {
+            "minimum": 1,
+            "title": "Bottom Px",
+            "type": "integer"
+          },
+          "image_height_px": {
+            "minimum": 2,
+            "title": "Image Height Px",
+            "type": "integer"
+          },
+          "image_width_px": {
+            "minimum": 2,
+            "title": "Image Width Px",
+            "type": "integer"
+          },
+          "left_px": {
+            "minimum": 0,
+            "title": "Left Px",
+            "type": "integer"
+          },
+          "page": {
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "right_px": {
+            "minimum": 1,
+            "title": "Right Px",
+            "type": "integer"
+          },
+          "source_body_geometry_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Body Geometry Hash",
+            "type": "string"
+          },
+          "thickness_px": {
+            "maximum": 64,
+            "minimum": 1,
+            "title": "Thickness Px",
+            "type": "integer"
+          },
+          "top_px": {
+            "minimum": 0,
+            "title": "Top Px",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "page",
+          "image_width_px",
+          "image_height_px",
+          "left_px",
+          "top_px",
+          "right_px",
+          "bottom_px",
+          "thickness_px",
+          "source_body_geometry_hash"
+        ],
+        "title": "G03GuideMetadata",
+        "type": "object"
+      },
+      "G03MappingInput": {
+        "additionalProperties": false,
+        "properties": {
+          "block_box_mapping": {
+            "items": {
+              "$ref": "#/$defs/G03BlockBoxMapping"
+            },
+            "maxItems": 1000,
+            "title": "Block Box Mapping",
+            "type": "array"
+          },
+          "mapping_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Mapping Sha256",
+            "type": "string"
+          },
+          "method": {
+            "const": "explicit_analysis_region",
+            "default": "explicit_analysis_region",
+            "title": "Method",
+            "type": "string"
+          },
+          "producer": {
+            "const": "host_recorded",
+            "default": "host_recorded",
+            "title": "Producer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "block_box_mapping",
+          "mapping_sha256"
+        ],
+        "title": "G03MappingInput",
+        "type": "object"
+      },
+      "G03ReferencePage": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_id": {
+            "anyOf": [
+              {
+                "pattern": "^ria-[0-9a-f]{16}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Analysis Id"
+          },
+          "clean_image_path": {
+            "format": "path",
+            "title": "Clean Image Path",
+            "type": "string"
+          },
+          "clean_image_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Clean Image Sha256",
+            "type": "string"
+          },
+          "expected_analysis_result_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expected Analysis Result Sha256"
+          },
+          "guide": {
+            "$ref": "#/$defs/G03GuideMetadata"
+          },
+          "page": {
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "page",
+          "clean_image_path",
+          "clean_image_sha256",
+          "guide"
+        ],
+        "title": "G03ReferencePage",
+        "type": "object"
+      },
+      "GeneratedG03Request": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_root": {
+            "anyOf": [
+              {
+                "format": "path",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Artifact Root"
+          },
+          "branch": {
+            "enum": [
+              "generated",
+              "reference_image"
+            ],
+            "title": "Branch",
+            "type": "string"
+          },
+          "candidate": {
+            "enum": [
+              "A",
+              "B"
+            ],
+            "title": "Candidate",
+            "type": "string"
+          },
+          "grounding": {
+            "$ref": "#/$defs/G03GroundingProvenance"
+          },
+          "mapping": {
+            "$ref": "#/$defs/G03MappingInput"
+          },
+          "page_plan_template": {
+            "$ref": "#/$defs/PagePlan"
+          },
+          "reference_pages": {
+            "items": {
+              "$ref": "#/$defs/G03ReferencePage"
+            },
+            "maxItems": 2,
+            "title": "Reference Pages",
+            "type": "array"
+          },
+          "schema": {
+            "const": "gsg.hwp.page-plan-compile.v1",
+            "default": "gsg.hwp.page-plan-compile.v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "source_registry": {
+            "$ref": "#/$defs/SourceRegistry"
+          }
+        },
+        "required": [
+          "branch",
+          "candidate",
+          "page_plan_template",
+          "source_registry",
+          "grounding",
+          "reference_pages",
+          "mapping"
+        ],
+        "title": "GeneratedG03Request",
+        "type": "object"
+      },
+      "ImageAssetRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "byte_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Byte Sha256",
+            "type": "string"
+          },
+          "final_insertable": {
+            "title": "Final Insertable",
+            "type": "boolean"
+          },
+          "kind": {
+            "const": "image",
+            "title": "Kind",
+            "type": "string"
+          },
+          "mime_type": {
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "image/gif",
+              "image/webp",
+              "image/bmp"
+            ],
+            "title": "Mime Type",
+            "type": "string"
+          },
+          "path": {
+            "format": "path",
+            "title": "Path",
+            "type": "string"
+          },
+          "pptx_member": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Pptx Member"
+          },
+          "quality": {
+            "enum": [
+              "original",
+              "capture_only",
+              "generated_preview"
+            ],
+            "title": "Quality",
+            "type": "string"
+          },
+          "source_kind": {
+            "enum": [
+              "ppt_media",
+              "original_file",
+              "capture_crop",
+              "generated_preview"
+            ],
+            "title": "Source Kind",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "source_ref",
+          "path",
+          "source_kind",
+          "quality",
+          "final_insertable",
+          "mime_type",
+          "byte_sha256"
+        ],
+        "title": "ImageAssetRecord",
+        "type": "object"
+      },
+      "ImagePlanBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "block_id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+            "title": "Block Id",
+            "type": "string"
+          },
+          "box": {
+            "$ref": "#/$defs/MmBox"
+          },
+          "caption_content_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caption Content Sha256"
+          },
+          "caption_source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caption Source Ref"
+          },
+          "fit": {
+            "const": "contain",
+            "default": "contain",
+            "title": "Fit",
+            "type": "string"
+          },
+          "kind": {
+            "const": "image",
+            "title": "Kind",
+            "type": "string"
+          },
+          "semantic_role": {
+            "const": "figure",
+            "default": "figure",
+            "title": "Semantic Role",
+            "type": "string"
+          },
+          "slot_id": {
+            "minimum": 1,
+            "title": "Slot Id",
+            "type": "integer"
+          },
+          "style_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Style Role"
+          }
+        },
+        "required": [
+          "kind",
+          "block_id",
+          "slot_id",
+          "box"
+        ],
+        "title": "ImagePlanBlock",
+        "type": "object"
+      },
+      "MmBox": {
+        "additionalProperties": false,
+        "properties": {
+          "height_mm": {
+            "exclusiveMinimum": 0,
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "left_mm": {
+            "minimum": 0,
+            "title": "Left Mm",
+            "type": "number"
+          },
+          "top_mm": {
+            "minimum": 0,
+            "title": "Top Mm",
+            "type": "number"
+          },
+          "width_mm": {
+            "exclusiveMinimum": 0,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "left_mm",
+          "top_mm",
+          "width_mm",
+          "height_mm"
+        ],
+        "title": "MmBox",
+        "type": "object"
+      },
+      "NormalizedBox": {
+        "additionalProperties": false,
+        "properties": {
+          "bottom": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Bottom",
+            "type": "number"
+          },
+          "left": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Left",
+            "type": "number"
+          },
+          "right": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Right",
+            "type": "number"
+          },
+          "top": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Top",
+            "type": "number"
+          }
+        },
+        "required": [
+          "left",
+          "top",
+          "right",
+          "bottom"
+        ],
+        "title": "NormalizedBox",
+        "type": "object"
+      },
+      "ObservedWidthLabel": {
+        "additionalProperties": false,
+        "properties": {
+          "body_fraction": {
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "title": "Body Fraction",
+            "type": "number"
+          },
+          "body_width_mm": {
+            "exclusiveMinimum": 0,
+            "title": "Body Width Mm",
+            "type": "number"
+          },
+          "page": {
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "slot_id": {
+            "minimum": 1,
+            "title": "Slot Id",
+            "type": "integer"
+          },
+          "width_mm": {
+            "exclusiveMinimum": 0,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "page",
+          "slot_id",
+          "width_mm",
+          "body_width_mm",
+          "body_fraction"
+        ],
+        "title": "ObservedWidthLabel",
+        "type": "object"
+      },
+      "PageBreakPlanBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "block_id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+            "title": "Block Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "page_break",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "block_id"
+        ],
+        "title": "PageBreakPlanBlock",
+        "type": "object"
+      },
+      "PagePlan": {
+        "additionalProperties": false,
+        "properties": {
+          "_compiler_meta": {
+            "$ref": "#/$defs/PagePlanCompilerMeta"
+          },
+          "candidate": {
+            "enum": [
+              "A",
+              "B"
+            ],
+            "title": "Candidate",
+            "type": "string"
+          },
+          "g01_observation": {
+            "$ref": "#/$defs/G01Observation"
+          },
+          "observed_width_labels": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ObservedWidthLabel"
+            },
+            "title": "Observed Width Labels",
+            "type": "array"
+          },
+          "pages": {
+            "items": {
+              "$ref": "#/$defs/PagePlanPage"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "title": "Pages",
+            "type": "array"
+          },
+          "preview_count": {
+            "maximum": 2,
+            "minimum": 1,
+            "title": "Preview Count",
+            "type": "integer"
+          },
+          "schema": {
+            "const": "gsg.hwp.page-plan.v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "slot_map": {
+            "$ref": "#/$defs/SlotMap"
+          },
+          "source_manifest_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Manifest Sha256",
+            "type": "string"
+          },
+          "style_roles_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Style Roles Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema",
+          "candidate",
+          "pages",
+          "preview_count",
+          "source_manifest_sha256",
+          "style_roles_sha256",
+          "slot_map",
+          "g01_observation",
+          "_compiler_meta"
+        ],
+        "title": "PagePlan",
+        "type": "object"
+      },
+      "PagePlanCompilerMeta": {
+        "additionalProperties": false,
+        "properties": {
+          "block_count": {
+            "minimum": 1,
+            "title": "Block Count",
+            "type": "integer"
+          },
+          "canonical_plan_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Canonical Plan Sha256",
+            "type": "string"
+          },
+          "figure_slot_count": {
+            "minimum": 0,
+            "title": "Figure Slot Count",
+            "type": "integer"
+          },
+          "figure_slot_order": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Figure Slot Order",
+            "type": "array"
+          },
+          "g01_body_geometry_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "G01 Body Geometry Hash",
+            "type": "string"
+          },
+          "g01_convention_profile_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "G01 Convention Profile Hash",
+            "type": "string"
+          },
+          "g01_document_revision_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "G01 Document Revision Hash",
+            "type": "string"
+          },
+          "g01_page_setup_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "G01 Page Setup Hash",
+            "type": "string"
+          },
+          "ordered_source_refs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ordered Source Refs",
+            "type": "array"
+          },
+          "page_count": {
+            "maximum": 2,
+            "minimum": 1,
+            "title": "Page Count",
+            "type": "integer"
+          },
+          "source_manifest_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Manifest Sha256",
+            "type": "string"
+          },
+          "style_roles_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Style Roles Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "canonical_plan_sha256",
+          "source_manifest_sha256",
+          "style_roles_sha256",
+          "ordered_source_refs",
+          "figure_slot_order",
+          "figure_slot_count",
+          "page_count",
+          "block_count",
+          "g01_document_revision_hash",
+          "g01_page_setup_hash",
+          "g01_convention_profile_hash",
+          "g01_body_geometry_hash"
+        ],
+        "title": "PagePlanCompilerMeta",
+        "type": "object"
+      },
+      "PagePlanPage": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "image": "#/$defs/ImagePlanBlock",
+                  "page_break": "#/$defs/PageBreakPlanBlock",
+                  "paragraph": "#/$defs/ParagraphPlanBlock",
+                  "table": "#/$defs/TablePlanBlock"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/ParagraphPlanBlock"
+                },
+                {
+                  "$ref": "#/$defs/TablePlanBlock"
+                },
+                {
+                  "$ref": "#/$defs/ImagePlanBlock"
+                },
+                {
+                  "$ref": "#/$defs/PageBreakPlanBlock"
+                }
+              ]
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Blocks",
+            "type": "array"
+          },
+          "body_box": {
+            "$ref": "#/$defs/MmBox"
+          },
+          "page": {
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_setup": {
+            "$ref": "#/$defs/PageSetup"
+          }
+        },
+        "required": [
+          "page",
+          "page_setup",
+          "body_box",
+          "blocks"
+        ],
+        "title": "PagePlanPage",
+        "type": "object"
+      },
+      "PageSetup": {
+        "additionalProperties": false,
+        "properties": {
+          "bottom_margin_mm": {
+            "title": "Bottom Margin Mm",
+            "type": "number"
+          },
+          "footer_mm": {
+            "default": 0,
+            "title": "Footer Mm",
+            "type": "number"
+          },
+          "gutter_mm": {
+            "default": 0,
+            "title": "Gutter Mm",
+            "type": "number"
+          },
+          "gutter_type": {
+            "default": 0,
+            "maximum": 2,
+            "minimum": 0,
+            "title": "Gutter Type",
+            "type": "integer"
+          },
+          "header_mm": {
+            "default": 0,
+            "title": "Header Mm",
+            "type": "number"
+          },
+          "landscape": {
+            "title": "Landscape",
+            "type": "integer"
+          },
+          "left_margin_mm": {
+            "title": "Left Margin Mm",
+            "type": "number"
+          },
+          "paper_height_mm": {
+            "title": "Paper Height Mm",
+            "type": "number"
+          },
+          "paper_width_mm": {
+            "title": "Paper Width Mm",
+            "type": "number"
+          },
+          "right_margin_mm": {
+            "title": "Right Margin Mm",
+            "type": "number"
+          },
+          "top_margin_mm": {
+            "title": "Top Margin Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "paper_width_mm",
+          "paper_height_mm",
+          "landscape",
+          "top_margin_mm",
+          "bottom_margin_mm",
+          "left_margin_mm",
+          "right_margin_mm"
+        ],
+        "title": "PageSetup",
+        "type": "object"
+      },
+      "ParagraphPlanBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "block_id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+            "title": "Block Id",
+            "type": "string"
+          },
+          "box": {
+            "$ref": "#/$defs/MmBox"
+          },
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "kind": {
+            "const": "paragraph",
+            "title": "Kind",
+            "type": "string"
+          },
+          "semantic_role": {
+            "enum": [
+              "body",
+              "heading",
+              "caption",
+              "table_title"
+            ],
+            "title": "Semantic Role",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "style_role": {
+            "title": "Style Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "block_id",
+          "semantic_role",
+          "source_ref",
+          "content_sha256",
+          "style_role",
+          "box"
+        ],
+        "title": "ParagraphPlanBlock",
+        "type": "object"
+      },
+      "Slot": {
+        "additionalProperties": false,
+        "properties": {
+          "asset_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Asset Sha256"
+          },
+          "final_insertable": {
+            "default": true,
+            "title": "Final Insertable",
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "image",
+              "text",
+              "table"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "quality": {
+            "anyOf": [
+              {
+                "enum": [
+                  "original",
+                  "capture_only"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Quality"
+          },
+          "slot_id": {
+            "minimum": 1,
+            "title": "Slot Id",
+            "type": "integer"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source"
+          },
+          "source_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "ppt_media",
+                  "original_file",
+                  "capture_crop"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source Kind"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source Ref"
+          }
+        },
+        "required": [
+          "slot_id",
+          "kind"
+        ],
+        "title": "Slot",
+        "type": "object"
+      },
+      "SlotMap": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "enum": [
+              "A",
+              "B"
+            ],
+            "title": "Candidate",
+            "type": "string"
+          },
+          "schema": {
+            "const": "gsg.hwp.imageplan-slot-map.v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "slot_count": {
+            "minimum": 1,
+            "title": "Slot Count",
+            "type": "integer"
+          },
+          "slot_map_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Slot Map Sha256",
+            "type": "string"
+          },
+          "slot_order": {
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 1,
+            "title": "Slot Order",
+            "type": "array"
+          },
+          "slot_order_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Slot Order Sha256",
+            "type": "string"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/$defs/Slot"
+            },
+            "maxItems": 10000,
+            "minItems": 1,
+            "title": "Slots",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema",
+          "candidate",
+          "slots",
+          "slot_count",
+          "slot_order",
+          "slot_order_sha256",
+          "slot_map_sha256"
+        ],
+        "title": "SlotMap",
+        "type": "object"
+      },
+      "SourceRegistry": {
+        "additionalProperties": false,
+        "properties": {
+          "convention_profile_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Convention Profile Hash",
+            "type": "string"
+          },
+          "manifest_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Manifest Sha256",
+            "type": "string"
+          },
+          "schema": {
+            "const": "gsg.hwp.source-registry.v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "image": "#/$defs/ImageAssetRecord",
+                  "table": "#/$defs/TableSourceRecord",
+                  "text": "#/$defs/TextSourceRecord"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/TextSourceRecord"
+                },
+                {
+                  "$ref": "#/$defs/TableSourceRecord"
+                },
+                {
+                  "$ref": "#/$defs/ImageAssetRecord"
+                }
+              ]
+            },
+            "maxItems": 10000,
+            "minItems": 1,
+            "title": "Sources",
+            "type": "array"
+          },
+          "style_roles": {
+            "items": {
+              "$ref": "#/$defs/StyleRole"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "title": "Style Roles",
+            "type": "array"
+          },
+          "style_roles_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Style Roles Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema",
+          "sources",
+          "style_roles",
+          "style_roles_sha256",
+          "convention_profile_hash",
+          "manifest_sha256"
+        ],
+        "title": "SourceRegistry",
+        "type": "object"
+      },
+      "StructuredG03Request": {
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "const": "structured",
+            "title": "Branch",
+            "type": "string"
+          },
+          "candidate": {
+            "enum": [
+              "A",
+              "B"
+            ],
+            "title": "Candidate",
+            "type": "string"
+          },
+          "grounding": {
+            "$ref": "#/$defs/G03GroundingProvenance"
+          },
+          "page_plan": {
+            "$ref": "#/$defs/PagePlan"
+          },
+          "schema": {
+            "const": "gsg.hwp.page-plan-compile.v1",
+            "default": "gsg.hwp.page-plan-compile.v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "source_registry": {
+            "$ref": "#/$defs/SourceRegistry"
+          }
+        },
+        "required": [
+          "branch",
+          "candidate",
+          "page_plan",
+          "source_registry",
+          "grounding"
+        ],
+        "title": "StructuredG03Request",
+        "type": "object"
+      },
+      "StyleRole": {
+        "additionalProperties": false,
+        "properties": {
+          "align": {
+            "enum": [
+              "left",
+              "center",
+              "right",
+              "justify"
+            ],
+            "title": "Align",
+            "type": "string"
+          },
+          "bold": {
+            "default": false,
+            "title": "Bold",
+            "type": "boolean"
+          },
+          "border_hex": {
+            "anyOf": [
+              {
+                "pattern": "^#[0-9A-Fa-f]{6}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Border Hex"
+          },
+          "color_hex": {
+            "pattern": "^#[0-9A-Fa-f]{6}$",
+            "title": "Color Hex",
+            "type": "string"
+          },
+          "fill_hex": {
+            "anyOf": [
+              {
+                "pattern": "^#[0-9A-Fa-f]{6}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fill Hex"
+          },
+          "font_family": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Font Family",
+            "type": "string"
+          },
+          "font_size_pt": {
+            "exclusiveMinimum": 0,
+            "maximum": 96,
+            "title": "Font Size Pt",
+            "type": "number"
+          },
+          "line_height_percent": {
+            "exclusiveMinimum": 50,
+            "maximum": 500,
+            "title": "Line Height Percent",
+            "type": "number"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "font_family",
+          "font_size_pt",
+          "color_hex",
+          "line_height_percent",
+          "align"
+        ],
+        "title": "StyleRole",
+        "type": "object"
+      },
+      "TablePlanBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "block_id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+            "title": "Block Id",
+            "type": "string"
+          },
+          "box": {
+            "$ref": "#/$defs/MmBox"
+          },
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "kind": {
+            "const": "table",
+            "title": "Kind",
+            "type": "string"
+          },
+          "semantic_role": {
+            "enum": [
+              "table",
+              "table_title"
+            ],
+            "title": "Semantic Role",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "style_role": {
+            "title": "Style Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "block_id",
+          "semantic_role",
+          "source_ref",
+          "content_sha256",
+          "style_role",
+          "box"
+        ],
+        "title": "TablePlanBlock",
+        "type": "object"
+      },
+      "TableSourceRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "kind": {
+            "const": "table",
+            "title": "Kind",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "maxItems": 500,
+            "minItems": 1,
+            "title": "Rows",
+            "type": "array"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "source_ref",
+          "rows",
+          "content_sha256"
+        ],
+        "title": "TableSourceRecord",
+        "type": "object"
+      },
+      "TextSourceRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "maxLength": 100000,
+            "title": "Content",
+            "type": "string"
+          },
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "kind": {
+            "const": "text",
+            "title": "Kind",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "source_ref",
+          "content",
+          "content_sha256"
+        ],
+        "title": "TextSourceRecord",
+        "type": "object"
+      }
+    },
+    "discriminator": {
+      "mapping": {
+        "generated": "#/$defs/GeneratedG03Request",
+        "reference_image": "#/$defs/GeneratedG03Request",
+        "structured": "#/$defs/StructuredG03Request"
+      },
+      "propertyName": "branch"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/$defs/StructuredG03Request"
+      },
+      {
+        "$ref": "#/$defs/GeneratedG03Request"
+      }
+    ]
+  },
+  "response": {
+    "$defs": {
+      "G01Observation": {
+        "additionalProperties": false,
+        "properties": {
+          "body_box": {
+            "$ref": "#/$defs/MmBox"
+          },
+          "body_geometry_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Body Geometry Hash",
+            "type": "string"
+          },
+          "convention_profile_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Convention Profile Hash",
+            "type": "string"
+          },
+          "document_revision_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Document Revision Hash",
+            "type": "string"
+          },
+          "page_setup": {
+            "$ref": "#/$defs/PageSetup"
+          },
+          "page_setup_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Page Setup Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_revision_hash",
+          "page_setup_hash",
+          "convention_profile_hash",
+          "body_geometry_hash",
+          "page_setup",
+          "body_box"
+        ],
+        "title": "G01Observation",
+        "type": "object"
+      },
+      "G03Accepted": {
+        "additionalProperties": false,
+        "properties": {
+          "analyses": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/G03AnalysisReceipt"
+            },
+            "title": "Analyses",
+            "type": "array"
+          },
+          "branch": {
+            "enum": [
+              "structured",
+              "generated",
+              "reference_image"
+            ],
+            "title": "Branch",
+            "type": "string"
+          },
+          "branch_receipt": {
+            "$ref": "#/$defs/G03BranchReceipt"
+          },
+          "canonical_evidence_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Canonical Evidence Sha256",
+            "type": "string"
+          },
+          "canonical_input_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Canonical Input Sha256",
+            "type": "string"
+          },
+          "deterministic_result_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Deterministic Result Sha256",
+            "type": "string"
+          },
+          "grounding": {
+            "$ref": "#/$defs/G03GroundingProvenance"
+          },
+          "guide_masks": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/G03GuideMaskReceipt"
+            },
+            "title": "Guide Masks",
+            "type": "array"
+          },
+          "mapping_receipt": {
+            "$ref": "#/$defs/G03MappingReceipt"
+          },
+          "plan": {
+            "$ref": "#/$defs/PagePlan"
+          },
+          "response_budget_bytes": {
+            "default": 100000,
+            "minimum": 1,
+            "title": "Response Budget Bytes",
+            "type": "integer"
+          },
+          "response_size_bytes": {
+            "minimum": 0,
+            "title": "Response Size Bytes",
+            "type": "integer"
+          },
+          "schema": {
+            "const": "gsg.hwp.page-plan-compile-result.v1",
+            "default": "gsg.hwp.page-plan-compile-result.v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "snaps": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/G03SnapReceipt"
+            },
+            "title": "Snaps",
+            "type": "array"
+          },
+          "source_manifest_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Manifest Sha256",
+            "type": "string"
+          },
+          "status": {
+            "const": "compiled",
+            "default": "compiled",
+            "title": "Status",
+            "type": "string"
+          },
+          "style_roles_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Style Roles Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "branch",
+          "plan",
+          "source_manifest_sha256",
+          "style_roles_sha256",
+          "grounding",
+          "branch_receipt",
+          "mapping_receipt",
+          "canonical_input_sha256",
+          "canonical_evidence_sha256",
+          "deterministic_result_sha256",
+          "response_size_bytes"
+        ],
+        "title": "G03Accepted",
+        "type": "object"
+      },
+      "G03AnalysisReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_id": {
+            "pattern": "^ria-[0-9a-f]{16}$",
+            "title": "Analysis Id",
+            "type": "string"
+          },
+          "analysis_result_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Analysis Result Sha256",
+            "type": "string"
+          },
+          "analyzer_version": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Analyzer Version",
+            "type": "string"
+          },
+          "cache_reused": {
+            "title": "Cache Reused",
+            "type": "boolean"
+          },
+          "page": {
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "source_image_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Image Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "page",
+          "analysis_id",
+          "analyzer_version",
+          "source_image_sha256",
+          "analysis_result_sha256",
+          "cache_reused"
+        ],
+        "title": "G03AnalysisReceipt",
+        "type": "object"
+      },
+      "G03BranchReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_skipped": {
+            "title": "Analysis Skipped",
+            "type": "boolean"
+          },
+          "body_boxes_verified": {
+            "title": "Body Boxes Verified",
+            "type": "boolean"
+          },
+          "branch": {
+            "enum": [
+              "structured",
+              "generated",
+              "reference_image"
+            ],
+            "title": "Branch",
+            "type": "string"
+          },
+          "degraded_pages": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Degraded Pages",
+            "type": "array"
+          },
+          "image_analyzer_called": {
+            "title": "Image Analyzer Called",
+            "type": "boolean"
+          },
+          "snap_skipped": {
+            "title": "Snap Skipped",
+            "type": "boolean"
+          },
+          "source_refs_verified": {
+            "title": "Source Refs Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "branch",
+          "analysis_skipped",
+          "image_analyzer_called",
+          "snap_skipped",
+          "body_boxes_verified",
+          "source_refs_verified"
+        ],
+        "title": "G03BranchReceipt",
+        "type": "object"
+      },
+      "G03Error": {
+        "additionalProperties": false,
+        "properties": {
+          "actual": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JsonValue"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "analysis_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Analysis Id"
+          },
+          "block_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Block Id"
+          },
+          "box_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Box Id"
+          },
+          "code": {
+            "enum": [
+              "INVALID_BRANCH_INPUT",
+              "MISSING_G01_GROUNDING",
+              "GROUNDING_PROVENANCE_MISMATCH",
+              "REFERENCE_IMAGE_NOT_FOUND",
+              "REFERENCE_IMAGE_SHA256_MISMATCH",
+              "REFERENCE_PAGE_COUNT_MISMATCH",
+              "GUIDE_METADATA_MISMATCH",
+              "GUIDE_MASK_SOURCE_COLLISION",
+              "GUIDE_MASK_FAILED",
+              "STALE_ANALYSIS_ID",
+              "ANALYSIS_SOURCE_HASH_MISMATCH",
+              "ANALYSIS_RESULT_SEAL_MISMATCH",
+              "ANALYSIS_REGION_NOT_FOUND",
+              "ANALYSIS_REGION_BOX_MISMATCH",
+              "BODY_BOX_OVERFLOW",
+              "BOX_EXCEEDS_BODY",
+              "SLOT_COUNT_MISMATCH",
+              "MAPPING_COUNT_MISMATCH",
+              "MAPPING_HASH_MISMATCH",
+              "BLOCK_MAPPING_MISSING",
+              "BLOCK_MAPPING_DUPLICATE",
+              "BLOCK_MAPPING_ORDER_MISMATCH",
+              "SOURCE_HASH_MISMATCH",
+              "NON_FINAL_INSERTABLE_ASSET",
+              "UNSUPPORTED_LAYOUT_VOCABULARY",
+              "ANALYSIS_UNSUPPORTED",
+              "ROUND_TRIP_ERROR_EXCEEDED",
+              "RESPONSE_BUDGET_EXCEEDED",
+              "COMPILATION_FAILED"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "expected": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/JsonValue"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Page"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Slot Id"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source Ref"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "G03Error",
+        "type": "object"
+      },
+      "G03GroundingProvenance": {
+        "additionalProperties": false,
+        "properties": {
+          "body_geometry_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Body Geometry Hash",
+            "type": "string"
+          },
+          "convention_profile_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Convention Profile Hash",
+            "type": "string"
+          },
+          "document_revision_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Document Revision Hash",
+            "type": "string"
+          },
+          "document_selector": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Document Selector",
+            "type": "string"
+          },
+          "page_setup_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Page Setup Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_selector",
+          "document_revision_hash",
+          "page_setup_hash",
+          "convention_profile_hash",
+          "body_geometry_hash"
+        ],
+        "title": "G03GroundingProvenance",
+        "type": "object"
+      },
+      "G03GuideMaskReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "clean_source_preserved": {
+            "const": true,
+            "default": true,
+            "title": "Clean Source Preserved",
+            "type": "boolean"
+          },
+          "edge_coordinates_px": {
+            "maxItems": 4,
+            "minItems": 4,
+            "prefixItems": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "title": "Edge Coordinates Px",
+            "type": "array"
+          },
+          "image_height_px": {
+            "minimum": 2,
+            "title": "Image Height Px",
+            "type": "integer"
+          },
+          "image_width_px": {
+            "minimum": 2,
+            "title": "Image Width Px",
+            "type": "integer"
+          },
+          "masked_image_path": {
+            "anyOf": [
+              {
+                "format": "path",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Masked Image Path"
+          },
+          "masked_image_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Masked Image Sha256",
+            "type": "string"
+          },
+          "masked_pixel_count": {
+            "minimum": 0,
+            "title": "Masked Pixel Count",
+            "type": "integer"
+          },
+          "page": {
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "source_image_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Image Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "page",
+          "source_image_sha256",
+          "masked_image_sha256",
+          "image_width_px",
+          "image_height_px",
+          "masked_pixel_count",
+          "edge_coordinates_px"
+        ],
+        "title": "G03GuideMaskReceipt",
+        "type": "object"
+      },
+      "G03MappingReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "analysis_region_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Analysis Region Ids",
+            "type": "array"
+          },
+          "expected_block_count": {
+            "minimum": 0,
+            "title": "Expected Block Count",
+            "type": "integer"
+          },
+          "expected_image_slot_count": {
+            "minimum": 0,
+            "title": "Expected Image Slot Count",
+            "type": "integer"
+          },
+          "mapped_block_count": {
+            "minimum": 0,
+            "title": "Mapped Block Count",
+            "type": "integer"
+          },
+          "mapped_image_slot_count": {
+            "minimum": 0,
+            "title": "Mapped Image Slot Count",
+            "type": "integer"
+          },
+          "mapping_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Mapping Sha256",
+            "type": "string"
+          },
+          "method": {
+            "enum": [
+              "explicit_analysis_region",
+              "pageplan_slot_map"
+            ],
+            "title": "Method",
+            "type": "string"
+          },
+          "producer": {
+            "enum": [
+              "host_recorded",
+              "g02_pageplan"
+            ],
+            "title": "Producer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "producer",
+          "method",
+          "mapping_sha256",
+          "mapped_block_count",
+          "mapped_image_slot_count",
+          "expected_block_count",
+          "expected_image_slot_count",
+          "analysis_region_ids"
+        ],
+        "title": "G03MappingReceipt",
+        "type": "object"
+      },
+      "G03Rejected": {
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "enum": [
+              "structured",
+              "generated",
+              "reference_image"
+            ],
+            "title": "Branch",
+            "type": "string"
+          },
+          "deterministic_result_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Deterministic Result Sha256",
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/$defs/G03Error"
+          },
+          "plan": {
+            "default": null,
+            "title": "Plan",
+            "type": "null"
+          },
+          "response_budget_bytes": {
+            "default": 100000,
+            "minimum": 1,
+            "title": "Response Budget Bytes",
+            "type": "integer"
+          },
+          "response_size_bytes": {
+            "minimum": 0,
+            "title": "Response Size Bytes",
+            "type": "integer"
+          },
+          "schema": {
+            "const": "gsg.hwp.page-plan-compile-result.v1",
+            "default": "gsg.hwp.page-plan-compile-result.v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "status": {
+            "const": "rejected",
+            "default": "rejected",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "branch",
+          "error",
+          "deterministic_result_sha256",
+          "response_size_bytes"
+        ],
+        "title": "G03Rejected",
+        "type": "object"
+      },
+      "G03SnapReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "column_grid_boundaries_hwp": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 51,
+            "minItems": 2,
+            "title": "Column Grid Boundaries Hwp",
+            "type": "array"
+          },
+          "grid_interval_hwp": {
+            "minimum": 100,
+            "title": "Grid Interval Hwp",
+            "type": "integer"
+          },
+          "page": {
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "raw_column_breakpoints": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 51,
+            "minItems": 2,
+            "title": "Raw Column Breakpoints",
+            "type": "array"
+          },
+          "raw_row_breakpoints": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 51,
+            "minItems": 2,
+            "title": "Raw Row Breakpoints",
+            "type": "array"
+          },
+          "round_trip_max_error_px": {
+            "maximum": 1,
+            "minimum": 0,
+            "title": "Round Trip Max Error Px",
+            "type": "number"
+          },
+          "row_grid_boundaries_hwp": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 51,
+            "minItems": 2,
+            "title": "Row Grid Boundaries Hwp",
+            "type": "array"
+          },
+          "snapped_column_breakpoints": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 51,
+            "minItems": 2,
+            "title": "Snapped Column Breakpoints",
+            "type": "array"
+          },
+          "snapped_row_breakpoints": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 51,
+            "minItems": 2,
+            "title": "Snapped Row Breakpoints",
+            "type": "array"
+          }
+        },
+        "required": [
+          "page",
+          "raw_row_breakpoints",
+          "raw_column_breakpoints",
+          "snapped_row_breakpoints",
+          "snapped_column_breakpoints",
+          "row_grid_boundaries_hwp",
+          "column_grid_boundaries_hwp",
+          "grid_interval_hwp",
+          "round_trip_max_error_px"
+        ],
+        "title": "G03SnapReceipt",
+        "type": "object"
+      },
+      "ImagePlanBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "block_id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+            "title": "Block Id",
+            "type": "string"
+          },
+          "box": {
+            "$ref": "#/$defs/MmBox"
+          },
+          "caption_content_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caption Content Sha256"
+          },
+          "caption_source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Caption Source Ref"
+          },
+          "fit": {
+            "const": "contain",
+            "default": "contain",
+            "title": "Fit",
+            "type": "string"
+          },
+          "kind": {
+            "const": "image",
+            "title": "Kind",
+            "type": "string"
+          },
+          "semantic_role": {
+            "const": "figure",
+            "default": "figure",
+            "title": "Semantic Role",
+            "type": "string"
+          },
+          "slot_id": {
+            "minimum": 1,
+            "title": "Slot Id",
+            "type": "integer"
+          },
+          "style_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Style Role"
+          }
+        },
+        "required": [
+          "kind",
+          "block_id",
+          "slot_id",
+          "box"
+        ],
+        "title": "ImagePlanBlock",
+        "type": "object"
+      },
+      "JsonValue": {},
+      "MmBox": {
+        "additionalProperties": false,
+        "properties": {
+          "height_mm": {
+            "exclusiveMinimum": 0,
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "left_mm": {
+            "minimum": 0,
+            "title": "Left Mm",
+            "type": "number"
+          },
+          "top_mm": {
+            "minimum": 0,
+            "title": "Top Mm",
+            "type": "number"
+          },
+          "width_mm": {
+            "exclusiveMinimum": 0,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "left_mm",
+          "top_mm",
+          "width_mm",
+          "height_mm"
+        ],
+        "title": "MmBox",
+        "type": "object"
+      },
+      "ObservedWidthLabel": {
+        "additionalProperties": false,
+        "properties": {
+          "body_fraction": {
+            "exclusiveMinimum": 0,
+            "maximum": 1,
+            "title": "Body Fraction",
+            "type": "number"
+          },
+          "body_width_mm": {
+            "exclusiveMinimum": 0,
+            "title": "Body Width Mm",
+            "type": "number"
+          },
+          "page": {
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "slot_id": {
+            "minimum": 1,
+            "title": "Slot Id",
+            "type": "integer"
+          },
+          "width_mm": {
+            "exclusiveMinimum": 0,
+            "title": "Width Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "page",
+          "slot_id",
+          "width_mm",
+          "body_width_mm",
+          "body_fraction"
+        ],
+        "title": "ObservedWidthLabel",
+        "type": "object"
+      },
+      "PageBreakPlanBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "block_id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+            "title": "Block Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "page_break",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "block_id"
+        ],
+        "title": "PageBreakPlanBlock",
+        "type": "object"
+      },
+      "PagePlan": {
+        "additionalProperties": false,
+        "properties": {
+          "_compiler_meta": {
+            "$ref": "#/$defs/PagePlanCompilerMeta"
+          },
+          "candidate": {
+            "enum": [
+              "A",
+              "B"
+            ],
+            "title": "Candidate",
+            "type": "string"
+          },
+          "g01_observation": {
+            "$ref": "#/$defs/G01Observation"
+          },
+          "observed_width_labels": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/ObservedWidthLabel"
+            },
+            "title": "Observed Width Labels",
+            "type": "array"
+          },
+          "pages": {
+            "items": {
+              "$ref": "#/$defs/PagePlanPage"
+            },
+            "maxItems": 2,
+            "minItems": 1,
+            "title": "Pages",
+            "type": "array"
+          },
+          "preview_count": {
+            "maximum": 2,
+            "minimum": 1,
+            "title": "Preview Count",
+            "type": "integer"
+          },
+          "schema": {
+            "const": "gsg.hwp.page-plan.v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "slot_map": {
+            "$ref": "#/$defs/SlotMap"
+          },
+          "source_manifest_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Manifest Sha256",
+            "type": "string"
+          },
+          "style_roles_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Style Roles Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema",
+          "candidate",
+          "pages",
+          "preview_count",
+          "source_manifest_sha256",
+          "style_roles_sha256",
+          "slot_map",
+          "g01_observation",
+          "_compiler_meta"
+        ],
+        "title": "PagePlan",
+        "type": "object"
+      },
+      "PagePlanCompilerMeta": {
+        "additionalProperties": false,
+        "properties": {
+          "block_count": {
+            "minimum": 1,
+            "title": "Block Count",
+            "type": "integer"
+          },
+          "canonical_plan_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Canonical Plan Sha256",
+            "type": "string"
+          },
+          "figure_slot_count": {
+            "minimum": 0,
+            "title": "Figure Slot Count",
+            "type": "integer"
+          },
+          "figure_slot_order": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Figure Slot Order",
+            "type": "array"
+          },
+          "g01_body_geometry_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "G01 Body Geometry Hash",
+            "type": "string"
+          },
+          "g01_convention_profile_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "G01 Convention Profile Hash",
+            "type": "string"
+          },
+          "g01_document_revision_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "G01 Document Revision Hash",
+            "type": "string"
+          },
+          "g01_page_setup_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "G01 Page Setup Hash",
+            "type": "string"
+          },
+          "ordered_source_refs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ordered Source Refs",
+            "type": "array"
+          },
+          "page_count": {
+            "maximum": 2,
+            "minimum": 1,
+            "title": "Page Count",
+            "type": "integer"
+          },
+          "source_manifest_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Source Manifest Sha256",
+            "type": "string"
+          },
+          "style_roles_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Style Roles Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "canonical_plan_sha256",
+          "source_manifest_sha256",
+          "style_roles_sha256",
+          "ordered_source_refs",
+          "figure_slot_order",
+          "figure_slot_count",
+          "page_count",
+          "block_count",
+          "g01_document_revision_hash",
+          "g01_page_setup_hash",
+          "g01_convention_profile_hash",
+          "g01_body_geometry_hash"
+        ],
+        "title": "PagePlanCompilerMeta",
+        "type": "object"
+      },
+      "PagePlanPage": {
+        "additionalProperties": false,
+        "properties": {
+          "blocks": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "image": "#/$defs/ImagePlanBlock",
+                  "page_break": "#/$defs/PageBreakPlanBlock",
+                  "paragraph": "#/$defs/ParagraphPlanBlock",
+                  "table": "#/$defs/TablePlanBlock"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/ParagraphPlanBlock"
+                },
+                {
+                  "$ref": "#/$defs/TablePlanBlock"
+                },
+                {
+                  "$ref": "#/$defs/ImagePlanBlock"
+                },
+                {
+                  "$ref": "#/$defs/PageBreakPlanBlock"
+                }
+              ]
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Blocks",
+            "type": "array"
+          },
+          "body_box": {
+            "$ref": "#/$defs/MmBox"
+          },
+          "page": {
+            "minimum": 1,
+            "title": "Page",
+            "type": "integer"
+          },
+          "page_setup": {
+            "$ref": "#/$defs/PageSetup"
+          }
+        },
+        "required": [
+          "page",
+          "page_setup",
+          "body_box",
+          "blocks"
+        ],
+        "title": "PagePlanPage",
+        "type": "object"
+      },
+      "PageSetup": {
+        "additionalProperties": false,
+        "properties": {
+          "bottom_margin_mm": {
+            "title": "Bottom Margin Mm",
+            "type": "number"
+          },
+          "footer_mm": {
+            "default": 0,
+            "title": "Footer Mm",
+            "type": "number"
+          },
+          "gutter_mm": {
+            "default": 0,
+            "title": "Gutter Mm",
+            "type": "number"
+          },
+          "gutter_type": {
+            "default": 0,
+            "maximum": 2,
+            "minimum": 0,
+            "title": "Gutter Type",
+            "type": "integer"
+          },
+          "header_mm": {
+            "default": 0,
+            "title": "Header Mm",
+            "type": "number"
+          },
+          "landscape": {
+            "title": "Landscape",
+            "type": "integer"
+          },
+          "left_margin_mm": {
+            "title": "Left Margin Mm",
+            "type": "number"
+          },
+          "paper_height_mm": {
+            "title": "Paper Height Mm",
+            "type": "number"
+          },
+          "paper_width_mm": {
+            "title": "Paper Width Mm",
+            "type": "number"
+          },
+          "right_margin_mm": {
+            "title": "Right Margin Mm",
+            "type": "number"
+          },
+          "top_margin_mm": {
+            "title": "Top Margin Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "paper_width_mm",
+          "paper_height_mm",
+          "landscape",
+          "top_margin_mm",
+          "bottom_margin_mm",
+          "left_margin_mm",
+          "right_margin_mm"
+        ],
+        "title": "PageSetup",
+        "type": "object"
+      },
+      "ParagraphPlanBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "block_id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+            "title": "Block Id",
+            "type": "string"
+          },
+          "box": {
+            "$ref": "#/$defs/MmBox"
+          },
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "kind": {
+            "const": "paragraph",
+            "title": "Kind",
+            "type": "string"
+          },
+          "semantic_role": {
+            "enum": [
+              "body",
+              "heading",
+              "caption",
+              "table_title"
+            ],
+            "title": "Semantic Role",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "style_role": {
+            "title": "Style Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "block_id",
+          "semantic_role",
+          "source_ref",
+          "content_sha256",
+          "style_role",
+          "box"
+        ],
+        "title": "ParagraphPlanBlock",
+        "type": "object"
+      },
+      "Slot": {
+        "additionalProperties": false,
+        "properties": {
+          "asset_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Asset Sha256"
+          },
+          "final_insertable": {
+            "default": true,
+            "title": "Final Insertable",
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "image",
+              "text",
+              "table"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "quality": {
+            "anyOf": [
+              {
+                "enum": [
+                  "original",
+                  "capture_only"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Quality"
+          },
+          "slot_id": {
+            "minimum": 1,
+            "title": "Slot Id",
+            "type": "integer"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source"
+          },
+          "source_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "ppt_media",
+                  "original_file",
+                  "capture_crop"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source Kind"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source Ref"
+          }
+        },
+        "required": [
+          "slot_id",
+          "kind"
+        ],
+        "title": "Slot",
+        "type": "object"
+      },
+      "SlotMap": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "enum": [
+              "A",
+              "B"
+            ],
+            "title": "Candidate",
+            "type": "string"
+          },
+          "schema": {
+            "const": "gsg.hwp.imageplan-slot-map.v1",
+            "title": "Schema",
+            "type": "string"
+          },
+          "slot_count": {
+            "minimum": 1,
+            "title": "Slot Count",
+            "type": "integer"
+          },
+          "slot_map_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Slot Map Sha256",
+            "type": "string"
+          },
+          "slot_order": {
+            "items": {
+              "type": "integer"
+            },
+            "minItems": 1,
+            "title": "Slot Order",
+            "type": "array"
+          },
+          "slot_order_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Slot Order Sha256",
+            "type": "string"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/$defs/Slot"
+            },
+            "maxItems": 10000,
+            "minItems": 1,
+            "title": "Slots",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema",
+          "candidate",
+          "slots",
+          "slot_count",
+          "slot_order",
+          "slot_order_sha256",
+          "slot_map_sha256"
+        ],
+        "title": "SlotMap",
+        "type": "object"
+      },
+      "TablePlanBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "block_id": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+            "title": "Block Id",
+            "type": "string"
+          },
+          "box": {
+            "$ref": "#/$defs/MmBox"
+          },
+          "content_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Content Sha256",
+            "type": "string"
+          },
+          "kind": {
+            "const": "table",
+            "title": "Kind",
+            "type": "string"
+          },
+          "semantic_role": {
+            "enum": [
+              "table",
+              "table_title"
+            ],
+            "title": "Semantic Role",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "style_role": {
+            "title": "Style Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "block_id",
+          "semantic_role",
+          "source_ref",
+          "content_sha256",
+          "style_role",
+          "box"
+        ],
+        "title": "TablePlanBlock",
+        "type": "object"
+      }
+    },
+    "discriminator": {
+      "mapping": {
+        "compiled": "#/$defs/G03Accepted",
+        "rejected": "#/$defs/G03Rejected"
+      },
+      "propertyName": "status"
+    },
+    "oneOf": [
+      {
+        "$ref": "#/$defs/G03Accepted"
+      },
+      {
+        "$ref": "#/$defs/G03Rejected"
+      }
+    ]
+  },
+  "title": "G03 PagePlan compiler request and response schemas"
+}

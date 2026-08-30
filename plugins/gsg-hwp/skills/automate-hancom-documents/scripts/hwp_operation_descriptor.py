@@ -183,7 +183,11 @@ _DESCRIPTORS: Final = (
             "text.replace.v1",
             ("ResolveTextPatch", "PatchText", "VerifyTextPatch"),
         ),
-        ("hwp_patch_text",),
+        (
+            "hwp_patch_text",
+            "hwp_patch_text_batch",
+            "hwp_patch_text_from_xlsx",
+        ),
         ("native_operation_specific_readback",),
     ),
     OperationDescriptor(
@@ -397,7 +401,7 @@ _DESCRIPTORS: Final = (
         "table.merge_cells",
         "recipe",
         ("ResolveTable", "ResolveCells", "TableMergeCell", "VerifyStructure"),
-        ("inputs.target", "inputs.parameters"),
+        ("inputs.target",),
         frozenset(("table",)),
         _recipe(
             "table.merge_cells.v1",
@@ -488,8 +492,15 @@ _DESCRIPTORS: Final = (
     OperationDescriptor(
         "image.resize",
         "recipe",
-        ("ResolvePicture", "ResizePicture", "VerifyPicture"),
-        ("inputs.target", "inputs.data"),
+        ("ResolvePicture", "PictureChange", "VerifyStructure"),
+        ("inputs.target",),
+        frozenset(("picture",)),
+        _recipe(
+            "image.edit.v1",
+            ("ResolvePicture", "PictureChange", "VerifyStructure"),
+        ),
+        ("hwp_edit_picture", "hwp_copy_picture"),
+        ("native_operation_specific_readback",),
     ),
     OperationDescriptor(
         "hyperlink.modify",

@@ -16,6 +16,25 @@ HRESULT ResolveVirtualMethod(
     CComPtr<IUnknown>& interfaceObject,
     size_t* slot) noexcept;
 
+HRESULT ResolveVirtualPropertyGet(
+    IDispatch* target,
+    const wchar_t* member,
+    VARTYPE returnType,
+    CComPtr<IUnknown>& interfaceObject,
+    size_t* slot) noexcept;
+
+HRESULT InvokeResolvedVirtualPropertyGet(
+    IDispatch* target,
+    REFIID interfaceId,
+    size_t slot,
+    CComPtr<IDispatch>& value) noexcept;
+
+HRESULT InvokeResolvedVirtualUnsignedLongPropertyGet(
+    IDispatch* target,
+    REFIID interfaceId,
+    size_t slot,
+    ULONG* value) noexcept;
+
 HRESULT ResolveVirtualPropertyPut(
     IDispatch* target,
     const wchar_t* member,

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Final, Literal, cast
 
+from hwp_checkpoint_signature import checkpoint_signature_is_complete
 from hwp_errors import HwpLiveError
-from hwp_live_native_batch import probe_official_api
+from hwp_live_edit_history import NativeDocumentStructureSnapshot
+from hwp_live_native_batch import (
+    execute_native_history_step,
+    probe_official_api,
+)
 from hwp_official_api_evidence import classify_native_evidence, parse_native_response
 
 
@@ -21,6 +28,30 @@ type HistoryDirection = Literal["undo", "redo"]
 _CONTENT_STATE_FIELDS = ("page_count", "control_count", "control_hash")
 _TRUE_VALUES = frozenset({"1", "true"})
 _FALSE_VALUES = frozenset({"0", "false"})
+_DOCUMENT_STRUCTURE_PAYLOAD: Final = (
+    "HCV1\nAUTOMATION\tIXHwpDocument\tModified\tproperty\nEND"
+)
+_expected_content_signature: ContextVar[str] = ContextVar(
+    "hwp_native_history_expected_content_signature",
+    default="",
+)
+
+
+@contextmanager
+def native_history_content_precondition(
+    expected_content_signature: str,
+) -> Generator[None, None, None]:
+    if not checkpoint_signature_is_complete(expected_content_signature):
+        raise HwpLiveError(
+            "한컴 실행 이력의 예상 문서 지문이 완전하지 않아 문서를 바꾸지 "
+            + "않았습니다",
+            mutation_started=False,
+        )
+    token = _expected_content_signature.set(expected_content_signature)
+    try:
+        yield
+    finally:
+        _expected_content_signature.reset(token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +59,10 @@ class NativeHistoryStep:
     applied: bool
     content_changed: bool
     elapsed_microseconds: int
+    before_structure: NativeDocumentStructureSnapshot | None = None
+    after_structure: NativeDocumentStructureSnapshot | None = None
+    before_content_signature: str = ""
+    after_content_signature: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +74,10 @@ class NativeHistoryResult:
     # "every requested step applied". `execute_native_history` always sets it.
     applied_steps: int | None = None
     content_changed: bool = False
+    before_structure: NativeDocumentStructureSnapshot | None = None
+    after_structure: NativeDocumentStructureSnapshot | None = None
+    before_content_signature: str = ""
+    after_content_signature: str = ""
 
     @property
     def applied(self) -> int:
@@ -52,6 +91,68 @@ class NativeHistoryResult:
 def build_native_history_payload(direction: HistoryDirection) -> str:
     method = {"undo": "Undo", "redo": "Redo"}[direction]
     return f"HCV1\nAUTOMATION\tIXHwpDocument\t{method}\tmethod\nARG\tI4\t1\nEND"
+
+
+def _document_structure(
+    page_count: int,
+    control_count: int,
+    control_hash: int,
+) -> NativeDocumentStructureSnapshot | None:
+    if (
+        isinstance(page_count, bool)
+        or page_count < 1
+        or isinstance(control_count, bool)
+        or control_count < 0
+        or isinstance(control_hash, bool)
+        or control_hash < 0
+    ):
+        return None
+    return NativeDocumentStructureSnapshot(page_count, control_count, control_hash)
+
+
+def read_native_document_structure(
+    window_handle: int,
+) -> NativeDocumentStructureSnapshot | None:
+    """Read the whole-document control fingerprint without changing history."""
+    response = probe_official_api(window_handle, _DOCUMENT_STRUCTURE_PAYLOAD)
+    if response is None:
+        return None
+    try:
+        evidence = parse_native_response(response)
+    except ValueError:
+        return None
+    healthy = (
+        evidence.get("kind") == "automation"
+        and evidence.get("owner") == "IXHwpDocument"
+        and evidence.get("name") == "Modified"
+        and evidence.get("member_kind") == "property"
+        and classify_native_evidence(evidence) == "passed"
+    )
+    if not healthy:
+        return None
+    match evidence.get("before"):
+        case {
+            "page_count": int(before_pages),
+            "control_count": int(before_controls),
+            "control_hash": int(before_hash),
+        }:
+            before = _document_structure(
+                before_pages,
+                before_controls,
+                before_hash,
+            )
+        case _:
+            before = None
+    match evidence.get("after"):
+        case {
+            "page_count": int(after_pages),
+            "control_count": int(after_controls),
+            "control_hash": int(after_hash),
+        }:
+            after = _document_structure(after_pages, after_controls, after_hash)
+        case _:
+            after = None
+    return before if before is not None and before == after else None
 
 
 def _content_changed(evidence: Mapping[str, object]) -> bool:
@@ -71,6 +172,37 @@ def _execute_native_history_step(
     window_handle: int,
     direction: HistoryDirection,
 ) -> NativeHistoryStep:
+    expected_content_signature = _expected_content_signature.get()
+    if expected_content_signature:
+        checked = execute_native_history_step(
+            window_handle,
+            direction,
+            expected_content_signature,
+        )
+        if checked is None:
+            raise HwpLiveError(
+                "한컴 프로토콜 13 원자적 문서 이력 편집기를 사용할 수 없습니다"
+            )
+        if (
+            checked.before_content_signature != expected_content_signature
+            or not checkpoint_signature_is_complete(checked.before_content_signature)
+        ):
+            raise HwpLiveError(
+                "한컴 실행 이력 직전 문서 지문이 예상 상태와 다릅니다",
+                mutation_started=False,
+            )
+        if checkpoint_signature_is_complete(checked.after_content_signature):
+            _ = _expected_content_signature.set(checked.after_content_signature)
+        return NativeHistoryStep(
+            applied=checked.applied == 1,
+            content_changed=(
+                checked.applied == 1
+                and checked.before_content_signature != checked.after_content_signature
+            ),
+            elapsed_microseconds=checked.elapsed_microseconds,
+            before_content_signature=checked.before_content_signature,
+            after_content_signature=checked.after_content_signature,
+        )
     response = probe_official_api(
         window_handle,
         build_native_history_payload(direction),
@@ -112,7 +244,39 @@ def _execute_native_history_step(
     elapsed = evidence.get("elapsed_us")
     if isinstance(elapsed, bool) or not isinstance(elapsed, int) or elapsed < 0:
         raise HwpLiveError("한컴 문서 이력 처리 시간이 올바르지 않습니다")
-    return NativeHistoryStep(applied, applied and _content_changed(evidence), elapsed)
+    match evidence.get("before"):
+        case {
+            "page_count": int(before_pages),
+            "control_count": int(before_controls),
+            "control_hash": int(before_hash),
+        }:
+            before_structure = _document_structure(
+                before_pages,
+                before_controls,
+                before_hash,
+            )
+        case _:
+            before_structure = None
+    match evidence.get("after"):
+        case {
+            "page_count": int(after_pages),
+            "control_count": int(after_controls),
+            "control_hash": int(after_hash),
+        }:
+            after_structure = _document_structure(
+                after_pages,
+                after_controls,
+                after_hash,
+            )
+        case _:
+            after_structure = None
+    return NativeHistoryStep(
+        applied,
+        applied and _content_changed(evidence),
+        elapsed,
+        before_structure,
+        after_structure,
+    )
 
 
 def execute_native_history(
@@ -125,8 +289,18 @@ def execute_native_history(
     applied_steps = 0
     elapsed = 0
     content_changed = False
+    before_structure = None
+    after_structure = None
+    before_content_signature = ""
+    after_content_signature = ""
     for _ in range(steps):
         step = _execute_native_history_step(window_handle, direction)
+        if before_structure is None:
+            before_structure = step.before_structure
+        after_structure = step.after_structure
+        if not before_content_signature:
+            before_content_signature = step.before_content_signature
+        after_content_signature = step.after_content_signature
         elapsed += step.elapsed_microseconds
         if not step.applied:
             # The engine reports an empty history stack. Stop instead of
@@ -135,9 +309,13 @@ def execute_native_history(
         applied_steps += 1
         content_changed = content_changed or step.content_changed
     return NativeHistoryResult(
-        direction,
-        steps,
-        elapsed,
-        applied_steps,
-        content_changed,
+        direction=direction,
+        steps=steps,
+        elapsed_microseconds=elapsed,
+        applied_steps=applied_steps,
+        content_changed=content_changed,
+        before_structure=before_structure,
+        after_structure=after_structure,
+        before_content_signature=before_content_signature,
+        after_content_signature=after_content_signature,
     )

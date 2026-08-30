@@ -4,7 +4,7 @@ from collections.abc import Sequence
 
 from hwp_live_native_text_format import rgb_value
 from hwp_reference_layout_contract import ReferenceLayoutBlock, ReferenceStyle
-from hwp_reference_layout_geometry import mm_to_hwpunit
+from hwp_reference_layout_geometry import absolute_urc, mm_to_hwpunit
 
 
 def _optional_color(value: tuple[int, int, int] | None) -> int:
@@ -24,10 +24,11 @@ def _optional_padding(style: ReferenceStyle, side: str) -> int:
 
 
 def _line_spacing(style: ReferenceStyle) -> int:
+    """A percentage stays a percentage; a length has to be encoded as URC."""
     if style.line_spacing_type == "percent":
         return style.line_spacing_percent or 100
     assert style.line_spacing_hwpunit is not None
-    return style.line_spacing_hwpunit
+    return style.line_spacing_hwpunit << 1
 
 
 def style_integer_groups(
@@ -66,6 +67,19 @@ def style_integer_groups(
         ),
         (
             "StyleAlignments",
+            # DO NOT "correct" these numbers to match hwp_live_values.
+            #
+            # They look identical to the table that measurement proved wrong
+            # (docs/alignment-raw-value.md), and they are not the same thing.
+            # This is a wire enumeration this bridge defines for itself; the
+            # only readers are ReferenceLayoutStyleCommands.cpp Alignment(),
+            # which turns 0/1/2/3 into HWP's own "Left"/"Center"/"Right"/
+            # "Justify" names, and ActionTextPatch.cpp ReferenceHwpAlignment(),
+            # which turns the same 0/1/2/3 into HWP's raw AlignType 1/3/2/0 --
+            # the measured values. Both translate; neither passes a number
+            # through. Renumbering here without changing both C++ functions
+            # writes Center where the caller asked for Left, and no test in
+            # this repository fails.
             tuple(
                 {
                     "inherit": -1,
@@ -121,14 +135,14 @@ def style_integer_groups(
         (
             "StylePreviousSpacings",
             tuple(
-                mm_to_hwpunit(style.paragraph_before_mm)
+                absolute_urc(style.paragraph_before_mm)
                 for style in block.styles
             ),
         ),
         (
             "StyleNextSpacings",
             tuple(
-                mm_to_hwpunit(style.paragraph_after_mm)
+                absolute_urc(style.paragraph_after_mm)
                 for style in block.styles
             ),
         ),

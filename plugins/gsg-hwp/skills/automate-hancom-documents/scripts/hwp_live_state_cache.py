@@ -5,12 +5,21 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Final, final
 
+import ntpath
+
 from hwp_live_bridge_contract import BridgeSnapshot, BridgeState
 from hwp_live_state_diff import changed_paths
 
 
 _STATE_CACHE_ENTRY_LIMIT: Final = 8
 _STATE_CACHE_BYTE_LIMIT: Final = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _StateCacheKey:
+    document_id: int
+    full_name: str
+    page: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +42,7 @@ class HancomStateCache:
         "_total_bytes",
     )
 
-    _entries: OrderedDict[int, _CacheEntry]
+    _entries: OrderedDict[_StateCacheKey, _CacheEntry]
     _lock: Lock
     _max_bytes: int
     _max_entries: int
@@ -59,11 +68,19 @@ class HancomStateCache:
             self._revision = 0
             self._total_bytes = 0
 
-    def _retain(self, page: int, entry: _CacheEntry) -> None:
-        previous = self._entries.pop(page, None)
+    @staticmethod
+    def _key_for(snapshot: BridgeSnapshot) -> _StateCacheKey:
+        return _StateCacheKey(
+            document_id=snapshot.structure.document_id,
+            full_name=ntpath.normcase(ntpath.normpath(snapshot.structure.full_name)),
+            page=snapshot.structure.page,
+        )
+
+    def _retain(self, key: _StateCacheKey, entry: _CacheEntry) -> None:
+        previous = self._entries.pop(key, None)
         if previous is not None:
             self._total_bytes -= previous.size_bytes
-        self._entries[page] = entry
+        self._entries[key] = entry
         self._total_bytes += entry.size_bytes
         while (
             len(self._entries) > self._max_entries
@@ -77,8 +94,9 @@ class HancomStateCache:
         snapshot: BridgeSnapshot,
         after_revision: int,
     ) -> BridgeState:
+        key = self._key_for(snapshot)
         with self._lock:
-            previous = self._entries.get(snapshot.structure.page)
+            previous = self._entries.get(key)
             if previous is not None and previous.snapshot == snapshot:
                 if after_revision > previous.revision:
                     self._revision = max(self._revision, after_revision) + 1
@@ -89,7 +107,7 @@ class HancomStateCache:
                         snapshot=snapshot,
                         size_bytes=previous.size_bytes,
                     )
-                    self._retain(snapshot.structure.page, rebased)
+                    self._retain(key, rebased)
                     return BridgeState(
                         revision=rebased.revision,
                         previous_revision=rebased.previous_revision,
@@ -97,12 +115,16 @@ class HancomStateCache:
                         changed_paths=("snapshot",),
                         snapshot=snapshot,
                     )
-                self._entries.move_to_end(snapshot.structure.page)
-                full = (
-                    after_revision == 0
-                    or after_revision not in {previous.revision, previous.previous_revision}
+                self._entries.move_to_end(key)
+                full = after_revision == 0 or after_revision not in {
+                    previous.revision,
+                    previous.previous_revision,
+                }
+                paths = (
+                    ()
+                    if after_revision == previous.revision
+                    else previous.changed_paths
                 )
-                paths = () if after_revision == previous.revision else previous.changed_paths
                 return BridgeState(
                     revision=previous.revision,
                     previous_revision=previous.previous_revision,
@@ -124,7 +146,7 @@ class HancomStateCache:
                 snapshot=snapshot,
                 size_bytes=len(snapshot.model_dump_json().encode("utf-8")),
             )
-            self._retain(snapshot.structure.page, entry)
+            self._retain(key, entry)
             full = (
                 previous is None
                 or after_revision != prior_revision

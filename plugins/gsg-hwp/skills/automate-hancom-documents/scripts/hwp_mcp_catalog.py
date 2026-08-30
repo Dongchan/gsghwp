@@ -185,7 +185,7 @@ def _truncate_utf8(value: str, max_bytes: int) -> str:
     )
 
 
-def _bounded_official_api_match(match: OfficialApiMatch) -> JsonValue:
+def bounded_official_api_match(match: OfficialApiMatch) -> JsonValue:
     payload = _JSON_OBJECT.validate_python(
         match.model_dump(mode="json", exclude_none=True)
     )
@@ -231,7 +231,7 @@ def _bounded_official_api_search(query: str, limit: int) -> JsonValue:
             "query": result.query,
             "category": result.category,
             "total_matches": result.total_matches,
-            "matches": [_bounded_official_api_match(match) for match in result.matches],
+            "matches": [bounded_official_api_match(match) for match in result.matches],
         }
     )
 

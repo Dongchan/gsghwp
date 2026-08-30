@@ -24,7 +24,11 @@ from hwp_live_workflow import (
     TablePropagationResult,
 )
 from hwp_office_table import OfficeTableSource
-from hwp_live_text_patch_contract import TextPatchRequest, TextPatchResult
+from hwp_live_text_patch_contract import (
+    TextPatchPlanGuard,
+    TextPatchRequest,
+    TextPatchResult,
+)
 
 
 class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
@@ -54,6 +58,19 @@ class HancomBridgeDocumentMutationMixin(HancomBridgeMutationRuntime):
     ) -> TextPatchResult:
         return self._call_mutation(
             lambda: self._bridge_controller().patch_text(session_id, request),
+            session_id=session_id,
+        )
+
+    def patch_text_batch(
+        self,
+        session_id: str,
+        requests: tuple[TextPatchRequest, ...],
+        plan_guard: TextPatchPlanGuard | None = None,
+    ) -> TextPatchResult:
+        return self._call_mutation(
+            lambda: self._bridge_controller().patch_text_batch(
+                session_id, requests, plan_guard
+            ),
             session_id=session_id,
         )
 

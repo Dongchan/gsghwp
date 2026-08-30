@@ -29,6 +29,17 @@ struct ArrayValue {
     Value value;
 };
 
+// Fractions of the source image hidden by Hancom's own picture crop
+// (DrawImageAttr SkipLeft/SkipTop/SkipRight/SkipBottom). Each value is in
+// [0, 1) and opposite edges add up to less than 1. The image file on disk is
+// only read, never rewritten.
+struct PictureCrop {
+    double left = 0.0;
+    double top = 0.0;
+    double right = 0.0;
+    double bottom = 0.0;
+};
+
 enum class CommandKind {
     Run,
     Action,
@@ -40,6 +51,7 @@ enum class CommandKind {
     CopyControl,
     SaveDocumentFile,
     RestoreDocumentFile,
+    CaptureDocumentBlockProbe,
     ApplyCopiedTableAnchor,
     PasteTable,
     CaptureTable,
@@ -90,11 +102,14 @@ struct Command {
     LONG captionFormatSourceParagraph = 0;
     LONG captionFormatSourceCharacter = 0;
     bool hasPictureBox = false;
+    bool hasPictureCrop = false;
     bool hasExpectedText = false;
     bool matchCase = false;
     bool preserveFormat = false;
+    bool preflightOnly = false;
     double pictureWidthMm = 0.0;
     double pictureHeightMm = 0.0;
+    PictureCrop pictureCrop;
     std::wstring first;
     std::wstring second;
     std::wstring expectedText;
@@ -118,6 +133,10 @@ struct Request {
     LONG selectionEndList = 0;
     LONG selectionEndParagraph = 0;
     LONG selectionEndCharacter = 0;
+    // Supplied out-of-band by ExecuteActionsChecked. It is deliberately not
+    // part of HCA1, so existing action payloads and public schemas stay stable.
+    std::wstring expectedContentSignature;
+    bool requiresContentAuthorization = false;
     std::vector<Command> commands;
 };
 

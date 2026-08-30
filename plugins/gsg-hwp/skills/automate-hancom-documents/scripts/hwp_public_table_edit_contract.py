@@ -81,15 +81,6 @@ class PublicMergeTableCellsInput(ContractModel):
     start_cell: PublicCellAddress
     end_cell: PublicCellAddress
 
-    @model_validator(mode="after")
-    def require_distinct_cells(self) -> PublicMergeTableCellsInput:
-        if self.start_cell.casefold() == self.end_cell.casefold():
-            raise PydanticCustomError(
-                "public_merge_single_cell",
-                "병합 시작 셀과 끝 셀은 달라야 합니다",
-            )
-        return self
-
     def to_parameters(self) -> Mapping[str, OperationInputValue]:
         return {"start": self.start_cell.upper(), "end": self.end_cell.upper()}
 

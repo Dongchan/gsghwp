@@ -75,7 +75,9 @@ def select_operation_document(
         if len(matches) > 1:
             raise HwpLiveError(
                 "지정한 문서 경로 또는 문서 ID가 여러 HWP 프로세스와 일치합니다. "
-                + "hwp_list_open_documents의 selector를 지정하세요"
+                + f"일치 후보 {len(matches)}개: "
+                + _document_candidate_message(matches)
+                + ". 전체 경로 또는 hwp_list_open_documents의 selector를 지정하세요"
             )
         basename_matches = _basename_candidates(editable, requested)
         if basename_matches:

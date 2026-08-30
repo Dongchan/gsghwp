@@ -1,6 +1,6 @@
 {
   "name": "gsg-hwp",
-  "version": "1.2.2",
+  "version": "1.6.0",
   "description": "열려 있는 한/글 문서를 에이전트에서 조회·편집·검수하고 참고 이미지를 편집 가능한 네이티브 레이아웃으로 재구성하는 Windows용 MCP 플러그인",
   "author": {
     "name": "inodesign",

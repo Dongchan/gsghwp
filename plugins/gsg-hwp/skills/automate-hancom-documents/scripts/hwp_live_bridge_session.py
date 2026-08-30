@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ntpath
+
 from hwp_errors import HwpLiveError
 from hwp_live_bridge_mixin import HancomBridgeSessionRuntime
 from hwp_live_contract import (
@@ -7,8 +9,32 @@ from hwp_live_contract import (
     MutationResult,
     OpenDocument,
     OpenDocumentList,
+    ResolvedOpenDocument,
 )
 from hwp_live_session_candidate import select_operation_document
+
+
+def _select_reference_document(
+    listing: OpenDocumentList,
+    requested: str | None,
+) -> OpenDocument:
+    try:
+        return select_operation_document(listing, requested)
+    except HwpLiveError as error:
+        if requested is None or not error.reason.startswith(
+            "파일명만으로 한컴 문서를 선택하지 않습니다"
+        ):
+            raise
+        requested_name = requested.casefold()
+        matches = tuple(
+            document
+            for document in listing.documents
+            if document.edit_mode == 1
+            and ntpath.basename(document.full_name).casefold() == requested_name
+        )
+        if len(matches) == 1:
+            return matches[0]
+        raise
 
 
 class HancomBridgeSessionMixin(HancomBridgeSessionRuntime):
@@ -66,13 +92,13 @@ class HancomBridgeSessionMixin(HancomBridgeSessionRuntime):
         reference_selector: str | None,
         new_tab: bool,
         restore_reference: bool = True,
-    ) -> OpenDocument:
-        reference = select_operation_document(
+    ) -> ResolvedOpenDocument:
+        reference = _select_reference_document(
             self.list_open_documents(),
             reference_selector,
         )
         process_id = self._bridge_process_id(reference.window_handle)
-        return self._call_mutation(
+        opened = self._call_mutation(
             lambda: self._bridge_controller().open_document(
                 path,
                 reference.selector,
@@ -80,6 +106,12 @@ class HancomBridgeSessionMixin(HancomBridgeSessionRuntime):
                 restore_reference,
             ),
             process_id=process_id,
+        )
+        return ResolvedOpenDocument.model_validate(
+            {
+                **opened.model_dump(),
+                "reference_document": reference,
+            }
         )
 
     def _connect(

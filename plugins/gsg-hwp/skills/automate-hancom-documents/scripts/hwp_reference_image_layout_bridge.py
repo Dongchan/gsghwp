@@ -66,6 +66,14 @@ def _snap_breakpoints(
     return tuple(snapped)
 
 
+def snap_reference_breakpoints(
+    values: tuple[float, ...],
+    candidates: tuple[ReferenceBreakpointCandidate, ...],
+) -> tuple[float, ...]:
+    """Apply the deterministic non-text breakpoint snapping policy."""
+    return _snap_breakpoints(values, candidates)
+
+
 def _boundary_pair(
     values: tuple[float, ...],
     start: float,
@@ -84,10 +92,7 @@ def _boundary_pair(
         ),
     )
     tolerance = max(end - start, values[right] - values[left]) * 0.35
-    if (
-        abs(values[left] - start) > tolerance
-        or abs(values[right] - end) > tolerance
-    ):
+    if abs(values[left] - start) > tolerance or abs(values[right] - end) > tolerance:
         return None
     return left, right
 

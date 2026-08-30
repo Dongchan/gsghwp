@@ -27,6 +27,7 @@ from hwp_live_native_action_models import (
     MergeCommand,
     MoveDocumentEndCommand,
     MovePageCommand,
+    MovePositionCommand,
     NativeActionCommand,
     NativeActionRequest,
     NativeCharacterFormat,
@@ -44,14 +45,21 @@ from hwp_live_native_table_layout import table_commands
 from hwp_live_native_text_format import (
     ParagraphFormatting,
     character_command,
+    lead_after_mm,
+    lead_before_mm,
     paragraph_command,
+    plan_lead_line_spacing,
     style_command,
 )
 from hwp_live_table_contract import TableBlock
 from hwp_table_address import cell_address
 from hwp_reference_layout_contract import ReferenceLayoutBlock
 from hwp_reference_layout_evidence import prepare_reference_layout
-from hwp_reference_layout_geometry import SectionPageGeometry
+from hwp_reference_layout_geometry import (
+    HWPUNITS_PER_INCH,
+    MILLIMETERS_PER_INCH,
+    SectionPageGeometry,
+)
 from hwp_reference_layout_native import compile_reference_layout_command
 from hwp_reference_layout_patch import (
     ReferenceLayoutPatchBlock,
@@ -61,7 +69,34 @@ from hwp_reference_layout_patch import (
 
 LAYOUT_COMMAND_LIMIT: Final = 20_000
 # This is the V28 regression ceiling, not a wall-clock latency guarantee.
-LAYOUT_TOPOLOGY_WORK_BUDGET: Final = 100_000
+#
+# 실측으로 고른 값이다. 같은 61x23 시트를 예산별로 돌린 결과
+# (artifacts/live-defects/batch-cost-*):
+#
+#   예산      배치 수  최대 배치   배치 합계   총 소요   결과
+#   100,000      6      87.5초     246.8초    294.0초   succeeded (경계 수리 전)
+#    50,000     11      53.8초     251.1초    299.3초   succeeded (경계 수리 전)
+#    50,000     11      52.1초     225.5초    302.2초   succeeded (경계 수리 후)
+#    35,000     15      59.3초     344.9초    398.2초   succeeded (경계 수리 후)
+#
+# 50,000 은 최대 배치를 87.5초에서 52.1초로 줄여, 긴 배치 하나가 "멈췄다"로
+# 오판될 창을 좁힌다. 총 소요 +2.8%(294.0→302.2초)가 그 값이다. 더 낮추는 것
+# (35,000)은 배치 수·총 소요만 키우고 최대 배치는 오히려 늘었다(59.3초) —
+# 병목 배치는 위상 예산이 아니라 병합·기하 명령의 단가가 결정하기 때문이다.
+#
+# 예전에는 이 값을 낮추면 실행이 깨졌다: 배치가 MergeCommand 로 끝나면 다음
+# 네이티브 호출이 표를 다시 못 잡고 "COM_PROPERTY table: CurSelectedCtrl
+# failed (HRESULT 0x80020005)" 로 즉사했다(batch-cost-35000, 2/2 재현). 지금은
+# _merge_tail_repair 가 병합-꼬리 배치 끝에 주인 셀 재정박을 붙여 그 경계가
+# 없다(batch-cost-35000-repaired 실측 succeeded·verified).
+#
+# 단일 배치가 기본 마감보다 길어질 수 있는 문제는 브리지 쪽에서 다룬다 —
+# 배치가 실행 전에 자기 크기를 선언하고, 그 작업량만큼 마감을 늘린다
+# (hwp_live_progress.declare_native_work, hwp_live_bridge 의 허용치 계산).
+#
+# 참고로 이 예산은 시간이 아니다: 위 표에서 배치별 실제 시간은 같은 위상
+# 예산을 쓰고도 1.4초에서 59.3초까지 벌어졌다.
+LAYOUT_TOPOLOGY_WORK_BUDGET: Final = 50_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +114,7 @@ class NativeLayoutContext:
     base_style_id: int = 0
     expected_cursor: NativePosition | None = None
     expected_selection: NativeSelection | None = None
+    insert_after_control: tuple[NativePosition, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +175,57 @@ class NativeLayoutExecutionPlan:
             f"table[{table_index + 1}]:{address}" for table_index, address in completed
         )
 
+    def merged_addresses(self) -> tuple[str, ...] | None:
+        """모든 병합을 적용한 뒤 문서에 실제로 남는 셀 주소.
+
+        레이아웃은 셀을 먼저 다 채우고(table_commands 의 행·열 순회) 마지막에
+        합친다(_merge_commands). 그래서 completed_addresses 는 명령이 짚은
+        주소, 즉 병합 전 격자를 그대로 돌려준다 — 실측(2026-08-30 insert_layout
+        저널, 병합 10건이 적용된 4x9 표)에서 응답은 A1~D9 36칸을 실었는데 문서에
+        남은 셀은 14개였다. 그 응답만 보면 병합이 전멸한 것과 구별되지 않는다.
+
+        여기서는 실행한 MergeCommand 를 그대로 되짚어 남는 주소를 계산한다.
+        한/글 주소는 행마다 그 행을 차지하는 셀을 왼쪽부터 세어 붙는다(라이브
+        실측: 9b5c659 의 4x4 A1:B4 병합 뒤 1행 C,D가 B,C로 다시 매겨졌다).
+        되읽기가 아니라 명령 투영이므로 부르는 쪽은 그 사실을 함께 밝혀야 한다.
+
+        병합이 없거나 명령을 그대로 따라갈 수 없으면 None 을 돌려, 부르는 쪽이
+        기존 값을 그대로 쓰게 한다.
+        """
+        groups = tuple(item.group for batch in self.batches for item in batch.groups)
+        projected = _merged_table_addresses(groups)
+        if projected is None:
+            return None
+        table_indexes = {table_index for table_index, _, _ in self.address_requirements}
+        surviving = tuple(item for item in projected if item[0] in table_indexes)
+        if not surviving:
+            return None
+        if len(table_indexes) <= 1:
+            return tuple(address for _, address in surviving)
+        return tuple(
+            f"table[{table_index + 1}]:{address}" for table_index, address in surviving
+        )
+
+
+def _observed_table_width_mm(
+    context: NativeLayoutContext,
+    block: TableBlock,
+) -> float | None:
+    has_explicit_padding = any(
+        cell.padding is not None for row in block.rows for cell in row
+    )
+    if has_explicit_padding and not cell_padding_ranges(block):
+        return None
+    geometry = context.page_geometry
+    if geometry is None:
+        return None
+    content_width = (
+        geometry.usable_area(page_number=context.page_number).width
+        * MILLIMETERS_PER_INCH
+        / HWPUNITS_PER_INCH
+    )
+    return content_width - block.left_margin_mm - block.right_margin_mm
+
 
 def _optimized_table_commands(
     block: TableBlock,
@@ -176,10 +263,8 @@ def _optimized_table_commands(
     ):
         return commands
 
-    if geometry_cells:
-        next_cell = geometry_cells + cell_count
-        if next_cell >= len(cell_positions):
-            return commands
+    next_cell = geometry_cells + cell_count
+    if geometry_cells and next_cell < len(cell_positions):
         main_end = cell_positions[next_cell]
     else:
         last_main = main_positions[-1]
@@ -235,7 +320,14 @@ def build_native_layout_request(
     commands: list[NativeActionCommand] = []
     match plan.target:
         case "current":
-            pass
+            if context.insert_after_control is not None:
+                anchor, _control_id = context.insert_after_control
+                commands.extend(
+                    (
+                        MovePositionCommand(anchor),
+                        RunCommand("MoveNextParaBegin"),
+                    )
+                )
         case "document_end":
             commands.append(MoveDocumentEndCommand())
         case "after_page":
@@ -286,17 +378,33 @@ def build_native_layout_request(
                 paragraph = paragraph_command(
                     ParagraphFormatting(
                         alignment=block.alignment,
+                        align_type_raw=block.align_type_raw,
                         line_spacing=block.line_spacing_percent,
-                        before_mm=block.space_before_mm,
-                        after_mm=block.space_after_mm,
+                        before_mm=lead_before_mm(
+                            block.space_before_mm,
+                            block.plan_lead_mm,
+                        ),
+                        after_mm=lead_after_mm(
+                            block.space_after_mm,
+                            block.plan_trail_mm,
+                        ),
                         left_mm=block.left_margin_mm,
                         right_mm=block.right_margin_mm,
                         indentation_mm=block.indentation_mm,
+                        heading_type=block.heading_type,
+                        heading_level=block.heading_level,
                     )
                 )
                 if paragraph is not None:
                     commands.append(paragraph)
-                commands.append(InsertTextCommand(block.text))
+                if block.runs:
+                    for run in block.runs:
+                        run_character = character_command(run)
+                        if run_character is not None:
+                            commands.append(run_character)
+                        commands.append(InsertTextCommand(run.text))
+                else:
+                    commands.append(InsertTextCommand(block.text))
                 if block_index + 1 < len(plan.blocks):
                     commands.append(RunCommand("BreakPara"))
                 continue
@@ -310,6 +418,7 @@ def build_native_layout_request(
                             styles,
                             text_formats,
                             caption_format_sources,
+                            _observed_table_width_mm(context, block),
                         ),
                     )
                 )
@@ -349,20 +458,49 @@ def build_native_layout_request(
                         f"그림 파일이 준비되지 않았습니다: {block.path}"
                     ) from error
                 paragraph = paragraph_command(
-                    ParagraphFormatting(alignment=block.alignment)
+                    ParagraphFormatting(
+                        alignment=block.alignment,
+                        before_mm=block.plan_lead_mm,
+                        after_mm=block.plan_trail_mm,
+                        line_spacing=plan_lead_line_spacing(block.plan_lead_mm),
+                    )
                 )
                 if paragraph is not None:
                     commands.append(paragraph)
-                commands.extend(
-                    (
-                        InsertPictureCommand(
-                            path=image,
-                            width_mm=block.width_mm,
-                            height_mm=block.height_mm,
-                        ),
-                        RunCommand("BreakPara"),
+                commands.append(
+                    InsertPictureCommand(
+                        path=image,
+                        width_mm=block.width_mm,
+                        height_mm=block.height_mm,
                     )
                 )
+                # The break exists to leave the picture's own paragraph. When
+                # nothing follows an absolutely placed picture it leaves an
+                # empty paragraph instead, and that paragraph still costs a
+                # full document line (MEASURED ~5.6mm): a plan ending 1-3mm
+                # above the body bottom spilled onto a third page and G04
+                # rolled its own layout back as LAYOUT_OVERFLOW. The caption
+                # path has always been conditional this way.
+                #
+                # Only a placed picture skips it. An ordinary layout call has
+                # no page budget to blow and does leave the cursor in a fresh
+                # paragraph after the picture, which callers rely on.
+                needs_break = (
+                    block.caption is not None
+                    or block_index + 1 < len(plan.blocks)
+                    or block.plan_lead_mm is None
+                )
+                if needs_break:
+                    commands.append(RunCommand("BreakPara"))
+                if needs_break and block.plan_lead_mm is not None:
+                    # BreakPara hands the picture paragraph's whole ParaShape to
+                    # the paragraph it opens, lead included. A 50mm lead written
+                    # for one picture therefore reappeared under the last one and
+                    # pushed the trailing empty paragraph onto a third page --
+                    # G04 refused its own layout as LAYOUT_OVERFLOW. Re-applying
+                    # the document's base style puts that paragraph back on the
+                    # document's own spacing instead of the placement's.
+                    commands.append(style_command(context.base_style_id))
                 if block.caption is not None:
                     if block.caption_style_id is not None:
                         commands.append(style_command(block.caption_style_id))
@@ -389,7 +527,7 @@ def build_native_layout_request(
     )
 
 
-def _table_creation_cell_count(command: NativeActionCommand) -> int | None:
+def _table_creation_shape(command: NativeActionCommand) -> tuple[int, int] | None:
     if (
         not isinstance(command, ParameterActionCommand)
         or command.action != "TableCreate"
@@ -405,7 +543,12 @@ def _table_creation_cell_count(command: NativeActionCommand) -> int | None:
     columns = values.get("Cols")
     if rows is None or columns is None or rows < 1 or columns < 1:
         return None
-    return rows * columns
+    return rows, columns
+
+
+def _table_creation_cell_count(command: NativeActionCommand) -> int | None:
+    shape = _table_creation_shape(command)
+    return None if shape is None else shape[0] * shape[1]
 
 
 def _cell_coordinate(address: str) -> tuple[int, int]:
@@ -587,12 +730,50 @@ def _layout_topology_work(
     return state.work
 
 
+def _merge_tail_repair(
+    groups: tuple[NativeLayoutCommandGroup, ...],
+) -> CellCommand | None:
+    """배치가 병합으로 끝날 때 다음 네이티브 호출을 위해 덧붙일 재정박 명령.
+
+    병합 뒤의 커서·선택 복원은 같은 호출 안에서는 문제가 없지만, 호출이 거기서
+    끝나면 다음 호출의 표 재포착(CaptureCurrentTable)이 기대는 ParentCtrl /
+    CurSelectedCtrl 어느 쪽도 남아 있지 않을 수 있다. 실측
+    (artifacts/live-defects/batch-cost-35000): budget 35,000 에서 batch 9 가
+    MergeCommand(J33:K33) 로 끝나자 batch 10 첫 명령이 2/2 회
+    "COM_PROPERTY table: CurSelectedCtrl failed (HRESULT 0x80020005)" 로 즉사했다.
+    병합 주인 셀로 가는 GoToCell 은 ParentCtrl==tableId 를 검증하며 커서를 표
+    안에 남기므로, 다음 호출은 항상 표를 다시 잡을 수 있다.
+    """
+    if not groups:
+        return None
+    tail = groups[-1]
+    if tail.table_index is None or not tail.commands:
+        return None
+    last = tail.commands[-1]
+    if not isinstance(last, MergeCommand):
+        return None
+    return CellCommand(last.first)
+
+
+def _repair_reserve(
+    group: NativeLayoutCommandGroup,
+) -> tuple[int, int, int]:
+    """이 그룹이 배치 꼬리가 될 때 재정박이 요구할 (명령, 작업량, payload)."""
+    repair = _merge_tail_repair((group,))
+    if repair is None:
+        return 0, 0, 0
+    # 병합이 topology 를 무효화한 직후라 재정박 GoToCell 은 표 전체를 다시
+    # 읽는다(_advance_topology_work 의 CellCommand 규칙과 같은 값).
+    return 1, group.table_cell_count, action_command_payload_characters(repair)
+
+
 def _batch_from_groups(
     request: NativeActionRequest,
     groups: tuple[NativeLayoutCommandGroup, ...],
     *,
     first: bool,
     preserve_request: bool = False,
+    tail_repair: CellCommand | None = None,
 ) -> NativeLayoutBatch:
     commands: list[NativeActionCommand] = []
     batch_groups: list[NativeLayoutBatchGroup] = []
@@ -600,6 +781,13 @@ def _batch_from_groups(
         start = len(commands)
         commands.extend(group.commands)
         batch_groups.append(NativeLayoutBatchGroup(group, start, len(commands)))
+    repair_work = 0
+    if tail_repair is not None:
+        # 그룹 뒤에 붙여 그룹 오프셋(start/end)과 완료 주소 계산을 건드리지
+        # 않는다. 실행되면 완료 명령 수에는 그대로 잡힌다 — 실제로 실행되는
+        # 명령이므로 정직한 수다.
+        commands.append(tail_repair)
+        repair_work = groups[-1].table_cell_count
     batch_request = (
         request
         if preserve_request
@@ -614,7 +802,7 @@ def _batch_from_groups(
     return NativeLayoutBatch(
         request=batch_request,
         groups=tuple(batch_groups),
-        topology_work=_layout_topology_work(groups),
+        topology_work=_layout_topology_work(groups) + repair_work,
     )
 
 
@@ -635,6 +823,103 @@ def _address_requirements(
     return tuple(
         (table_index, address, frozenset(requirements[(table_index, address)]))
         for table_index, address in order
+    )
+
+
+@dataclass(slots=True)
+class _MergedRowSegment:
+    """한 행에서 글자 슬롯 하나를 차지하는 셀의 열 구간과 그 셀이 시작한 행."""
+
+    left: int
+    right: int
+    top_row: int
+
+
+def _apply_merge_projection(
+    rows: list[list[_MergedRowSegment]],
+    first: str,
+    second: str,
+) -> bool:
+    """MergeCommand 하나를 행별 슬롯 장부에 반영한다. 따라갈 수 없으면 False."""
+    top, first_slot = _cell_coordinate(first)
+    bottom, second_slot = _cell_coordinate(second)
+    if (
+        top > bottom
+        or bottom >= len(rows)
+        or first_slot >= len(rows[top])
+        or second_slot >= len(rows[bottom])
+    ):
+        return False
+    left = rows[top][first_slot].left
+    right = rows[bottom][second_slot].right
+    if left > right:
+        return False
+    for row in range(top, bottom + 1):
+        segments = rows[row]
+        covered = [
+            index
+            for index, segment in enumerate(segments)
+            if segment.left >= left and segment.right <= right
+        ]
+        if (
+            not covered
+            or covered != list(range(covered[0], covered[-1] + 1))
+            or segments[covered[0]].left != left
+            or segments[covered[-1]].right != right
+            # 이미 위 행에서 시작한 셀을 삼키는 병합은 겹침이다. 계획 검증이
+            # 막는 모양이므로 여기서 만나면 장부를 믿을 수 없다는 뜻이다.
+            or any(segments[index].top_row < top for index in covered)
+        ):
+            return False
+        segments[covered[0] : covered[-1] + 1] = [_MergedRowSegment(left, right, top)]
+    return True
+
+
+def _merged_table_addresses(
+    groups: tuple[NativeLayoutCommandGroup, ...],
+) -> tuple[tuple[int, str], ...] | None:
+    """실행한 병합 명령을 되짚어 표별로 남는 (표 index, 주소)를 투영한다."""
+    tables: dict[int, list[list[_MergedRowSegment]]] = {}
+    order: list[int] = []
+    merged = False
+    for group in groups:
+        if group.table_index is None:
+            continue
+        for command in group.commands:
+            shape = _table_creation_shape(command)
+            if shape is not None:
+                if group.table_index in tables:
+                    return None
+                table_rows, table_columns = shape
+                tables[group.table_index] = [
+                    [
+                        _MergedRowSegment(column, column, row)
+                        for column in range(table_columns)
+                    ]
+                    for row in range(table_rows)
+                ]
+                order.append(group.table_index)
+                continue
+            if not isinstance(command, MergeCommand):
+                continue
+            rows = tables.get(group.table_index)
+            if rows is None:
+                return None
+            try:
+                applied = _apply_merge_projection(rows, command.first, command.second)
+            except HwpLiveError:
+                return None
+            if not applied:
+                return None
+            merged = True
+    if not merged:
+        return None
+    return tuple(
+        (table_index, cell_address(row, slot))
+        for table_index in order
+        for row, segments in enumerate(tables[table_index])
+        for slot, segment in enumerate(segments)
+        if segment.top_row == row
     )
 
 
@@ -705,10 +990,13 @@ def build_native_layout_execution_plan(
         candidate_commands = current_commands + len(group.commands)
         candidate_payload = current_payload + group.payload_characters
         candidate_state = _advance_topology_work(current_state, group)
+        # 이 그룹에서 배치가 끝나면 병합-꼬리 재정박이 함께 실행될 수 있다.
+        # 그 몫까지 한도 안에 들어와야 나중에 붙는 재정박이 한도를 넘지 않는다.
+        reserve_commands, reserve_work, reserve_payload = _repair_reserve(group)
         if current and (
-            candidate_commands > LAYOUT_COMMAND_LIMIT
-            or candidate_state.work > LAYOUT_TOPOLOGY_WORK_BUDGET
-            or candidate_payload > NATIVE_ACTION_PAYLOAD_LIMIT
+            candidate_commands + reserve_commands > LAYOUT_COMMAND_LIMIT
+            or candidate_state.work + reserve_work > LAYOUT_TOPOLOGY_WORK_BUDGET
+            or candidate_payload + reserve_payload > NATIVE_ACTION_PAYLOAD_LIMIT
         ):
             grouped_batches.append(tuple(current))
             current = [group]
@@ -721,21 +1009,40 @@ def build_native_layout_execution_plan(
         current_payload = candidate_payload
         current_state = candidate_state
         if (
-            candidate_commands > LAYOUT_COMMAND_LIMIT
-            or candidate_state.work > LAYOUT_TOPOLOGY_WORK_BUDGET
-            or candidate_payload > NATIVE_ACTION_PAYLOAD_LIMIT
+            candidate_commands + reserve_commands > LAYOUT_COMMAND_LIMIT
+            or candidate_state.work + reserve_work > LAYOUT_TOPOLOGY_WORK_BUDGET
+            or candidate_payload + reserve_payload > NATIVE_ACTION_PAYLOAD_LIMIT
         ):
             raise HwpLiveError(
                 "단일 레이아웃 명령 그룹이 네이티브 호출 budget을 초과합니다"
             )
     if current:
         grouped_batches.append(tuple(current))
+
+    def tail_repair(index: int) -> CellCommand | None:
+        # 마지막 배치는 뒤가 없으니 재정박도 없다. 다음 배치 머리가 같은 표의
+        # 셀 이동으로 시작할 때만 붙인다 — 병합-꼬리 그룹 뒤에는 문법상 항상
+        # 같은 표의 CellCommand 그룹이 오지만, 여기서 다시 확인해야 머리가
+        # 표 생성으로 바뀌는 날 재정박이 셀 안에 새 표를 만드는 사고가 없다.
+        if index + 1 >= len(grouped_batches):
+            return None
+        head = grouped_batches[index + 1][0]
+        tail = grouped_batches[index][-1]
+        if (
+            head.table_index != tail.table_index
+            or not head.commands
+            or not isinstance(head.commands[0], CellCommand)
+        ):
+            return None
+        return _merge_tail_repair(grouped_batches[index])
+
     return NativeLayoutExecutionPlan(
         tuple(
             _batch_from_groups(
                 request,
                 batch_groups,
                 first=index == 0,
+                tail_repair=tail_repair(index),
             )
             for index, batch_groups in enumerate(grouped_batches)
         ),

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 
-from hwp_document_style_profile import resolve_layout_style_profile
+from hwp_document_style_observation import resolve_document_style_usage
+from hwp_document_style_profile import (
+    automatic_numbering_notice,
+    resolve_layout_style_profile,
+)
 from hwp_errors import HwpLiveError
 from hwp_layout_preflight import preflight_layout
 from hwp_live_api import ShapeValue
@@ -20,7 +25,7 @@ from hwp_live_native_action_contract import (
     NativeActionFailure,
     NativeActionFailureEvidence,
 )
-from hwp_live_native_action_models import NativePosition
+from hwp_live_native_action_models import MergeCommand, NativePosition
 from hwp_live_native_action_results import NativeActionResult, NativeSnapshot
 from hwp_live_native_batch import (
     execute_native_actions,
@@ -33,6 +38,7 @@ from hwp_live_native_layout import (
     build_native_layout_execution_plan,
     build_native_layout_request,
 )
+from hwp_live_progress import declare_native_work, report_native_progress
 from hwp_live_operation_recipe_contract import (
     is_document_end_layout_intent as is_document_end_layout_intent,
     layout_operation_result,
@@ -56,6 +62,11 @@ from hwp_reference_layout_geometry import (
 from hwp_reference_layout_contract import ReferenceLayoutBlock
 from hwp_reference_layout_patch import ReferenceLayoutPatchBlock
 from hwp_live_table_contract import TableBlock
+
+
+_STYLE_LIST_UNAVAILABLE_NOTICE = (
+    "문서 스타일 목록을 읽지 못해 현재 서식과 기본 스타일 id로 적용했습니다"
+)
 
 
 class _LayoutBatchFailure(HwpLiveError):
@@ -106,6 +117,70 @@ def _merge_native_results(
         image_total_microseconds=(
             first.image_total_microseconds + second.image_total_microseconds
         ),
+    )
+
+
+def _post_write_layout_facts(
+    *,
+    observation_available: bool,
+    before: NativeSnapshot,
+    after: NativeSnapshot,
+    command_start_page: int,
+    planned_page_span: int,
+    adjustable_items: tuple[str, ...],
+) -> str:
+    if not observation_available:
+        return "post_write_layout_facts=unavailable"
+    cursor_page_spread = after.current_page - command_start_page + 1
+    overflow = (
+        "possible"
+        if cursor_page_spread > planned_page_span
+        else "not_observed_by_cursor_spread"
+    )
+    facts: dict[str, object] = {
+        "availability": "available",
+        "observation_scope": (
+            "native_snapshot_cursor_and_page_count_only_"
+            "not_geometry_or_inserted_range_readback"
+        ),
+        "page_count_before": before.page_count,
+        "page_count_after": after.page_count,
+        "page_count_delta": after.page_count - before.page_count,
+        "command_start_page": command_start_page,
+        "after_cursor_page": after.current_page,
+        "cursor_page_spread": cursor_page_spread,
+        "planned_page_span": planned_page_span,
+        "overflow": overflow,
+    }
+    if overflow == "possible":
+        facts["adjustable_items_source"] = "preflight"
+        facts["adjustable_items"] = list(adjustable_items)
+    return "post_write_layout_facts=" + json.dumps(
+        facts, ensure_ascii=False, separators=(",", ":")
+    )
+
+
+def _merge_projection_facts(
+    *,
+    merge_commands: int,
+    cells_before_merge: int,
+    cells_after_merge: int,
+) -> str:
+    """병합이 든 레이아웃에서 updated_addresses 가 무엇인지 밝히는 사실.
+
+    되읽기가 아니라 실행한 MergeCommand 를 되짚은 투영이다. 그 출처를 적지
+    않으면 관측한 값과 구별되지 않으므로 basis 를 함께 싣는다.
+    """
+    return "merge_projection=" + json.dumps(
+        {
+            "basis": "executed_merge_commands_not_document_readback",
+            "updated_addresses_space": "after_merge",
+            "merge_commands": merge_commands,
+            "cells_before_merge": cells_before_merge,
+            "cells_after_merge": cells_after_merge,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 
 
@@ -234,12 +309,29 @@ def native_style_plan(
     LayoutPlan,
     SectionPageGeometry,
     tuple[tuple[str, NativePosition], ...],
+    str,
 ]:
+    # The same paragraph walk that reports document style usage also supplies
+    # repeated, same-style caption prefixes. Read it before caption selection so
+    # an unwrapped source can be recognized from observations rather than words.
+    usage = resolve_document_style_usage(
+        candidate.window_handle,
+        candidate.document_id,
+        candidate.full_name,
+    )
+    guard()
     wrapper = attach_wrapper(candidate)
+    style_notice = ""
     try:
-        styles = (
-            inspect_styles(wrapper, guard) if style_list is None else style_list
-        ).styles
+        try:
+            styles = (
+                inspect_styles(wrapper, guard) if style_list is None else style_list
+            ).styles
+        except HwpLiveError:
+            styles = ()
+            style_notice = _STYLE_LIST_UNAVAILABLE_NOTICE
+        if style_list is not None and not style_list.styles and not style_notice:
+            style_notice = _STYLE_LIST_UNAVAILABLE_NOTICE
         guard()
         cursor = wrapper.get_pos()
         guard()
@@ -262,6 +354,7 @@ def native_style_plan(
                 wrapper,
                 guard,
                 setup_page=setup_page,
+                usage=usage,
             )
             if any(
                 isinstance(block, TableBlock) and block.caption is not None
@@ -284,18 +377,32 @@ def native_style_plan(
         gutter_mm=_page_value(page, "GutterLen"),
         gutter_type=int(_page_value(page, "GutterType")),
     )
-    content_width_mm = (
-        geometry.usable_area(page_number=setup_page).width
-        * MILLIMETERS_PER_INCH
-        / HWPUNITS_PER_INCH
-    )
+    usable_area = geometry.usable_area(page_number=setup_page)
+    content_width_mm = usable_area.width * MILLIMETERS_PER_INCH / HWPUNITS_PER_INCH
+    content_height_mm = usable_area.height * MILLIMETERS_PER_INCH / HWPUNITS_PER_INCH
     resolved = resolve_layout_style_profile(
-        plan.expand_image_frames(content_width_mm),
+        plan.expand_image_frames(content_width_mm, content_height_mm),
         styles,
         fallback_style_id=style_id,
         content_width_mm=content_width_mm,
+        usage=usage,
     )
-    return resolved, geometry, caption_format_sources(resolved, caption_source)
+    # Additive fact on the existing notice channel: a paragraph that resolved
+    # to an automatically numbered style is relying on a marker no command in
+    # this path switches on, and the model has no way to know that before it
+    # looks at a render. Saying it here is what stops the next step from
+    # patching a literal "1)" on top of a number that may already be there.
+    numbering_notice = automatic_numbering_notice(resolved, usage)
+    if numbering_notice:
+        style_notice = (
+            f"{style_notice} {numbering_notice}" if style_notice else numbering_notice
+        )
+    return (
+        resolved,
+        geometry,
+        caption_format_sources(resolved, caption_source),
+        style_notice,
+    )
 
 
 def operate_layout(
@@ -310,6 +417,7 @@ def operate_layout(
     guard: Callable[[], None],
     atomic: bool = False,
     style_list: DocumentStyleList | None = None,
+    insert_after_control: tuple[NativePosition, str, int] | None = None,
 ) -> OperationResult:
     started = time.perf_counter_ns()
     lookup_microseconds = (time.perf_counter_ns() - started) // 1_000
@@ -345,6 +453,7 @@ def operate_layout(
         raise HwpLiveError("네이티브 레시피 실행 전 한컴 문서 상태를 읽지 못했습니다")
     if (
         plan.target == "current"
+        and insert_after_control is None
         and before.selection.selected
         and not plan.replace_selection
     ):
@@ -361,6 +470,8 @@ def operate_layout(
         if plan.target == "after_page" and plan.page is not None
         else before.page_count
         if plan.target == "document_end"
+        else insert_after_control[2]
+        if insert_after_control is not None
         else before.current_page
     )
     layout_page = (
@@ -368,13 +479,15 @@ def operate_layout(
         if plan.target == "after_page" and plan.page is not None
         else setup_page
     )
-    resolved_plan, page_geometry, table_caption_sources = native_style_plan(
-        candidate,
-        plan,
-        before.style_id,
-        guard,
-        setup_page=setup_page,
-        style_list=style_list,
+    resolved_plan, page_geometry, table_caption_sources, style_notice = (
+        native_style_plan(
+            candidate,
+            plan,
+            before.style_id,
+            guard,
+            setup_page=setup_page,
+            style_list=style_list,
+        )
     )
     preflight = preflight_layout(
         resolved_plan,
@@ -415,12 +528,19 @@ def operate_layout(
                 base_style_id=before.style_id,
                 caption_format_sources=table_caption_sources,
                 expected_cursor=(
-                    before.cursor
+                    None
+                    if insert_after_control is not None
+                    else before.cursor
                     if expected_cursor is None
                     else NativePosition(*expected_cursor)
                 ),
                 expected_selection=(
                     before.selection if plan.replace_selection else None
+                ),
+                insert_after_control=(
+                    None
+                    if insert_after_control is None
+                    else (insert_after_control[0], insert_after_control[1])
                 ),
             ),
             resolved_plan,
@@ -456,6 +576,15 @@ def operate_layout(
         elapsed_microseconds = 0
         completed_group_keys: set[int] = set()
         for batch_index, batch in enumerate(execution.batches):
+            # 이 배치는 네이티브 호출 한 번이라 안에서는 진행을 알릴 수 없다.
+            # 들어가기 전에 크기를 선언해 두어야, 기다리는 쪽이 "아직 일하는
+            # 중"과 "멈췄다"를 구분할 근거를 갖는다. 배치가 하나뿐인 요청
+            # (원자 요청 포함)도 이 선언 하나로 같은 보호를 받는다.
+            declare_native_work(
+                topology_units=batch.topology_work,
+                commands=len(batch.request.commands),
+                label="layout_batch:" + f"{batch_index + 1}/{len(execution.batches)}",
+            )
             try:
                 batch_result = execute_native_actions(
                     candidate.window_handle,
@@ -511,6 +640,15 @@ def operate_layout(
             commands_completed += batch_result.commands_executed
             elapsed_microseconds += batch_result.elapsed_microseconds
             completed_group_keys.update(item.group.key for item in batch.groups)
+            # 배치 하나가 끝났다는 것은 한/글이 살아서 일하고 있다는 증거다.
+            # 브리지 마감이 이 증거를 기준으로 다시 세어지므로, 배치 여러 개로
+            # 나뉘는 큰 삽입이 "진행 중인데 죽었다" 로 끊기지 않는다.
+            report_native_progress(
+                "layout_batch:"
+                + f"{batch_index + 1}/{len(execution.batches)}"
+                + f":commands={commands_completed}/{expected_commands}",
+                commands_completed,
+            )
         if native_result is None:
             raise HwpLiveError("네이티브 레이아웃 batch 결과가 없습니다")
         after_snapshot = read_native_snapshot(candidate.window_handle)
@@ -570,38 +708,113 @@ def operate_layout(
             failure,
         )
 
-    verified = (
+    snapshot_verified = (
         native.commands_executed == expected_commands
         and after.document_id == before.document_id
         and after.modified
     )
     if plan.target == "after_page":
-        verified = (
-            verified
+        snapshot_verified = (
+            snapshot_verified
             and plan.page is not None
             and after.page_count >= before.page_count + 1
             and after.current_page >= plan.page + 1
         )
     if reference_append_pages:
-        verified = (
-            verified and after.page_count == before.page_count + reference_append_pages
+        snapshot_verified = (
+            snapshot_verified
+            and after.page_count == before.page_count + reference_append_pages
         )
-    if not verified:
+    if not snapshot_verified:
         mark_document_unsafe(unsafe_selectors, candidate.selector)
-    status: OperationStatus = "executed" if verified else "partial_change"
+    table_caption_visibility_unverified = snapshot_verified and any(
+        isinstance(block, TableBlock) and block.caption is not None
+        for block in resolved_plan.blocks
+    )
+    verified: bool | None = (
+        None if table_caption_visibility_unverified else snapshot_verified
+    )
+    status: OperationStatus = "executed" if snapshot_verified else "partial_change"
     layout_call_count = len(execution.batches)
     message = (
         (
             "요청한 위치 이동과 ApplyLayout Bulk를 프로토콜 "
             f"{native_protocol} C++/ATL 네이티브 경로로 "
+            f"{layout_call_count}회 실행했고 네이티브 전후 상태는 일치했습니다. "
+            "표 캡션 명령은 실행됐지만 구조 및 렌더 가시성은 확인하지 못했습니다"
+        )
+        if table_caption_visibility_unverified
+        else (
+            "요청한 위치 이동과 ApplyLayout Bulk를 프로토콜 "
+            f"{native_protocol} C++/ATL 네이티브 경로로 "
             f"{layout_call_count}회 실행하고 전후 상태를 검증했습니다"
         )
-        if verified
+        if snapshot_verified
         else "네이티브 레이아웃 배치는 실행됐지만 삽입 위치 또는 문서 상태의 사후 검증이 일치하지 않았습니다"
+    )
+    if snapshot_verified:
+        # verified=true 가 무엇을 통과했다는 말인지 요약에서 바로 읽히게 한다.
+        # post_write_layout_facts 의 observation_scope 는 같은 사실을 적고
+        # 있었지만, 요약만 읽으면 기하·삽입 범위까지 검증한 인상을 준다.
+        message = (
+            f"{message}. 검증 범위는 네이티브 전후 스냅샷"
+            "(문서 동일성·수정 표시·쪽 수·커서 쪽)이고, 표 기하와 삽입 범위 "
+            "되읽기는 이 범위 밖입니다"
+        )
+    planned_page_span = 1 + sum(
+        isinstance(block, PageBreakBlock) for block in resolved_plan.blocks
+    )
+    observation_available = (
+        snapshot_verified
+        and after.current_page >= layout_page
+        and not (
+            plan.target == "current"
+            and insert_after_control is None
+            and plan.replace_selection
+            and before.selection.selected
+        )
+    )
+    message = f"{message} " + _post_write_layout_facts(
+        observation_available=observation_available,
+        before=before,
+        after=after,
+        command_start_page=layout_page,
+        planned_page_span=planned_page_span,
+        adjustable_items=getattr(preflight, "adjustable_items", ()),
     )
     completed_group_keys = {
         item.group.key for batch in execution.batches for item in batch.groups
     }
+    completed_addresses = execution.completed_addresses(completed_group_keys)
+    # 셀을 먼저 채우고 마지막에 합치는 레이아웃에서 completed_addresses 는 병합
+    # 전 격자다. 병합이 있으면 남는 주소로 바꿔 싣고, 그 값이 되읽기가 아니라
+    # 명령 투영이라는 사실을 요약에 함께 적는다.
+    merged_addresses = execution.merged_addresses()
+    updated_addresses = (
+        completed_addresses if merged_addresses is None else merged_addresses
+    )
+    if merged_addresses is not None:
+        message = f"{message} " + _merge_projection_facts(
+            merge_commands=sum(
+                isinstance(command, MergeCommand)
+                for batch in execution.batches
+                for command in batch.request.commands
+            ),
+            cells_before_merge=len(completed_addresses),
+            cells_after_merge=len(merged_addresses),
+        )
+    if style_notice:
+        separator = " " if message.endswith((".", "!", "?")) else ". "
+        message = f"{message}{separator}{style_notice}"
+    changed_pages = set(
+        page_growth_evidence(
+            before_page_count=before.page_count,
+            after_page_count=after.page_count,
+            current_page=after.current_page,
+        )
+    )
+    if observation_available:
+        changed_pages.update(range(layout_page, after.current_page + 1))
     base = layout_operation_result(query, status, message, lookup_microseconds, plan)
     return base.model_copy(
         update={
@@ -610,6 +823,11 @@ def operate_layout(
             "native_protocol": native_protocol,
             "verification": "native_snapshot_before_after",
             "verified": verified,
+            "failure_stage": (
+                "table_caption_visibility_verification"
+                if table_caption_visibility_unverified
+                else None
+            ),
             "commands_executed": native.commands_executed,
             "native_actions_executed": native.actions_executed,
             "native_elapsed_microseconds": native.elapsed_microseconds,
@@ -617,17 +835,11 @@ def operate_layout(
             "created_control_ids": native.created_control_ids,
             "current_page": after.current_page,
             "page_count": after.page_count,
-            # 전에 없던 쪽은 이 배치가 만든 것이다. 커서가 마지막 쪽에 있다고 해서
-            # 마지막 쪽만 바뀐 게 아니다.
-            "changed_pages": page_growth_evidence(
-                before_page_count=before.page_count,
-                after_page_count=after.page_count,
-                current_page=after.current_page,
-            ),
+            "changed_pages": tuple(sorted(changed_pages)),
             "modified": after.modified,
-            "retry_safe": verified,
-            "partial_mutation": False if verified else True,
+            "retry_safe": None if verified is None else verified,
+            "partial_mutation": not snapshot_verified,
             "commands_completed": native.commands_executed,
-            "updated_addresses": execution.completed_addresses(completed_group_keys),
+            "updated_addresses": updated_addresses,
         }
     )

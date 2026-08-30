@@ -9,6 +9,7 @@ import sys
 from types import MappingProxyType
 from typing import Final, Literal, assert_never, final, override
 
+import jsonschema
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.lowlevel.server import NotificationOptions
@@ -27,6 +28,7 @@ from hwp_runtime_identity import (
     PLUGIN_ROOT,
     RUNTIME_WATCH_PATHS,
     RuntimeStatus,
+    native_bridge_runtime,
     tool_schema_hash,
 )
 
@@ -106,7 +108,25 @@ class ReloadingHwpMCP(FastMCP[None]):
             if reload_worker
             else await self._supervisor.status()
         )
+        activity = self._supervisor.activity_snapshot()
         tools = host_visible_tool_catalog(worker.tools).tools
+        bridge = native_bridge_runtime()
+        bridge_notice = bridge.native_bridge_notice
+        if activity.active_tool_names:
+            bridge_notice = (
+                f"{bridge_notice}; "
+                f"worker_busy_tools={','.join(activity.active_tool_names)}; "
+                f"busy_elapsed_seconds={activity.busy_elapsed_seconds:.3f}; "
+                f"busy_timeout_seconds={activity.busy_timeout_seconds:.3f}; "
+                "busy_timeout_remaining_seconds="
+                f"{activity.busy_timeout_remaining_seconds:.3f}; "
+                "user_action=진행 중인 호출을 취소하거나 제한시간까지 기다리세요. "
+                "취소 또는 제한시간 초과 시 worker가 격리·재시작됩니다. "
+                "즉시 자동화 참조를 끊으려면 hwp_disconnect를 호출하세요"
+            )
+        # worker.runtime is a snapshot taken when the worker cycle started, so
+        # its bridge reading ages the moment Hangul restarts. Re-read it here,
+        # at answer time, or this tool repeats the failure it exists to expose.
         runtime = worker.runtime.model_copy(
             update={
                 "process_id": os.getpid(),
@@ -119,6 +139,8 @@ class ReloadingHwpMCP(FastMCP[None]):
                 "reload_required": (worker.source_hash != worker.loaded_source_hash),
                 "worker_state": worker.worker_state,
                 "reload_state": worker.reload_state,
+                **dict(bridge),
+                "native_bridge_notice": bridge_notice,
             }
         )
         return runtime, worker.reloaded
@@ -149,6 +171,25 @@ class ReloadingHwpMCP(FastMCP[None]):
                     raise ToolError(str(error)) from error
                 await self._notify_if_reloaded(worker.reloaded)
                 result = worker.result
+                failure_tool = worker.supervisor_failure_tool
+                if failure_tool is not None and failure_tool.outputSchema is not None:
+                    failure_text = next(
+                        (
+                            block.text
+                            for block in result.content
+                            if block.type == "text"
+                        ),
+                        "HWP supervisor synthesized an invalid tool result",
+                    )
+                    if result.structuredContent is None:
+                        raise ToolError(failure_text)
+                    try:
+                        jsonschema.validate(
+                            instance=result.structuredContent,
+                            schema=failure_tool.outputSchema,
+                        )
+                    except jsonschema.ValidationError:
+                        raise ToolError(failure_text) from None
                 if result.isError:
                     raise ToolError(
                         str(result.content[0])
@@ -158,7 +199,7 @@ class ReloadingHwpMCP(FastMCP[None]):
                 if result.structuredContent is not None:
                     return _JSON_OBJECT.validate_python(result.structuredContent)
                 return result.content
-            case unreachable:
+            case unreachable:  # pyright: ignore[reportUnnecessaryComparison]
                 assert_never(unreachable)
 
 

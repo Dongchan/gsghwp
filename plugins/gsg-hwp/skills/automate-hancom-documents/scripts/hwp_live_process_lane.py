@@ -447,6 +447,7 @@ class HwpMutationWatchdog:
         "_current_poll_seconds",
         "_poll_max_seconds",
         "_poll_seconds",
+        "_poller_started",
         "_probe",
         "_process_id",
         "_started_at",
@@ -521,6 +522,7 @@ class HwpMutationWatchdog:
         self._current_poll_seconds = poll_seconds
         self._poll_max_seconds = poll_max_seconds
         self._poll_seconds = poll_seconds
+        self._poller_started = False
         self._probe = probe
         self._process_id = process_id
         self._started_at = monotonic() if started_at is None else started_at
@@ -561,6 +563,31 @@ class HwpMutationWatchdog:
                 self._last_event_sequence = after_event_sequence
             self._started_at = monotonic() if started_at is None else started_at
             self._latest = None
+        self._resume_poller_if_it_died()
+
+    def _resume_poller_if_it_died(self) -> None:
+        """종료 판정으로 죽은 배경 폴러만 되살린다.
+
+        폴러는 종료 판정을 한 번 내리면 스스로 돌아 나간다(_run). 다시 무장했다는
+        것은 "그 판정은 낡았다"는 뜻이므로 관측을 재개해야 한다. 재개하지 않으면
+        이후 파일 변화·저장 이벤트가 아무에게도 안 보인다.
+
+        다만 되살리는 대상은 **원래 배경으로 돌던 폴러**뿐이다. start() 를 부른
+        적이 없는 워치독은 호출자가 observe(now=...) 로 시계를 주입해 동기
+        구동하는 것이고(test_hwp_save_watchdog 가 그렇다), 거기에 배경 스레드를
+        띄우면 주입한 시계와 실제 monotonic() 이 같은 _state 를 두고 다툰다.
+        그래서 기동 이력이 없으면 아무것도 하지 않는다. stop() 이 이미 불린
+        뒤에도 되살리지 않는다.
+        """
+
+        with self._lock:
+            started = self._poller_started
+            thread = self._thread
+        if not started or self._stop.is_set():
+            return
+        if thread is not None and thread.is_alive():
+            return
+        self.start()
 
     def _observe_events(self) -> None:
         reader = self._event_reader
@@ -734,6 +761,7 @@ class HwpMutationWatchdog:
             thread = self._thread
             if thread is not None and thread.is_alive():
                 return
+            self._poller_started = True
             self._stop.clear()
             self._thread = Thread(
                 target=self._run,

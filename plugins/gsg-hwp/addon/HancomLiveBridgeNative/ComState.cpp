@@ -10,6 +10,7 @@
 #include <cwctype>
 
 namespace hancom::com_state {
+
 namespace {
 
 using hancom::dispatch::AsBool;
@@ -18,6 +19,62 @@ using hancom::dispatch::AsLong;
 using hancom::dispatch::AsString;
 using hancom::dispatch::Method;
 using hancom::dispatch::PropertyGet;
+
+bool SameComIdentity(
+    IDispatch* const left,
+    IDispatch* const right) noexcept {
+    if (left == nullptr || right == nullptr) {
+        return false;
+    }
+    CComPtr<IUnknown> leftIdentity;
+    CComPtr<IUnknown> rightIdentity;
+    return SUCCEEDED(left->QueryInterface(
+               IID_IUnknown,
+               reinterpret_cast<void**>(&leftIdentity))) &&
+        SUCCEEDED(right->QueryInterface(
+            IID_IUnknown,
+            reinterpret_cast<void**>(&rightIdentity))) &&
+        leftIdentity == rightIdentity;
+}
+
+HRESULT ReadActiveDocument(
+    IDispatch* const documents,
+    CComPtr<IDispatch>& document,
+    LONG* const documentId) noexcept {
+    if (documents == nullptr || documentId == nullptr) {
+        return E_POINTER;
+    }
+    CComVariant raw;
+    HRESULT status = PropertyGet(
+        documents, L"Active_XHwpDocument", &raw);
+    if (SUCCEEDED(status)) {
+        status = AsDispatch(raw, document);
+    }
+    if (SUCCEEDED(status)) {
+        status = PropertyGet(document, L"DocumentID", &raw);
+    }
+    if (SUCCEEDED(status)) {
+        status = AsLong(raw, documentId);
+    }
+    return status;
+}
+
+bool ResolveSavedDocument(
+    const DocumentRoute& route,
+    CComPtr<IDispatch>& resolved) noexcept {
+    if (route.documentId <= 0 || route.documents == nullptr ||
+        route.document == nullptr) {
+        return false;
+    }
+    CComVariant raw;
+    return SUCCEEDED(Method(
+               route.documents,
+               L"FindItem",
+               {CComVariant(route.documentId)},
+               &raw)) &&
+        SUCCEEDED(AsDispatch(raw, resolved)) &&
+        SameComIdentity(resolved, route.document);
+}
 
 bool SetCaptureFailure(
     SelectionCaptureFailure* const failure,
@@ -99,7 +156,8 @@ HRESULT ReadControlIdentity(
 bool TryReadControlIdentity(
     IDispatch* const control,
     std::wstring* const type,
-    std::wstring* const instance) {
+    std::wstring* const instance,
+    bool* const instancePresent) {
     CComVariant raw;
     HRESULT status = PropertyGet(control, L"CtrlID", &raw);
     if (SUCCEEDED(status)) {
@@ -108,24 +166,28 @@ bool TryReadControlIdentity(
     if (FAILED(status)) {
         return false;
     }
-    if (SUCCEEDED(Method(control, L"GetCtrlInstID", {}, &raw))) {
-        static_cast<void>(AsString(raw, instance));
+    status = Method(control, L"GetCtrlInstID", {}, &raw);
+    if (SUCCEEDED(status)) {
+        status = AsString(raw, instance);
     }
+    *instancePresent = SUCCEEDED(status);
     return true;
 }
 
 void ReadCurrentControlBestEffort(
     IDispatch* const hwp,
     std::wstring* const type,
-    std::wstring* const instance) {
+    std::wstring* const instance,
+    bool* const instancePresent) {
     CComPtr<IDispatch> control;
     if (SUCCEEDED(DispatchProperty(hwp, L"CurSelectedCtrl", control)) &&
-        TryReadControlIdentity(control, type, instance)) {
+        TryReadControlIdentity(control, type, instance, instancePresent)) {
         return;
     }
     control.Release();
     if (SUCCEEDED(DispatchProperty(hwp, L"ParentCtrl", control))) {
-        static_cast<void>(TryReadControlIdentity(control, type, instance));
+        static_cast<void>(TryReadControlIdentity(
+            control, type, instance, instancePresent));
     }
 }
 
@@ -154,7 +216,9 @@ bool RunHwpAction(IDispatch* const hwp, const wchar_t* const actionName) {
     return SUCCEEDED(AsBool(raw, &returned)) && returned;
 }
 
-bool ReadCurrentCellAddress(IDispatch* const hwp, std::wstring* const address) {
+bool ReadCurrentCellAddressImpl(
+    IDispatch* const hwp,
+    std::wstring* const address) {
     LONG sectionCount = 0;
     LONG sectionNumber = 0;
     LONG pageNumber = 0;
@@ -251,7 +315,17 @@ bool RestoreTextSelection(IDispatch* const hwp, const Selection& selection) {
         (mode & kSelectionModeMask) == kSelectionText;
 }
 
-bool RestoreCellSelection(IDispatch* const hwp, const Selection& selection) {
+bool RestoreCellSelection(
+    IDispatch* const hwp,
+    const Position& cursor,
+    const Selection& selection) {
+    if (selection.cellAddresses.size() == 1) {
+        const Position position = selection.selected
+            ? selection.start : cursor;
+        return SetExactPosition(hwp, position) &&
+            QualifyCurrentTableCellSelection(
+                hwp, selection.cellAddresses.front());
+    }
     hancom::inspection::CellTopology topology;
     std::wstring error;
     if (!hancom::inspection::InspectTableTopology(
@@ -267,8 +341,8 @@ bool RestoreCellSelection(IDispatch* const hwp, const Selection& selection) {
     std::vector<std::wstring> region;
     const bool planned = selection.cellAddresses.empty()
         ? topology.PlanRectangularSelection(
-            selection.start.list,
-            selection.end.list,
+            selection.selected ? selection.start.list : cursor.list,
+            selection.selected ? selection.end.list : cursor.list,
             &first,
             &last,
             &path,
@@ -301,7 +375,7 @@ bool RestoreCellSelection(IDispatch* const hwp, const Selection& selection) {
                 : L"TableLowerCell";
             std::wstring current;
             if (!RunHwpAction(hwp, actionName) ||
-                !ReadCurrentCellAddress(hwp, &current) ||
+                !ReadCurrentCellAddressImpl(hwp, &current) ||
                 current != step.destination) {
                 return false;
             }
@@ -331,6 +405,74 @@ bool RestoreControlSelection(IDispatch* const hwp, const Selection& selection) {
         type == selection.controlType && instance == selection.controlInstance;
 }
 
+}
+
+bool ReadCurrentCellAddress(
+    IDispatch* const hwp,
+    std::wstring* const address) noexcept {
+    return hwp != nullptr && address != nullptr &&
+        ReadCurrentCellAddressImpl(hwp, address);
+}
+
+bool ReadSelectionMode(IDispatch* const hwp, LONG* const mode) noexcept {
+    return hwp != nullptr && mode != nullptr &&
+        SUCCEEDED(LongProperty(hwp, L"SelectionMode", mode));
+}
+
+bool CaptureDocumentRoute(
+    IDispatch* const hwp,
+    DocumentRoute* const route) noexcept {
+    if (hwp == nullptr || route == nullptr) {
+        return false;
+    }
+    *route = {};
+    CComVariant raw;
+    if (FAILED(PropertyGet(hwp, L"XHwpDocuments", &raw)) ||
+        FAILED(AsDispatch(raw, route->documents)) ||
+        FAILED(ReadActiveDocument(
+            route->documents, route->document, &route->documentId)) ||
+        route->documentId <= 0) {
+        *route = {};
+        return false;
+    }
+    return true;
+}
+
+bool VerifyDocumentRoute(
+    IDispatch* const,
+    const DocumentRoute& route) noexcept {
+    CComPtr<IDispatch> resolved;
+    CComPtr<IDispatch> active;
+    LONG activeId = 0;
+    return ResolveSavedDocument(route, resolved) &&
+        SUCCEEDED(ReadActiveDocument(
+            route.documents, active, &activeId)) &&
+        activeId == route.documentId &&
+        SameComIdentity(active, route.document);
+}
+
+bool RestoreDocumentRoute(
+    IDispatch* const hwp,
+    const DocumentRoute& route) noexcept {
+    CComPtr<IDispatch> resolved;
+    if (hwp == nullptr || !ResolveSavedDocument(route, resolved)) {
+        return false;
+    }
+    CComPtr<IDispatch> active;
+    LONG activeId = 0;
+    if (FAILED(ReadActiveDocument(
+            route.documents, active, &activeId))) {
+        return false;
+    }
+    if (activeId != route.documentId ||
+        !SameComIdentity(active, route.document)) {
+        CComVariant ignored;
+        if (FAILED(Method(
+                resolved, L"SetActive_XHwpDocument", {}, &ignored))) {
+            return false;
+        }
+    }
+    return VerifyDocumentRoute(hwp, route);
 }
 
 HRESULT CapturePosition(IDispatch* const hwp, Position* const position) {
@@ -464,7 +606,8 @@ bool CaptureSelection(
             ReadCurrentControlBestEffort(
                 hwp,
                 &selection->controlType,
-                &selection->controlInstance);
+                &selection->controlInstance,
+                &selection->controlInstancePresent);
         } else {
             const wchar_t* const property = baseMode == kSelectionControl
                 ? L"CurSelectedCtrl"
@@ -484,13 +627,21 @@ bool CaptureSelection(
                     status,
                     property);
             }
+            selection->controlInstancePresent = true;
         }
     }
-    if (baseMode == kSelectionCells && (selection->mode & kSelectionStrict) != 0) {
-        static_cast<void>(hancom::inspection::ReadSelectedCellAddresses(
-            hwp,
-            &selection->cellAddresses,
-            &selection->cellAddressError));
+    if (baseMode == kSelectionCells) {
+        if ((selection->mode & kSelectionStrict) != 0) {
+            static_cast<void>(hancom::inspection::ReadSelectedCellAddresses(
+                hwp,
+                &selection->cellAddresses,
+                &selection->cellAddressError));
+        } else {
+            std::wstring address;
+            if (ReadCurrentCellAddressImpl(hwp, &address)) {
+                selection->cellAddresses.push_back(std::move(address));
+            }
+        }
     }
     return true;
 }
@@ -504,12 +655,11 @@ bool CanRestoreSelection(const Selection& selection) noexcept {
         return selection.selected && selection.start.list == selection.end.list;
     }
     if (baseMode == kSelectionCells) {
-        return (selection.selected || !selection.cellAddresses.empty()) &&
-            selection.controlType == L"tbl" &&
-            !selection.controlInstance.empty();
+        return selection.controlType == L"tbl" &&
+            selection.controlInstancePresent;
     }
     if (baseMode == kSelectionControl) {
-        return !selection.controlInstance.empty();
+        return selection.controlInstancePresent;
     }
     return false;
 }
@@ -526,12 +676,75 @@ bool RestoreSelection(
         return RestoreTextSelection(hwp, selection);
     }
     if (baseMode == kSelectionCells) {
-        return RestoreCellSelection(hwp, selection);
+        return RestoreCellSelection(hwp, cursor, selection);
     }
     if (baseMode == kSelectionControl) {
         return RestoreControlSelection(hwp, selection);
     }
     return false;
+}
+
+bool CollapseSelectionToCursor(
+    IDispatch* const hwp,
+    const Position& cursor) {
+    return hwp != nullptr && SetExactPosition(hwp, cursor);
+}
+
+bool QualifyCurrentTableCellSelection(
+    IDispatch* const hwp,
+    const std::wstring& expectedAddress) {
+    if (hwp == nullptr || expectedAddress.empty() ||
+        !RunHwpAction(hwp, L"TableCellBlock")) {
+        return false;
+    }
+    std::wstring actualAddress;
+    LONG mode = 0;
+    return ReadCurrentCellAddressImpl(hwp, &actualAddress) &&
+        actualAddress == expectedAddress &&
+        SUCCEEDED(LongProperty(hwp, L"SelectionMode", &mode)) &&
+        mode == kSelectionCells;
+}
+
+bool RestoreSelectionAfterMerge(
+    IDispatch* const hwp,
+    const Position& cursor,
+    const Selection& selection,
+    const std::wstring& mergedOwner,
+    const bool ownerFallbackAllowed) {
+    if (RestoreSelection(hwp, cursor, selection)) {
+        return true;
+    }
+    if (!ownerFallbackAllowed || selection.controlType != L"tbl" ||
+        !selection.controlInstancePresent) {
+        return false;
+    }
+    hancom::inspection::CellTopology topology;
+    std::wstring error;
+    if (!hancom::inspection::InspectTableTopology(
+            hwp,
+            selection.controlInstance,
+            &topology,
+            &error)) {
+        return false;
+    }
+    const hancom::inspection::CellTopologyCell* const owner =
+        topology.Find(mergedOwner);
+    if (owner == nullptr ||
+        !SetExactPosition(hwp, Position{owner->listId, 0, 0})) {
+        return false;
+    }
+    if ((selection.mode & kSelectionModeMask) == kSelectionCells &&
+        !RunHwpAction(hwp, L"TableCellBlock")) {
+        return false;
+    }
+    std::wstring current;
+    LONG mode = 0;
+    return ReadCurrentCellAddressImpl(hwp, &current) && current == mergedOwner &&
+        SUCCEEDED(LongProperty(hwp, L"SelectionMode", &mode)) &&
+        (mode & kSelectionModeMask) ==
+            ((selection.mode & kSelectionModeMask) == kSelectionCells
+                ? kSelectionCells
+                : kSelectionNone);
 }
 
 bool SameSelection(const Selection& left, const Selection& right) noexcept {

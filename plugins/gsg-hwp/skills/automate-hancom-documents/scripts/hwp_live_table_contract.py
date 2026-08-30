@@ -9,7 +9,14 @@ from unicodedata import category, normalize
 from pydantic import Field, model_validator
 
 from hwp_color_normalization import ColorInput
-from hwp_live_values import Alignment, ContractModel
+from hwp_live_paragraph_contract import ParagraphBlock
+from hwp_live_values import (
+    Alignment,
+    ContractModel,
+    PlanLeadMm,
+    PlanTrailMm,
+    reject_plan_lead_input,
+)
 
 
 VerticalAlignment = Literal["inherit", "top", "center", "bottom"]
@@ -224,8 +231,30 @@ class TableMerge(ContractModel):
         return self
 
 
+class TableCellStyle(ContractModel):
+    """A caller-selected cell appearance, separate from cell content.
+
+    The public inspection tools report raw evidence; the model decides which
+    sampled cell represents the requested header, body, or picture frame and
+    submits only those selected values here. Unset fields continue to inherit.
+    """
+
+    style_id: int | None = Field(default=None, ge=0, le=4095)
+    bold: bool | None = None
+    font_name: str | None = Field(default=None, max_length=100)
+    font_size_pt: float | None = Field(default=None, ge=1, le=96)
+    text_color: ColorInput | None = None
+    alignment: Alignment = "inherit"
+    vertical_alignment: VerticalAlignment = "inherit"
+    line_spacing_percent: int | None = Field(default=None, ge=50, le=500)
+    fill_color: ColorInput | None = None
+    padding: CellPadding | None = None
+    borders: CellBorders | None = None
+
+
 class TableCell(ContractModel):
     text: str = Field(default="", max_length=20_000)
+    paragraphs: tuple[ParagraphBlock, ...] = Field(default=(), max_length=100)
     style_id: int | None = Field(default=None, ge=0, le=4095)
     image_path: Path | None = None
     image_width_mm: float | None = Field(default=None, ge=1, le=250)
@@ -242,6 +271,16 @@ class TableCell(ContractModel):
     borders: CellBorders | None = None
 
     @model_validator(mode="after")
+    def validate_paragraphs(self) -> TableCell:
+        if self.paragraphs:
+            paragraph_text = "\n".join(paragraph.text for paragraph in self.paragraphs)
+            if self.text and self.text != paragraph_text:
+                raise ValueError("table cell text must match its paragraphs")
+            if not self.text:
+                object.__setattr__(self, "text", paragraph_text)
+        return self
+
+    @model_validator(mode="after")
     def validate_image(self) -> TableCell:
         dimensions = self.image_width_mm is not None or self.image_height_mm is not None
         if self.image_path is None and dimensions:
@@ -251,6 +290,15 @@ class TableCell(ContractModel):
         ):
             raise ValueError("image_path requires width and height")
         return self
+
+
+def apply_cell_style(cell: TableCell, style: TableCellStyle | None) -> TableCell:
+    """Overlay only values the caller explicitly selected from observations."""
+    if style is None:
+        return cell
+    return cell.model_copy(
+        update={name: getattr(style, name) for name in style.model_fields_set}
+    )
 
 
 class TableBlock(ContractModel):
@@ -278,6 +326,15 @@ class TableBlock(ContractModel):
     rows: tuple[tuple[TableCell, ...], ...] = Field(min_length=1, max_length=50)
     column_widths_mm: tuple[float, ...] | None = None
     column_width_weights: tuple[float, ...] | None = None
+    target_width_mm: float | None = Field(
+        default=None,
+        ge=1,
+        le=250,
+        description=(
+            "관측한 표 전체 폭. column_width_weights와 함께 쓸 때만 각 열의 "
+            "절대 폭으로 환산하며, 생략하면 현재 본문 가용 폭을 쓴다."
+        ),
+    )
     minimum_column_widths_mm: tuple[float, ...] | None = None
     row_heights_mm: tuple[float, ...] | None = None
     auto_fit_row_heights: bool = False
@@ -289,6 +346,13 @@ class TableBlock(ContractModel):
     left_margin_mm: float = Field(default=0, ge=0, le=100)
     right_margin_mm: float = Field(default=0, ge=0, le=100)
     indentation_mm: float = Field(default=0, ge=-100, le=100)
+    plan_lead_mm: PlanLeadMm = None
+    plan_trail_mm: PlanTrailMm = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def refuse_plan_lead_input(cls, data: object) -> object:
+        return reject_plan_lead_input(data)
 
     @model_validator(mode="after")
     def validate_shape(self) -> TableBlock:
@@ -322,6 +386,13 @@ class TableBlock(ContractModel):
                 raise ValueError("column width weights must match the column count")
             if any(weight <= 0 for weight in self.column_width_weights):
                 raise ValueError("column width weights must be positive")
+        if self.target_width_mm is not None:
+            if self.column_widths_mm is not None:
+                raise ValueError(
+                    "target table width and explicit column widths are mutually exclusive"
+                )
+            if self.column_width_weights is None:
+                raise ValueError("target table width requires column width weights")
         if self.minimum_column_widths_mm is not None:
             if len(self.minimum_column_widths_mm) != columns:
                 raise ValueError("minimum column widths must match the column count")

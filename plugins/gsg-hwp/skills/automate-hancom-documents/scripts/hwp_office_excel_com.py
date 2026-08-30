@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import re
+import shutil
+import tempfile
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-import pythoncom
 from pywintypes import com_error
 
 from hwp_errors import HwpLiveError
@@ -152,6 +155,58 @@ class _Win32Client(Protocol):
     def DispatchEx(self, program_id: str) -> _ExcelApplication: ...
 
 
+@runtime_checkable
+class _PythonCom(Protocol):
+    def CoInitialize(self) -> None: ...
+    def CoUninitialize(self) -> None: ...
+
+
+def _python_com() -> _PythonCom:
+    """Load pythoncom on use, never at import.
+
+    A module-level ``import pythoncom`` puts the COM runtime into
+    ``sys.modules`` for every process that merely imports this module —
+    pytest collection included — which breaks the callers that assert no
+    Hancom/COM module was ever loaded. ``win32com.client`` below is loaded
+    the same way for the same reason.
+    """
+    module = import_module("pythoncom")
+    if not isinstance(module, _PythonCom):
+        raise HwpLiveError("pythoncom 모듈 계약이 올바르지 않습니다")
+    return module
+
+
+@contextmanager
+def _readable_copy(path: Path) -> Generator[Path, None, None]:
+    """Hand Excel a throwaway copy so the source file is never written to.
+
+    ``Workbooks.Open(..., ReadOnly=True)`` only makes the *document model*
+    read-only. Excel still opens the file for writing at the storage layer and
+    stamps the modify FILETIME in the OLE2 container root -- measured on a
+    legacy ``.xls``: content byte-identical, exactly 8 bytes changed. That is
+    enough to break any caller that pins the source by hash. Reading a copy is
+    the only way to keep the original bytes fixed, because the write happens
+    inside Excel before any Python code can intervene.
+
+    The copy lives in its own temporary directory, so it can keep the source
+    file name (Excel picks its parser from the extension) without colliding
+    with anything. ``copyfile`` takes the bytes only: a read-only source
+    attribute is not carried over, which would otherwise make Excel refuse the
+    copy as well.
+    """
+    source = path.resolve()
+    directory = Path(tempfile.mkdtemp(prefix="hwp-excel-read-"))
+    try:
+        target = directory / source.name
+        _ = shutil.copyfile(source, target)
+        yield target
+    finally:
+        # Excel is already closed by the time this runs. ``ignore_errors``
+        # keeps a still-locked copy from masking the real failure; the file is
+        # in the OS temp directory either way.
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 def _coordinate(value: str) -> tuple[int, int]:
     match = re.fullmatch(r"\$?([A-Z]+)\$?([1-9][0-9]*)", value.upper())
     if match is None:
@@ -231,6 +286,29 @@ def read_excel_range(
     sheet_index: int = 0,
     cell_range: str | None = None,
 ) -> ExcelRangeData:
+    """Read a range out of ``path`` without touching a single byte of it."""
+    try:
+        with _readable_copy(path) as readable:
+            return _read_opened_excel_range(
+                readable,
+                path,
+                sheet_name=sheet_name,
+                sheet_index=sheet_index,
+                cell_range=cell_range,
+            )
+    except OSError as error:
+        raise HwpLiveError(f"Excel 표를 읽지 못했습니다: {path}") from error
+
+
+def _read_opened_excel_range(
+    readable: Path,
+    source: Path,
+    *,
+    sheet_name: str | None,
+    sheet_index: int,
+    cell_range: str | None,
+) -> ExcelRangeData:
+    pythoncom = _python_com()
     pythoncom.CoInitialize()
     application: _ExcelApplication | None = None
     workbook: _Workbook | None = None
@@ -242,7 +320,8 @@ def read_excel_range(
         application.Visible = False
         application.DisplayAlerts = False
         workbook = application.Workbooks.Open(
-            str(path.resolve()),
+            # The copy, never ``source`` -- see ``_readable_copy``.
+            str(readable),
             UpdateLinks=0,
             ReadOnly=True,
             IgnoreReadOnlyRecommended=True,
@@ -304,8 +383,15 @@ def read_excel_range(
             ),
             merges=tuple(sorted(merges, key=lambda item: (item.row, item.column))),
         )
-    except (AttributeError, OSError, RuntimeError, TypeError, ValueError, com_error) as error:
-        raise HwpLiveError(f"Excel 표를 읽지 못했습니다: {path}") from error
+    except (
+        AttributeError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        com_error,
+    ) as error:
+        raise HwpLiveError(f"Excel 표를 읽지 못했습니다: {source}") from error
     finally:
         try:
             if workbook is not None:

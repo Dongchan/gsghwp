@@ -6,12 +6,23 @@ from dataclasses import dataclass
 from typing import Final, Literal
 
 from hwp_color_normalization import parse_rgb_color
-from hwp_live_table_contract import CellBorder, CellBorders, CellPadding, TableCell
+from hwp_live_table_contract import (
+    BorderWidth,
+    CellBorder,
+    CellBorders,
+    CellPadding,
+    TableCell,
+)
 from hwp_live_values import Alignment, Rgb
 from hwp_operation_contract import OperationInputValue
 
 
 _ADDRESS: Final = re.compile(r"^[A-Z]+[1-9][0-9]*$")
+# 한 요청이 펼칠 수 있는 셀 수의 상한이다. 이 위로는 명령 batch 분할
+# (hwp_live_native_format_commands._table_format_batches)이 감당하는 문제가
+# 아니라 요청 자체가 표를 잘못 짚은 것이다.
+_MAX_TABLE_FORMAT_CELLS: Final = 20_000
+_DECIMAL: Final = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$")
 _ALIGNMENTS: Final[dict[str, Alignment]] = {
     "inherit": "inherit",
     "left": "left",
@@ -20,14 +31,67 @@ _ALIGNMENTS: Final[dict[str, Alignment]] = {
     "justify": "justify",
 }
 _VERTICAL_ALIGNMENTS: Final = frozenset(("inherit", "top", "center", "bottom"))
-_BORDER_STYLES: Final = frozenset(("none", "solid", "dash", "dot", "dash_dot", "dash_dot_dot", "long_dash", "circle", "double_slim", "slim_thick", "thick_slim", "slim_thick_slim"))
-_BORDER_WIDTHS: Final = frozenset(("0.1mm", "0.12mm", "0.15mm", "0.2mm", "0.25mm", "0.3mm", "0.4mm", "0.5mm", "0.6mm", "0.7mm", "1.0mm", "1.5mm", "2.0mm", "3.0mm", "4.0mm", "5.0mm"))
+_BORDER_STYLES: Final = frozenset(
+    (
+        "none",
+        "solid",
+        "dash",
+        "dot",
+        "dash_dot",
+        "dash_dot_dot",
+        "long_dash",
+        "circle",
+        "double_slim",
+        "slim_thick",
+        "thick_slim",
+        "slim_thick_slim",
+    )
+)
+_BORDER_WIDTHS: Final[dict[float, BorderWidth]] = {
+    0.1: "0.1mm",
+    0.12: "0.12mm",
+    0.15: "0.15mm",
+    0.2: "0.2mm",
+    0.25: "0.25mm",
+    0.3: "0.3mm",
+    0.4: "0.4mm",
+    0.5: "0.5mm",
+    0.6: "0.6mm",
+    0.7: "0.7mm",
+    1.0: "1.0mm",
+    1.5: "1.5mm",
+    2.0: "2.0mm",
+    3.0: "3.0mm",
+    4.0: "4.0mm",
+    5.0: "5.0mm",
+}
 _TEXT_KEYS: Final = frozenset(
     ("bold", "font_name", "font_size_pt", "text_color", "alignment", "line_spacing")
+)
+# 서식 값이 아니라 "어느 텍스트인가" 를 적어 두는 이름들이다
+# (hwp_public_selection_tools._text_patch_parameters 가 만든다). 허용 목록에
+# 넣어 조용히 무시하면 지목한 곳이 아니라 현재 선택에 서식이 걸리므로 거부는
+# 그대로 두고, 거부 문구만 어느 자리가 섞였는지 말한다.
+_TARGETING_KEYS: Final = frozenset(
+    (
+        "target_kind",
+        "match_case",
+        "occurrence",
+        "expected_text",
+        "replacement",
+        "start_list",
+        "start_paragraph",
+        "start_character",
+        "end_list",
+        "end_paragraph",
+        "end_character",
+        "table_instance_id",
+    )
 )
 _TABLE_KEYS: Final = _TEXT_KEYS | frozenset(
     (
         "cell",
+        "cells",
         "row_height_mm",
         "column_width_mm",
         "padding_left_mm",
@@ -66,6 +130,9 @@ class TableFormatSpec:
     formatting: TableCell
     row_height_mm: float | None
     column_width_mm: float | None
+    # 여러 셀을 한 요청에 담을 때 실제로 적용할 주소들이다. 'A4:P4' 같은 구간은
+    # 여기서 이미 펼쳐진 상태이고, cell 하나만 온 요청은 그 하나가 들어온다.
+    cells: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,17 +167,81 @@ def table_cell_coordinate(address: str) -> tuple[int, int]:
     return int(address[index:]), column
 
 
-def _millimeters(value: OperationInputValue | None) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+def table_cell_address(row: int, column: int) -> str:
+    """Inverse of ``table_cell_coordinate``.
+
+    A split moves the grid under addresses the caller already holds, and the
+    only way to say "C2 is now D2" without guessing is to build the new
+    address from the coordinates the live topology reports.
+    """
+    letters = ""
+    remaining = column
+    while remaining > 0:
+        remaining, index = divmod(remaining - 1, 26)
+        letters = chr(ord("A") + index) + letters
+    return f"{letters}{row}"
+
+
+def _cell_range(token: str) -> tuple[str, ...] | None:
+    """'A4:P4' 를 그 직사각형이 덮는 주소들로 편다.
+
+    두 끝점이 어느 순서로 오든 같은 직사각형이므로 좌표를 정렬한 뒤 편다.
+    격자 위의 좌표만 만들 뿐이고, 그 주소가 실제 표에 있는지는 여기서 알 수
+    없다 -- 병합 셀이 감춘 주소는 뒤에서 CellTopology 가 판정한다.
+    """
+    start, _, end = token.partition(":")
+    if _ADDRESS.fullmatch(start) is None or _ADDRESS.fullmatch(end) is None:
         return None
-    parsed = float(value)
+    start_row, start_column = table_cell_coordinate(start)
+    end_row, end_column = table_cell_coordinate(end)
+    top, bottom = sorted((start_row, end_row))
+    left, right = sorted((start_column, end_column))
+    if (bottom - top + 1) * (right - left + 1) > _MAX_TABLE_FORMAT_CELLS:
+        return None
+    return tuple(
+        table_cell_address(row, column)
+        for row in range(top, bottom + 1)
+        for column in range(left, right + 1)
+    )
+
+
+def _cell_addresses(value: OperationInputValue | None) -> tuple[str, ...] | None:
+    """``cells`` 입력을 실제 셀 주소들로 편다.
+
+    OperationInputValue 는 스칼라만 담으므로 목록은 쉼표로 이어 붙여 온다
+    (hwp_public_table_edit_tools.hwp_format_table 이 만든다). 각 조각은 셀
+    주소이거나 'A4:P4' 형태의 구간이다.
+    """
+    if not isinstance(value, str):
+        return None
+    addresses: list[str] = []
+    for token in value.split(","):
+        normalized = token.strip().upper()
+        if ":" in normalized:
+            expanded = _cell_range(normalized)
+        elif _ADDRESS.fullmatch(normalized) is not None:
+            expanded = (normalized,)
+        else:
+            expanded = None
+        if expanded is None:
+            return None
+        addresses.extend(expanded)
+        if len(addresses) > _MAX_TABLE_FORMAT_CELLS:
+            return None
+    return tuple(addresses)
+
+
+def _millimeters(value: OperationInputValue | None) -> float | None:
+    parsed = _number(value)
+    if parsed is None:
+        return None
     return parsed if 1 <= parsed <= 250 else None
 
 
 def _padding_millimeters(value: OperationInputValue | None) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    parsed = _number(value)
+    if parsed is None:
         return None
-    parsed = float(value)
     return parsed if 0 <= parsed <= 20 else None
 
 
@@ -121,28 +252,92 @@ def _rgb(value: OperationInputValue | None) -> Rgb | None:
 def _boolean(value: OperationInputValue | None) -> bool | None:
     if isinstance(value, bool):
         return value
+    if isinstance(value, int):
+        return bool(value) if value in (0, 1) else None
+    if isinstance(value, str):
+        return {"false": False, "0": False, "true": True, "1": True}.get(
+            value.strip().casefold()
+        )
     return None
 
 
-def _integer(value: OperationInputValue | None, minimum: int, maximum: int) -> int | None:
-    if isinstance(value, bool):
+def _integer(
+    value: OperationInputValue | None, minimum: int, maximum: int
+) -> int | None:
+    if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, int):
-        return value if minimum <= value <= maximum else None
-    return None
+        parsed = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            return None
+        parsed = int(value)
+    else:
+        token = value.strip()
+        digits = token.removeprefix("+")
+        if not digits.isdecimal():
+            return None
+        parsed = int(digits)
+    return parsed if minimum <= parsed <= maximum else None
 
 
-def _unknown(parameters: Mapping[str, OperationInputValue], allowed: frozenset[str]) -> InputFailure | None:
+def _number(value: OperationInputValue | None) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    token = value.strip()
+    return float(token) if _DECIMAL.fullmatch(token) is not None else None
+
+
+def normalize_format_name_input(value: OperationInputValue | None) -> str | None:
+    return value.strip().casefold() if isinstance(value, str) else None
+
+
+def normalize_border_width_input(
+    value: OperationInputValue | None,
+) -> BorderWidth | None:
+    normalized = normalize_format_name_input(value)
+    numeric: OperationInputValue | None = value
+    if normalized is not None:
+        numeric = normalized[:-2].strip() if normalized.endswith("mm") else normalized
+    parsed = _number(numeric)
+    return None if parsed is None else _BORDER_WIDTHS.get(parsed)
+
+
+def _unknown(
+    parameters: Mapping[str, OperationInputValue],
+    allowed: frozenset[str],
+    where: str,
+) -> InputFailure | None:
+    """Say which names are wrong, and say it about the caller's own path.
+
+    ``where`` exists because four parsers share this -- text format, table
+    format, merge and split -- and they do not receive their target the same
+    way. The text path formats whatever is selected; the other three act on a
+    table that was resolved before parsing. One sentence about "the current
+    selection" is false for three of the four, so each caller supplies its own
+    clause. ``tests/test_hwp_text_patch.py`` asserts all four.
+    """
     names = tuple(sorted(set(parameters) - allowed))
     if not names:
         return None
-    return InputFailure("schema_conflict", f"지원하지 않는 서식 입력 필드입니다: {', '.join(names)}")
+    targeting = tuple(name for name in names if name in _TARGETING_KEYS)
+    if targeting:
+        return InputFailure(
+            "schema_conflict",
+            f"대상 지정 값이 서식 입력에 섞여 있습니다: {', '.join(targeting)}. "
+            + f"{where}, 대상 지정은 target으로 받습니다",
+        )
+    return InputFailure(
+        "schema_conflict", f"지원하지 않는 서식 입력 필드입니다: {', '.join(names)}"
+    )
 
 
 def parse_text_format(
     parameters: Mapping[str, OperationInputValue],
 ) -> TextFormatSpec | InputFailure:
-    unknown = _unknown(parameters, _TEXT_KEYS)
+    unknown = _unknown(parameters, _TEXT_KEYS, "이 경로는 현재 선택에만 서식을 걸고")
     if unknown is not None:
         return unknown
     if not parameters:
@@ -154,19 +349,24 @@ def parse_text_format(
     bold = None if "bold" not in parameters else _boolean(parameters.get("bold"))
     name = parameters.get("font_name")
     font_name = name.strip() if isinstance(name, str) and name.strip() else None
-    font_size_value = parameters.get("font_size_pt")
+    font_size_value = _number(parameters.get("font_size_pt"))
     font_size = (
-        None
-        if "font_size_pt" not in parameters
-        or isinstance(font_size_value, bool)
-        or not isinstance(font_size_value, (int, float))
-        or not 1 <= font_size_value <= 96
-        else float(font_size_value)
+        font_size_value
+        if "font_size_pt" in parameters
+        and font_size_value is not None
+        and 1 <= font_size_value <= 96
+        else None
     )
-    color = None if "text_color" not in parameters else _rgb(parameters.get("text_color"))
+    color = (
+        None if "text_color" not in parameters else _rgb(parameters.get("text_color"))
+    )
     raw_alignment = parameters.get("alignment", "inherit")
-    alignment = _ALIGNMENTS.get(raw_alignment) if isinstance(raw_alignment, str) else None
-    spacing = None if "line_spacing" not in parameters else _integer(parameters.get("line_spacing"), 50, 500)
+    alignment = _ALIGNMENTS.get(normalize_format_name_input(raw_alignment) or "")
+    spacing = (
+        None
+        if "line_spacing" not in parameters
+        else _integer(parameters.get("line_spacing"), 50, 500)
+    )
     if alignment is None:
         return InputFailure("schema_conflict", "문단 정렬 값이 올바르지 않습니다")
     invalid = (
@@ -177,18 +377,35 @@ def parse_text_format(
         or ("line_spacing" in parameters and spacing is None)
     )
     if invalid:
-        return InputFailure("schema_conflict", "글자·문단 서식 입력 형식이나 범위가 올바르지 않습니다")
+        return InputFailure(
+            "schema_conflict", "글자·문단 서식 입력 형식이나 범위가 올바르지 않습니다"
+        )
     return TextFormatSpec(bold, font_name, font_size, color, alignment, spacing)
 
 
 def parse_table_format(
     parameters: Mapping[str, OperationInputValue],
 ) -> TableFormatSpec | InputFailure:
-    unknown = _unknown(parameters, _TABLE_KEYS)
+    unknown = _unknown(
+        parameters, _TABLE_KEYS, "이 경로는 확정된 표 하나에만 서식을 걸고"
+    )
     if unknown is not None:
         return unknown
     cell = _address(parameters.get("cell"))
-    format_parameters = {name: value for name, value in parameters.items() if name in _TEXT_KEYS}
+    cells: tuple[str, ...] = () if cell is None else (cell,)
+    if "cells" in parameters:
+        expanded = _cell_addresses(parameters.get("cells"))
+        if expanded is None:
+            return InputFailure(
+                "schema_conflict",
+                "cells는 'A4:P4' 형식의 구간이거나 쉼표로 이어 붙인 셀 주소여야 "
+                f"하고, 펼친 셀 수는 {_MAX_TABLE_FORMAT_CELLS}개를 넘을 수 없습니다",
+            )
+        # cell 과 cells 가 같이 오면 겹치는 주소를 두 번 방문하지 않는다.
+        cells = tuple(dict.fromkeys((*cells, *expanded)))
+    format_parameters = {
+        name: value for name, value in parameters.items() if name in _TEXT_KEYS
+    }
     row_height = (
         None
         if "row_height_mm" not in parameters
@@ -199,9 +416,8 @@ def parse_table_format(
         if "column_width_mm" not in parameters
         else _millimeters(parameters.get("column_width_mm"))
     )
-    if (
-        ("row_height_mm" in parameters and row_height is None)
-        or ("column_width_mm" in parameters and column_width is None)
+    if ("row_height_mm" in parameters and row_height is None) or (
+        "column_width_mm" in parameters and column_width is None
     ):
         return InputFailure(
             "schema_conflict",
@@ -242,22 +458,38 @@ def parse_table_format(
             top_mm=top_padding,
             bottom_mm=bottom_padding,
         )
-    text = parse_text_format(format_parameters) if format_parameters else TextFormatSpec(None, None, None, None, "inherit", None)
+    text = (
+        parse_text_format(format_parameters)
+        if format_parameters
+        else TextFormatSpec(None, None, None, None, "inherit", None)
+    )
     if isinstance(text, InputFailure):
         return text
-    vertical = parameters.get("vertical_alignment", "inherit")
-    if not isinstance(vertical, str) or vertical not in _VERTICAL_ALIGNMENTS:
+    vertical = normalize_format_name_input(
+        parameters.get("vertical_alignment", "inherit")
+    )
+    if vertical not in _VERTICAL_ALIGNMENTS:
         return InputFailure("schema_conflict", "셀 세로 정렬 값이 올바르지 않습니다")
-    fill = None if "fill_color" not in parameters else _rgb(parameters.get("fill_color"))
-    border_color = (0, 0, 0) if "border_color" not in parameters else _rgb(parameters.get("border_color"))
-    border_style = parameters.get("border_style", "solid")
-    border_width = parameters.get("border_width", "0.12mm")
-    has_border = any(name in parameters for name in ("border_color", "border_style", "border_width"))
+    fill = (
+        None if "fill_color" not in parameters else _rgb(parameters.get("fill_color"))
+    )
+    border_color = (
+        (0, 0, 0)
+        if "border_color" not in parameters
+        else _rgb(parameters.get("border_color"))
+    )
+    border_style = normalize_format_name_input(parameters.get("border_style", "solid"))
+    border_width = normalize_border_width_input(
+        parameters.get("border_width", "0.12mm")
+    )
+    has_border = any(
+        name in parameters for name in ("border_color", "border_style", "border_width")
+    )
     if ("fill_color" in parameters and fill is None) or border_color is None:
         return InputFailure("schema_conflict", "셀 색상 값이 올바르지 않습니다")
-    if not isinstance(border_style, str) or border_style not in _BORDER_STYLES:
+    if border_style not in _BORDER_STYLES:
         return InputFailure("schema_conflict", "셀 테두리 종류가 올바르지 않습니다")
-    if not isinstance(border_width, str) or border_width not in _BORDER_WIDTHS:
+    if border_width is None:
         return InputFailure("schema_conflict", "셀 테두리 두께가 올바르지 않습니다")
     has_format = (
         bool(format_parameters)
@@ -269,7 +501,11 @@ def parse_table_format(
         or has_border
     )
     if not has_format:
-        return InputFailure("needs_input", "적용할 셀 서식이 필요합니다", ("inputs.parameters.fill_color", "inputs.parameters.border_width"))
+        return InputFailure(
+            "needs_input",
+            "적용할 셀 서식이 필요합니다",
+            ("inputs.parameters.fill_color", "inputs.parameters.border_width"),
+        )
     borders = None
     if has_border:
         border = CellBorder(style=border_style, width=border_width, color=border_color)
@@ -290,11 +526,16 @@ def parse_table_format(
         ),
         row_height,
         column_width,
+        cells,
     )
 
 
-def parse_merge(parameters: Mapping[str, OperationInputValue]) -> MergeSpec | InputFailure:
-    unknown = _unknown(parameters, frozenset(("start", "end")))
+def parse_merge(
+    parameters: Mapping[str, OperationInputValue],
+) -> MergeSpec | InputFailure:
+    unknown = _unknown(
+        parameters, frozenset(("start", "end")), "이 경로는 확정된 표의 셀만 병합하고"
+    )
     if unknown is not None:
         return unknown
     start, end = _address(parameters.get("start")), _address(parameters.get("end"))
@@ -302,9 +543,11 @@ def parse_merge(parameters: Mapping[str, OperationInputValue]) -> MergeSpec | In
     # tells the caller to supply a cell is what made models invent addresses
     # like A1 or F3 and merge the wrong cells.
     if start is None or end is None:
-        return InputFailure("needs_input", "병합할 시작·끝 셀을 현재 선택에서도 전달된 입력에서도 확인하지 못했습니다", ("inputs.parameters.start", "inputs.parameters.end"))
-    if start == end:
-        return InputFailure("schema_conflict", "병합할 서로 다른 두 셀을 확인하지 못했습니다")
+        return InputFailure(
+            "needs_input",
+            "병합할 시작·끝 셀을 현재 선택에서도 전달된 입력에서도 확인하지 못했습니다",
+            ("inputs.parameters.start", "inputs.parameters.end"),
+        )
     # Two opposite corners of one rectangle may arrive in any order. Which
     # rectangle they span depends on the row_span/column_span of the addressed
     # cells, so the order is normalized against the live CellTopology in
@@ -312,9 +555,13 @@ def parse_merge(parameters: Mapping[str, OperationInputValue]) -> MergeSpec | In
     return MergeSpec(start, end)
 
 
-def parse_split(parameters: Mapping[str, OperationInputValue]) -> SplitSpec | InputFailure:
-    allowed = frozenset(("cell", "columns", "rows", "distribute_height", "merge", "split_mode"))
-    unknown = _unknown(parameters, allowed)
+def parse_split(
+    parameters: Mapping[str, OperationInputValue],
+) -> SplitSpec | InputFailure:
+    allowed = frozenset(
+        ("cell", "columns", "rows", "distribute_height", "merge", "split_mode")
+    )
+    unknown = _unknown(parameters, allowed, "이 경로는 확정된 표의 셀만 나누고")
     if unknown is not None:
         return unknown
     cell = _address(parameters.get("cell"))
@@ -324,17 +571,34 @@ def parse_split(parameters: Mapping[str, OperationInputValue]) -> SplitSpec | In
         return InputFailure(
             "needs_input",
             "나눌 셀과 칸·줄 수를 현재 선택에서도 전달된 입력에서도 확인하지 못했습니다",
-            ("inputs.parameters.cell", "inputs.parameters.columns", "inputs.parameters.rows"),
+            (
+                "inputs.parameters.cell",
+                "inputs.parameters.columns",
+                "inputs.parameters.rows",
+            ),
         )
     if columns == 1 and rows == 1:
-        return InputFailure("schema_conflict", "셀 나누기는 칸 또는 줄 수가 2 이상이어야 합니다")
+        return InputFailure(
+            "schema_conflict", "셀 나누기는 칸 또는 줄 수가 2 이상이어야 합니다"
+        )
     flags: list[bool] = []
     for name, default in (("distribute_height", False), ("merge", False)):
         parsed = default if name not in parameters else _boolean(parameters.get(name))
         if parsed is None:
-            return InputFailure("schema_conflict", f"inputs.parameters.{name} 값은 boolean이어야 합니다")
+            return InputFailure(
+                "schema_conflict", f"inputs.parameters.{name} 값은 boolean이어야 합니다"
+            )
         flags.append(parsed)
-    split_mode = parameters.get("split_mode", "equal")
+    # 기본값은 equal 이다. existing_grid 로 바꾸면 안 된다.
+    # existing_grid 는 Mode2=1 을 보내는데, 한컴 공식 ParameterSetTable 149쪽의
+    # Mode2 는 "셀 나누기 모드 2, 셀 나누기를 할 때 adjust를 생략하고 셀이
+    # 어긋나는 것을 방지한다"이지 "표 격자를 늘리지 않는다"가 아니다.
+    # 세로로 나누면 한/글 표의 전역 격자에 세로선이 생기는 것은 두 모드 모두
+    # 같고, 사람이 UI에서 나눠도 같다. existing_grid 는 병합 셀이 감춘
+    # row_span×column_span 격자를 그대로 되살릴 때만 쓰는 모드라서
+    # verify_split_preflight 가 대상 셀의 span과 정확히 같기를 요구한다.
+    # 기본값으로 두면 평범한 1×1 셀 나누기가 전부 schema_conflict 로 거절된다.
+    split_mode = normalize_format_name_input(parameters.get("split_mode", "equal"))
     if split_mode not in ("equal", "existing_grid"):
         return InputFailure(
             "schema_conflict",

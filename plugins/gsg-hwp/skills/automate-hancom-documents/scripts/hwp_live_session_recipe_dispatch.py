@@ -29,6 +29,7 @@ from hwp_operation_contract import (
     WorkflowResolution,
 )
 from hwp_priority_object_recipes import operate_object_recipe
+from hwp_priority_picture_edit import PictureEditRequest, operate_picture_edit_recipe
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
 from hwp_priority_table_recipes import operate_table_recipe
 
@@ -82,6 +83,7 @@ def operate_resolved_recipe(
     )
     if native_format is not None:
         return native_format
+
     priority_table = operate_table_recipe(
         candidate,
         hwp,
@@ -94,9 +96,25 @@ def operate_resolved_recipe(
         recipe,
         resolve_only=resolve_only,
         allow_document_change=allow_document_change,
+        history=live_edit_history,
     )
     if priority_table is not None:
         return priority_table
+    picture_edit = operate_picture_edit_recipe(
+        PictureEditRequest(
+            candidate=candidate,
+            hwp=hwp,
+            routing_page=routing_page,
+            resolution=resolution,
+            target=target,
+            parameters=inputs,
+            resolve_only=resolve_only,
+            allow_document_change=allow_document_change,
+            recipe=recipe,
+        )
+    )
+    if picture_edit is not None:
+        return picture_edit
     priority_object = operate_object_recipe(
         candidate,
         hwp,

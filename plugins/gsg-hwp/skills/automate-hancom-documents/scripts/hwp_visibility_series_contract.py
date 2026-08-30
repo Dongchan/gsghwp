@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Final, final
 
 from hwp_live_structure_contract import StructureCell
+from hwp_visibility_template_observation import VisibilityTemplateObservation
 
 
 CIRCLED_NUMBERS: Final = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
@@ -13,10 +14,15 @@ IMAGE_HEIGHT_MM: Final = 63.0
 
 @final
 class VisibilitySeriesPlanError(Exception):
-    __slots__ = ("message",)
+    __slots__ = ("message", "template_observation")
 
-    def __init__(self, message: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        template_observation: VisibilityTemplateObservation | None = None,
+    ) -> None:
         self.message = message
+        self.template_observation = template_observation
         super().__init__(message)
 
 

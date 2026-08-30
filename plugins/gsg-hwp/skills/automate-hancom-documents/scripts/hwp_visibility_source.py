@@ -43,7 +43,9 @@ def extract_visibility_records(table: StructureTable) -> tuple[VisibilityRecord,
         lambda cell: compact_cell_text(cell.text).startswith("표고"),
     )
     if len({location_header.row, distance_header.row, elevation_header.row}) != 1:
-        raise VisibilitySeriesPlanError("원본 표의 조망위치·이격거리·표고 머리글 행이 다릅니다")
+        raise VisibilitySeriesPlanError(
+            "원본 표의 조망위치·이격거리·표고 머리글 행이 다릅니다"
+        )
     number_column = location_header.column - 1
     category_column = number_column - 1
     if category_column < 0:
@@ -54,9 +56,7 @@ def extract_visibility_records(table: StructureTable) -> tuple[VisibilityRecord,
         for cell in owners
         if cell.row > location_header.row
         and cell.column == number_column
-        and (
-            match := _VIEWPOINT_NUMBER.fullmatch(compact_cell_text(cell.text))
-        )
+        and (match := _VIEWPOINT_NUMBER.fullmatch(compact_cell_text(cell.text)))
         is not None
     )
     records: list[VisibilityRecord] = []
@@ -85,13 +85,24 @@ def extract_visibility_records(table: StructureTable) -> tuple[VisibilityRecord,
             )
         )
     if not records:
-        raise VisibilitySeriesPlanError("원본 표에서 숫자 조망점 레코드를 찾지 못했습니다")
+        raise VisibilitySeriesPlanError(
+            "원본 표에서 숫자 조망점 레코드를 찾지 못했습니다"
+        )
     return tuple(records)
 
 
 def numbered_image(folder: Path, number: int) -> Path:
+    path = optional_numbered_image(folder, number)
+    if path is None:
+        if not folder.is_dir():
+            raise VisibilitySeriesPlanError(f"사진 폴더가 없습니다: {folder}")
+        raise VisibilitySeriesPlanError(f"{number}번 사진을 찾지 못했습니다: {folder}")
+    return path
+
+
+def optional_numbered_image(folder: Path, number: int) -> Path | None:
     if not folder.is_dir():
-        raise VisibilitySeriesPlanError(f"사진 폴더가 없습니다: {folder}")
+        return None
     matches: list[Path] = []
     for path in folder.iterdir():
         if not path.is_file() or path.suffix.casefold() not in _IMAGE_EXTENSIONS:
@@ -100,7 +111,7 @@ def numbered_image(folder: Path, number: int) -> Path:
         if prefix is not None and int(prefix.group(1)) == number:
             matches.append(path.resolve())
     if not matches:
-        raise VisibilitySeriesPlanError(f"{number}번 사진을 찾지 못했습니다: {folder}")
+        return None
     if len(matches) > 1:
         raise VisibilitySeriesPlanError(
             f"{number}번 사진이 여러 개입니다: {tuple(path.name for path in matches)}"

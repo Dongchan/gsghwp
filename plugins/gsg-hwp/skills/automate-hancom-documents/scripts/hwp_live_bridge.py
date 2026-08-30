@@ -25,7 +25,9 @@ from hwp_errors import (
 from hwp_live_bridge_contract import (
     BridgeSnapshot,
     BridgeState,
+    HancomDialogActionResult,
     HancomDialogDismissResult,
+    HancomPopupStructure,
     HancomWindowState,
     HancomWindowStateList,
 )
@@ -35,17 +37,23 @@ from hwp_live_bridge_operation import HancomBridgeOperationMixin
 from hwp_live_bridge_session import HancomBridgeSessionMixin
 from hwp_live_contract import (
     ConnectedDocument,
-    DocumentStyleList,
     LiveContext,
     MutationResult,
     OpenDocument,
     OpenDocumentList,
     PreviewResult,
+    StyleReadOutcome,
 )
-from hwp_live_events import ChangeSignal, HwpEventSignal
+from hwp_live_grounding import HwpGroundingReport, HwpGroundingRequest
+from hwp_live_events import ChangeObservable, ChangeSignal, HwpEventSignal
 from hwp_live_native_events import HybridChangeSignal
 from hwp_live_native_action_contract import NativeActionFailure
-from hwp_live_native_batch import native_dispatch_operation_scope
+from hwp_live_native_batch import (
+    forget_cached_content_signatures,
+    forget_content_signature_refusals,
+    native_dispatch_operation_scope,
+    note_native_window_content_change,
+)
 from hwp_live_native_dispatch_scope import current_public_native_dispatch_scope
 from hwp_live_process_lane import (
     HwpLaneOperationContext,
@@ -55,9 +63,19 @@ from hwp_live_process_lane import (
     Win32MutationWatchdogProbe,
     adaptive_watchdog_poll_seconds,
 )
+from hwp_live_progress import (
+    NativeProgressClock,
+    NativeProgressMark,
+    NativeWorkDeclaration,
+    native_progress_sink,
+)
 from hwp_live_session import LiveHwpController
 from hwp_live_session_candidate import select_operation_document
-from hwp_live_session_lifecycle import SaveStateMachine, SaveStateSnapshot
+from hwp_live_session_lifecycle import (
+    SaveStateMachine,
+    SaveStateSnapshot,
+    save_state_uncertainty_is_native_readback_only,
+)
 from hwp_live_state_cache import HancomStateCache
 from hwp_live_structure_contract import (
     DocumentStructure,
@@ -84,6 +102,40 @@ _RECOVERY_READ_TIMEOUT_SECONDS: Final = 1.0
 _PROCESS_EXIT_POLL_SECONDS: Final = 0.05
 _MODAL_DIAGNOSTIC_DELAY_SECONDS: Final = 0.5
 _MODAL_DIAGNOSTIC_INTERVAL_SECONDS: Final = 0.25
+# 네이티브 호출 한 번은 그 안에서 진행을 알릴 수 없다(ExecuteActions 1회). 그
+# 구간이 기본 마감보다 길어질 수 있으면, 들어가기 전에 선언한 작업량을 초로
+# 환산해 그만큼만 더 기다린다. 예측이 아니라 "이 시간까지는 죽었다고 부르지
+# 않는다"는 상한선이다.
+#
+# 단가는 실측에서 나왔다(artifacts/live-defects/batch-cost-*). 같은 61x23 시트를
+# 세 분할 예산으로 돌렸을 때 배치별 최악은 위상 단위당 1.570ms(100k 배치 6),
+# 명령당 72.0ms(50k 배치 7)였다. 한 단가만 놓고 보면 여유가 2배에 못 미치지만,
+# 허용치는 두 모형의 max() 이고 기본 마감이 하한이라, 실제로 물리는 여유는
+# 단가 하나로 보는 것보다 크다. 실측 32개 배치 전부에 대해 허용치/실제시간을
+# 계산했을 때 가장 얇은 것이 3.35배(50k 배치 7), 그다음이 3.43배(100k 배치 4)
+# 였다. 즉 이 값들은 여유가 가장 얇은 배치를 기준으로 잡혀 있다.
+_NATIVE_TOPOLOGY_UNIT_SECONDS: Final = 0.003
+_NATIVE_COMMAND_UNIT_SECONDS: Final = 0.10
+# MCP 작업자가 한 번의 도구 호출을 끊는 시각. 권위는
+# hwp_mcp_worker_deadline.DEFAULT_CALL_TIMEOUT_SECONDS 이고, 여기서 import 하지
+# 않는 것은 그 모듈이 anyio·mcp 를 끌고 오기 때문이다(브리지는 MCP 를 모른다).
+# 두 값이 어긋나지 않는다는 것은 시험으로 묶어 둔다.
+_WORKER_CALL_DEADLINE_SECONDS: Final = 240.0
+# 선언이 틀려도 무한정 기다리지 않게 하는 천장. 네이티브 파서가 받는 명령 수
+# 상한(kMaximumCommands 20,000)에 명령 단가 모형을 그대로 적용하면 2,000초가
+# 되는데, 그건 행을 잡는 장치이기를 포기하는 값이다.
+#
+# 진짜 상한은 계산 모형이 아니라 작업자 마감이다. 천장이 마감(240초)보다 크면
+# 그 사이의 선언은 아무 일도 하지 않는다 — 브리지가 "이 구간은 죽었다"는
+# 진단(phase·progress_beats·commands_completed·work_allowance_seconds 가 실린
+# _deadline_error)을 내기 전에 작업자가 먼저 무딘 타임아웃으로 호출을 끊는다.
+# 옛 900초는 그 구간이 660초나 되는 값이었다.
+#
+# 여유 30초는 한 호출에서 이 실행 구간 바깥에 남는 시간이다: 레인 큐 대기,
+# COM 아파트 진입, 마감이 걸린 뒤의 모달 진단(_MODAL_DIAGNOSTIC_DELAY_SECONDS
+# 와 폴링), 프로세스 격리·정리, 결과 봉투 직렬화. 마감의 12.5% 이고, 기본
+# 마감 180초보다는 크므로 선언 없는 호출의 예산은 건드리지 않는다.
+_NATIVE_WORK_ALLOWANCE_CEILING_SECONDS: Final = _WORKER_CALL_DEADLINE_SECONDS - 30.0
 _RPC_E_CALL_REJECTED: Final = -2_147_418_111
 _RPC_E_SERVERCALL_RETRYLATER: Final = -2_147_417_846
 _RPC_E_SERVERCALL_REJECTED: Final = -2_147_417_845
@@ -181,6 +233,27 @@ def _is_com_busy_error(error: BaseException) -> bool:
     return False
 
 
+def _native_work_allowance_seconds(
+    base_seconds: float,
+    declaration: NativeWorkDeclaration | None,
+) -> float:
+    """이 구간을 죽었다고 부르기 전에 기다릴 시간.
+
+    선언이 없으면 기본 마감 그대로다. 선언이 있으면 두 모형(위상 단위·명령 수)
+    중 큰 쪽을 쓴다 — 어느 쪽이 지배적인지는 문서마다 다르고, 실측에서 같은
+    작업의 배치별 실제 시간이 위상 단위 기준 37배까지 벌어졌기 때문에 둘 중
+    하나만 믿을 수 없다. 기본 마감보다 짧아지는 일은 없고, 천장을 넘지 않는다.
+    """
+
+    if declaration is None:
+        return base_seconds
+    predicted = max(
+        declaration.topology_units * _NATIVE_TOPOLOGY_UNIT_SECONDS,
+        declaration.commands * _NATIVE_COMMAND_UNIT_SECONDS,
+    )
+    return max(base_seconds, min(predicted, _NATIVE_WORK_ALLOWANCE_CEILING_SECONDS))
+
+
 def _deadline_error(
     *,
     mutation: bool,
@@ -188,6 +261,8 @@ def _deadline_error(
     process_lane_isolation: bool,
     save_state: SaveStateSnapshot | None = None,
     watchdog: MutationWatchdogObservation | None = None,
+    progress: NativeProgressMark | None = None,
+    allowance_seconds: float | None = None,
 ) -> HwpLiveError:
     reconcile = mutation and phase == "running"
     mutation_started = mutation and phase == "running"
@@ -196,6 +271,38 @@ def _deadline_error(
             (
                 "한컴 COM 전체 제한시간을 초과했습니다",
                 f"; phase={phase}",
+                # 마감은 "마지막으로 확인된 진행" 이후로 재기 때문에, 실패
+                # 보고에 그 진행이 무엇이었는지 같이 싣지 않으면 왜 이 시각에
+                # 끊겼는지 읽을 수 없다.
+                (
+                    ""
+                    if progress is None or progress.count == 0
+                    else (
+                        f"; progress_beats={progress.count}"
+                        f"; last_progress={progress.label}"
+                    )
+                ),
+                # 끝난 명령 수는 자유문이 아니라 토큰으로 싣는다. 결과 봉투가
+                # 이 값을 그대로 commands_executed 로 옮기므로, 마감으로 끊긴
+                # 작업도 "0개 실행"이라고 거짓말하지 않는다.
+                (
+                    ""
+                    if progress is None or progress.completed_units == 0
+                    else f"; commands_completed={progress.completed_units}"
+                ),
+                (
+                    ""
+                    if allowance_seconds is None
+                    else f"; work_allowance_seconds={allowance_seconds:.3f}"
+                ),
+                (
+                    ""
+                    if progress is None or progress.declaration is None
+                    else (
+                        f"; declared_segment={progress.declaration.label}"
+                        f"; declared_commands={progress.declaration.commands}"
+                    )
+                ),
                 f"; queue_busy={'true' if phase == 'queue_wait' else 'false'}",
                 "; worker_isolation_required=false",
                 (
@@ -412,6 +519,20 @@ def _modal_dialog_error(
     )
 
 
+STYLE_READ_UNVERIFIED_REASON: Final = (
+    "스타일을 읽는 동안 한컴 프로세스가 계속 이벤트를 냈습니다. "
+    "목록은 실제로 읽어 온 값이지만 그 사이 문서가 바뀌었다면 최신이 아닐 수 "
+    "있으니 정확도가 중요하면 다시 호출하세요"
+)
+
+
+def _unverified_style_read(outcome: StyleReadOutcome) -> StyleReadOutcome:
+    return StyleReadOutcome(
+        styles=outcome.styles,
+        unverified_reason=STYLE_READ_UNVERIFIED_REASON,
+    )
+
+
 @final
 class HancomBridge(
     HancomBridgeSessionMixin,
@@ -425,6 +546,7 @@ class HancomBridge(
         "_controller",
         "_controller_factory",
         "_controllers",
+        "_worked_lanes",
         "_call_timeout_seconds",
         "_deferred_transient_releases",
         "_events",
@@ -456,6 +578,7 @@ class HancomBridge(
     _controller: LiveHwpController
     _controller_factory: Callable[[], LiveHwpController] | None
     _controllers: dict[int, LiveHwpController]
+    _worked_lanes: set[int]
     _call_timeout_seconds: float
     _deferred_transient_releases: set[str]
     _events: dict[int, ChangeSignal]
@@ -497,6 +620,12 @@ class HancomBridge(
         self._controller = controller
         self._controller_factory = controller_factory
         self._controllers = {0: controller}
+        # 시드 컨트롤러는 pid 0 자리에 "등록"되었을 뿐 아직 아무 작업도 하지
+        # 않았다. 컨트롤러가 COM 아파트를 여는 것은 오직 레인 스레드에서
+        # 작업이 돌 때뿐이므로, 표시는 "컨트롤러를 가져갔다"가 아니라
+        # "레인에 작업을 제출했다"로 남긴다. _call 의 제출 지점 한 곳에서만
+        # 채운다.
+        self._worked_lanes = set()
         self._call_timeout_seconds = call_timeout_seconds
         self._closed = False
         self._deferred_transient_releases = set()
@@ -652,6 +781,46 @@ class HancomBridge(
                 release_session_id = context.session_id
         if release_session_id is not None:
             _ = self._release_transient_connection_now(release_session_id)
+
+    def release_confirmed_save_close_block(self, session_id: str) -> bool:
+        """디스크 지문으로 확정된 저장이 남긴 닫기 차단을 걷어낸다.
+
+        ``SaveStateMachine`` 이 "verified"에 이르려면 네이티브 readback 이
+        저장 전후 문서 지문을 대조해야 한다. 그 지문은 엔진이 문서를
+        직렬화해야 생기고, 자기 메모리 한계 위의 문서에서는 만들어지지
+        않는다. 그래서 그 크기에서는 ``hwp_save`` 의 native.verified 가 늘
+        거짓이고, 저장할 때마다 ``_uncertain_save_states`` 에 차단이 새로
+        찍힌다. 해제 경로는 같은 세션에서 phase 가 "verified"에 닿는 저장을
+        한 번 더 요구하는데 그 저장은 도달할 수 없다 — 스스로 못 푸는
+        차단이다.
+
+        그런데 그 저장의 판정은 이미 더 강한 증거로 끝나 있다:
+        ``reconcile_save_fingerprint`` 의 6조건(네이티브 Save 완료값 + 대상
+        경로 + 파일 크기 + mtime + 저장 전후 SHA-256, hwp_save_fingerprint.py
+        :145-187)은 라이브 readback 이 아니라 디스크를 본다. 그 판정이
+        "confirmed"를 냈다면 이 차단이 지키려던 사실은 이미 확인됐다.
+
+        걷어내는 것은 미확정의 출처가 네이티브 readback 하나뿐일 때로
+        한정한다. 감시견 미확정·대화상자·프로세스 소실·마감으로 찍힌
+        차단은 저장이 어디까지 갔는지 모른다는 뜻이라 그대로 남는다.
+        """
+        release_session_id: str | None = None
+        with self._lifecycle_lock:
+            state = self._uncertain_save_states.get(session_id)
+            if state is None or not save_state_uncertainty_is_native_readback_only(
+                state.snapshot()
+            ):
+                return False
+            _ = self._uncertain_save_states.pop(session_id, None)
+            if (
+                session_id in self._deferred_transient_releases
+                and self._save_close_blocker_locked(session_id) is None
+            ):
+                self._deferred_transient_releases.discard(session_id)
+                release_session_id = session_id
+        if release_session_id is not None:
+            _ = self._release_transient_connection_now(release_session_id)
+        return True
 
     def _save_close_blocker_locked(
         self,
@@ -888,6 +1057,7 @@ class HancomBridge(
             self._recovery_outcome_confirmed.discard(process_id)
         self._cache.clear()
         self._fast_inspections.clear()
+        forget_cached_content_signatures()
         return True
 
     def _recover_after_document_read(self, session_id: str) -> None:
@@ -966,13 +1136,14 @@ class HancomBridge(
         save_operation: bool = False,
     ) -> T:
         public_dispatch_scope = current_public_native_dispatch_scope(self)
+        progress = NativeProgressClock()
 
         def invoke() -> T:
             previous_process_id = self._thread_state.process_id
             self._thread_state.process_id = queue_key
             controller = self._bridge_controller()
             try:
-                with native_dispatch_operation_scope():
+                with native_progress_sink(progress), native_dispatch_operation_scope():
                     try:
                         delays = () if mutation else _COM_BUSY_DELAYS
                         for delay in (*delays, None):
@@ -1174,6 +1345,10 @@ class HancomBridge(
             )
 
             def arm_mutation_observer() -> None:
+                # 레인 워커가 이 작업을 실제로 집어든 순간이다. 큐·락 대기는
+                # 대상 프로세스가 굼뜬 것이 아니라 우리 쪽 직렬화이므로, 실행
+                # 구간의 마감은 여기서부터 잰다.
+                progress.mark_execution_start()
                 if operation_context is None:
                     return
                 operation_context.arm_watchdog_baseline()
@@ -1199,6 +1374,13 @@ class HancomBridge(
                             and any(not tracked.done() for tracked in recovery.futures)
                         ),
                     )
+                # 컨트롤러 작업이 레인에 올라가는 유일한 지점이다. 여기서만
+                # 표시하고, close 의 스냅샷과 같은 _lifecycle_lock 아래에서
+                # 표시하므로 "제출은 했는데 close 가 미배포로 읽는" 경합이
+                # 생기지 않는다. 제출 직전에 적는 것은 의도한 것이다 —
+                # lane.submit 이 실패해도 그 레인은 이미 닫혔거나 poison 된
+                # 상태라 종료가 안전한 쪽으로 기운다.
+                self._worked_lanes.add(queue_key)
                 future = lane.submit(
                     invoke_in_public_scope,
                     context=operation_context,
@@ -1229,8 +1411,43 @@ class HancomBridge(
 
             future.add_done_callback(release_process_future)
             acquired = False
+            # 실행 구간의 마감은 "호출을 시작한 시각" 이 아니라 "마지막으로
+            # 확인된 진행" 에서 잰다. 한 번의 COM 호출 안에서 여러 네이티브
+            # 배치가 도는 작업(대형 표 삽입 등)은 배치가 끝날 때마다 살아
+            # 있다는 사실을 스스로 증명하므로, 그 증명이 오는 동안에는
+            # 죽었다고 판정하지 않는다.
+            #
+            # 진짜 행(hang)을 늦게 잡게 되지는 않는다. 판정 기준이
+            # "시작 후 N초" 에서 "마지막 진행 후 N초" 로 바뀔 뿐이라, 멈춘
+            # 시점부터 재는 검출 지연은 그대로다. 대신 전체 벽시계 시간은
+            # 실제 작업량만큼 늘어난다 — 늘어나는 폭은 진행 보고 횟수가
+            # 유한하다는 사실로 묶인다.
+            #
+            # 구간의 크기가 미리 선언돼 있으면(네이티브 호출 한 번은 안에서
+            # 진행을 알릴 수 없다) 그 작업량만큼 더 기다린다. 그 대가는
+            # _native_work_allowance_seconds 에 적어 두었다.
+            observed_beats = 0
+            allowance = call_timeout_seconds
+            segment_base = started
             while True:
-                remaining = call_timeout_seconds - (time.monotonic() - started)
+                beat = progress.mark()
+                if beat.count != observed_beats:
+                    observed_beats = beat.count
+                    if mutation_watchdog is not None:
+                        mutation_watchdog.arm(
+                            started_at=beat.at,
+                            after_event_sequence=(
+                                signal.sequence() if signal is not None else 0
+                            ),
+                        )
+                # 매 회차 기준을 다시 계산한다. 상태로 들고 다니면 실행 시작과
+                # 진행 표식 중 어느 것이 최신인지가 회차마다 어긋난다.
+                segment_base = max(started, beat.started_at, beat.at)
+                allowance = _native_work_allowance_seconds(
+                    call_timeout_seconds,
+                    beat.declaration,
+                )
+                remaining = allowance - (time.monotonic() - segment_base)
                 if remaining <= 0:
                     if future.done():
                         return future.result()
@@ -1276,6 +1493,8 @@ class HancomBridge(
                         process_lane_isolation=not queued,
                         save_state=save_state,
                         watchdog=watchdog_observation,
+                        progress=progress.mark(),
+                        allowance_seconds=allowance,
                     )
                 wait_seconds = min(
                     (
@@ -1307,6 +1526,12 @@ class HancomBridge(
                 if (
                     watchdog_observation is not None
                     and watchdog_observation.terminal_uncertain
+                    # 워치독의 종료선은 이 호출의 허용치를 모른다(생성 시점에
+                    # min(180, call_timeout) 로 고정된다). 그 사이에 진행이
+                    # 왔거나, 선언된 작업량이 아직 남아 있으면 관측이 낡은
+                    # 것이므로 죽었다고 판정하지 않는다. 두 경우 모두
+                    # segment_base 와 allowance 가 이미 표현하고 있다.
+                    and time.monotonic() - segment_base >= allowance
                 ):
                     if future.done():
                         return future.result()
@@ -1334,6 +1559,8 @@ class HancomBridge(
                         process_lane_isolation=not queued,
                         save_state=save_state,
                         watchdog=watchdog_observation,
+                        progress=progress.mark(),
+                        allowance_seconds=allowance,
                     )
                 if watch is not None and watch.exited():
                     self._invalidate_process(
@@ -1651,6 +1878,7 @@ class HancomBridge(
             self._poisoned_processes.discard(process_id)
         self._cache.clear()
         self._fast_inspections.clear()
+        forget_cached_content_signatures()
         if lane is not None:
             lane.poison()
         if signal is not None:
@@ -1675,15 +1903,37 @@ class HancomBridge(
             self._transient_sessions.discard(session_id)
             self._deferred_transient_releases.discard(session_id)
 
+    def _registered_lane_controller(
+        self,
+        process_id: int,
+    ) -> LiveHwpController | None:
+        """레인 ``process_id`` 의 작업이 쓰게 될 이미 존재하는 컨트롤러.
+
+        factory 가 있는데 그 pid 자리가 비어 있으면 아직 만들어지지 않은
+        것이므로 None 이다. factory 가 없으면 빈 자리는 언제나 시드가 맡는다 —
+        이때 ``_controllers`` 에는 {0: seed} 만 남으므로, "pid 자리에 컨트롤러가
+        없다 = 그 레인은 아무 컨트롤러도 안 쓴다"는 판정은 틀린다.
+        """
+        controller = self._controllers.get(process_id)
+        if controller is not None:
+            return controller
+        return None if self._controller_factory is not None else self._controller
+
+    # 여기는 컨트롤러를 "가져가는" 곳일 뿐이다. 순수 메모리 조회
+    # (connection_moniker, current_session 등)도 이 문을 지나므로, 여기서
+    # 표시하면 COM 을 한 번도 안 쓴 컨트롤러까지 배포된 것으로 셈해진다.
+    # 표시는 _call 의 레인 제출 지점에서만 한다.
     @override
     def _bridge_controller(self) -> LiveHwpController:
         process_id = self._thread_state.process_id
-        controller = self._controllers.get(process_id)
+        controller = self._registered_lane_controller(process_id)
         if controller is not None:
             return controller
         factory = self._controller_factory
         if factory is None:
-            return self._controller
+            # _registered_lane_controller 가 factory 없는 빈 자리를 이미 시드로
+            # 메운다. 여기 오면 그 규칙이 깨진 것이다.
+            raise HwpLiveError("한컴 브리지 컨트롤러를 해석하지 못했습니다")
         controller = factory()
         self._controllers[process_id] = controller
         return controller
@@ -1730,15 +1980,36 @@ class HancomBridge(
         operation: Callable[[LiveHwpController], T],
         *,
         session_id: str,
+        degrade: Callable[[T], T] | None = None,
     ) -> T:
+        # 이 토큰은 "문서가 바뀌었다"가 아니라 "그 프로세스에서 뭔가 일어났다"
+        # 이다. _style_state_token 은 WinEvent 알림 시퀀스를 그대로 쓰고
+        # (_RELEVANT_EVENTS 에는 FOREGROUND/CREATE/DESTROY/SHOW/FOCUS/NAMECHANGE
+        # 처럼 본문 내용과 무관한 UI 이벤트가 들어 있다), 훅 스레드는 20ms 주기로
+        # 펌프하므로 한 번의 읽기가 만든 이벤트가 다음 시도 도중에 도착할 수도
+        # 있다. 스타일 읽기 자체가 선택 영역을 옮겼다 되돌리고(inspect_styles 의
+        # MoveSelRight/select_text) 무거운 HWPML2X 덤프를 뜨므로, 한/글이 그
+        # 조작에 UI 이벤트로 답하면 읽기가 스스로 토큰을 밀어 올린다. 실기에서
+        # 커서·쪽 수·수정 여부가 시작과 동일한데도 "문서 상태가 연속으로
+        # 변경되었습니다"로 두 번 거부한 것이 이 모양이다.
+        #
+        # 진짜 문서 상태 검증은 inspect_styles 가 이미 한다 — 선택 영역·커서·
+        # IsModified 를 읽기 전후로 비교해 다르면 스스로 거부한다. 그 검증을
+        # 통과한 값을 토큰이 움직였다는 이유만으로 버리면 스타일 작업 자체가
+        # 불가능해진다. 그래서 재시도가 끝나면 거부하는 대신 읽은 값을 주고
+        # "최신이라고 보증하지 못한다"고 표시한다. 표시할 자리가 없는 호출자
+        # (degrade=None)만 종전처럼 거부한다.
         def invoke() -> T:
             controller = self._bridge_controller()
-            for _ in range(2):
+            attempts = 2
+            for attempt in range(attempts):
                 state_token = self._style_state_token(session_id)
                 controller.set_style_state_token(session_id, state_token)
                 result = operation(controller)
                 if self._style_state_token(session_id) == state_token:
                     return result
+                if attempt + 1 == attempts and degrade is not None:
+                    return degrade(result)
             raise HwpLiveError(
                 "스타일을 읽는 동안 한컴 문서 상태가 연속으로 변경되었습니다"
             )
@@ -1760,10 +2031,32 @@ class HancomBridge(
     ) -> T:
         def invoke() -> T:
             self._fast_inspections.clear()
+            # 쓰기 **앞**의 무효화다. 지우지 마라 — 이건 중복이 아니다.
+            #
+            # 쓰기 경로 중에는 쓰기 직전에 읽은 지문으로 "내가 마지막으로 본
+            # 문서가 맞는가"를 판정하는 관문이 있다. G04 apply_page_plan 이
+            # 그것이다(hwp_live_session_operation.py 의 STALE_GROUNDING):
+            # G01 ground_document 가 관측한 revision 해시와 지금 지문을
+            # 대조해, 다르면 계획을 거부한다.
+            #
+            # 그런데 그 G01(`_call_recovery_read`)이 바로 이 워커에서 지문
+            # 캐시를 채우고 버리지 않는 유일한 읽기 경로다. 그래서 이 줄이
+            # 없으면 G04 의 대조가 엔진이 아니라 G01 이 남긴 자기 값을
+            # 되받고, 그 사이 사용자가 한/글에서 직접 고친 문서도 **항상
+            # 일치**로 통과한다. 그 관문은 이 워커 밖에서 일어난 변경을
+            # 잡는 유일한 장치이고, 변경 이벤트 브리지가 죽어 있으면
+            # note_native_window_content_change 도 뜨지 않는다.
+            #
+            # 쓰기 원시 호출들이 각자 자기 창을 무효화하는 것은 사실이지만
+            # 그것은 **쓰기 시점**이라 쓰기 앞의 판정보다 늦다. 아래 finally
+            # 는 호출이 끝난 뒤라 더 늦다. 쓰기 앞의 판정을 엔진에 붙여 두는
+            # 것은 이 줄뿐이다.
+            forget_cached_content_signatures()
             try:
                 return operation()
             finally:
                 self._fast_inspections.clear()
+                forget_cached_content_signatures()
                 if session_id is not None:
                     with self._lifecycle_lock:
                         self._style_revisions[session_id] = (
@@ -1782,6 +2075,11 @@ class HancomBridge(
     def _activate_connection(self, connected: ConnectedDocument) -> None:
         self._cache.clear()
         self._fast_inspections.clear()
+        forget_cached_content_signatures()
+        # A rebind is the one moment the worker stops knowing which document a
+        # window holds, so the remembered "the engine cannot serialise this"
+        # stops being about anything. Writes deliberately do not clear it.
+        forget_content_signature_refusals()
         window = self._windows.read(connected.document.window_handle)
         session_id = connected.session_id
         with self._lifecycle_lock:
@@ -1795,6 +2093,10 @@ class HancomBridge(
                 document=connected.document,
             )
         if session_id in self._session_processes:
+            self._observe_content_changes(
+                self._events.get(self._session_processes[session_id]),
+                connected.document.window_handle,
+            )
             return
         moniker_name = self._bridge_controller().connection_moniker(
             connected.session_id
@@ -1816,6 +2118,29 @@ class HancomBridge(
             self._events[process_id] = signal
         self._session_processes[session_id] = process_id
         self._process_sessions.setdefault(process_id, set()).add(session_id)
+        self._observe_content_changes(signal, connected.document.window_handle)
+
+    def _observe_content_changes(
+        self,
+        signal: ChangeSignal | None,
+        window_handle: int,
+    ) -> None:
+        """Let a user's own typing age this worker's view of the document.
+
+        Before this, only writes issued through the bridge invalidated the
+        signature, so a document edited by hand kept answering from a stale
+        cache. The registered observer drops the cached signature and revision
+        token and bumps the window's freshness counter -- the counter is what
+        keeps a formatting-only manual edit, whose recaptured token is
+        bit-identical, from re-issuing a pre-edit graph epoch. The observer
+        runs on the event hook thread and therefore must stay dictionary
+        bookkeeping; re-reading the signature, rebuilding the graph, or
+        persisting the counter here would put document or disk work on every
+        keystroke (the counter is persisted at bind time instead).
+        """
+        if not isinstance(signal, ChangeObservable):
+            return
+        signal.observe_window(window_handle, note_native_window_content_change)
 
     @override
     def _clear_connection_state(self, session_id: str | None = None) -> None:
@@ -1830,10 +2155,15 @@ class HancomBridge(
                 self._transient_sessions.discard(session_id)
                 self._deferred_transient_releases.discard(session_id)
             _ = self._lost_sessions.pop(session_id, None)
-            _ = self._session_watch_targets.pop(session_id, None)
+            watch_target = self._session_watch_targets.pop(session_id, None)
             process_id = self._session_processes.pop(session_id, None)
             if process_id is None:
                 return
+            # Sibling sessions keep the signal alive, so drop only this window's
+            # invalidation observer instead of leaking it onto the shared hook.
+            observed = self._events.get(process_id)
+            if watch_target is not None and isinstance(observed, ChangeObservable):
+                observed.forget_window(watch_target.window_handle)
             sessions = self._process_sessions.get(process_id)
             if sessions is not None:
                 sessions.discard(session_id)
@@ -1855,6 +2185,7 @@ class HancomBridge(
         finally:
             self._cache.clear()
             self._fast_inspections.clear()
+            forget_cached_content_signatures()
             with self._lifecycle_lock:
                 if session_id is None:
                     self._style_revisions.clear()
@@ -1969,6 +2300,29 @@ class HancomBridge(
         return signal
 
     def close(self) -> None:
+        """이벤트를 멈추고 컨트롤러를 닫은 뒤 프로세스 레인을 회수한다.
+
+        컨트롤러는 그 컨트롤러가 실제로 작업을 돌린 레인에서 닫는다. 레인
+        스레드만 STA 를 열고(HwpProcessLane._run) HwpRotCatalog 의
+        ``_initialized`` 는 스레드 지역이므로(hwp_live_rot.py:507-513, 924-931),
+        다른 스레드에서 닫으면 CoUninitialize 도 래퍼 해제도 제 아파트에서
+        일어나지 않는다. 어느 레인에도 작업이 제출된 적이 없는 컨트롤러 —
+        전형적으로 ``__init__`` 이 pid 0 자리에 꽂아둔 뒤 한 번도 쓰이지 않은
+        시드 — 만 그 자리에서 닫는다. 그런 컨트롤러의 close 는 COM 을 건드릴
+        수 없다: 세션이 비어 restore_activation 이 즉시 빠져나가고
+        (hwp_live_session_core.py:1452-1456, 1457-1484), HwpRotCatalog.close 는
+        스레드 지역 ``_initialized`` 가 False 라 pythoncom 을 부르기 전에
+        반환한다. 이를 위해 레인을 새로 만들면 그 워커가 즉시 pythoncom 을
+        적재하고 아파트를 연다.
+
+        한계 — 마감이 없는 구간이 둘 있다. 레인에 올린 정리 future 는
+        ``call_timeout_seconds`` 로 끊고 시간이 지나면 레인을 poison 하지만,
+        (1) 제자리 ``controller.close()`` 와 (2) 마지막
+        ``lane.shutdown(wait=True)`` 의 스레드 join 은 무제한이다. ``close`` 는
+        ``LiveHwpController`` Protocol 의 메서드라 임베더 구현이 영원히
+        막히면 이 호출도 영원히 막히고, 컨트롤러 호출 안에서 돌아오지 않는
+        레인 작업(예: hwp_live_edit_history.py:722)도 같은 join 을 붙든다.
+        """
         with self._lifecycle_lock:
             if self._closed:
                 return
@@ -1979,31 +2333,64 @@ class HancomBridge(
             lanes_by_process = dict(self._process_lanes)
             poisoned_processes = set(self._poisoned_processes)
             controllers = tuple(self._controllers.items())
+            registered_controllers = dict(self._controllers)
+            worked_lanes = sorted(self._worked_lanes)
+            seed_controller = self._controller
+            seed_serves_empty_slots = self._controller_factory is None
+
+        def lane_controller(lane_process_id: int) -> LiveHwpController | None:
+            # _registered_lane_controller 와 같은 규칙을 close 스냅샷 위에서
+            # 다시 적용한다. 시드가 0이 아닌 pid 의 레인에서 쓰였어도
+            # _controllers 에는 {0: seed} 만 남으므로 pid 대조만으로는 못 찾는다.
+            registered = registered_controllers.get(lane_process_id)
+            if registered is not None:
+                return registered
+            return seed_controller if seed_serves_empty_slots else None
+
         try:
             self._stop_all_events()
         finally:
             cleanup_tasks: list[tuple[HwpProcessLane, Future[None]]] = []
+            direct_closes: list[LiveHwpController] = []
             seen_controllers: set[int] = set()
-            for process_id, controller in controllers:
-                if (
-                    process_id in poisoned_processes
-                    or id(controller) in seen_controllers
-                ):
-                    continue
-                seen_controllers.add(id(controller))
-                lane = lanes_by_process.get(process_id)
-                if lane is None:
-                    lane = HwpProcessLane(
-                        process_id,
-                        self._process_queue_limit,
-                    )
-                    lanes_by_process[process_id] = lane
-                try:
-                    cleanup_tasks.append((lane, lane.submit(controller.close)))
-                except RuntimeError:
-                    lane.poison()
-            lanes = tuple(lanes_by_process.items())
             try:
+                for process_id, controller in controllers:
+                    if (
+                        process_id in poisoned_processes
+                        or id(controller) in seen_controllers
+                    ):
+                        continue
+                    seen_controllers.add(id(controller))
+                    worked_on = tuple(
+                        lane_process_id
+                        for lane_process_id in worked_lanes
+                        if lane_controller(lane_process_id) is controller
+                    )
+                    if not worked_on:
+                        direct_closes.append(controller)
+                        continue
+                    lane = lanes_by_process.get(process_id)
+                    if lane is None:
+                        for lane_process_id in worked_on:
+                            if lane_process_id in poisoned_processes:
+                                continue
+                            candidate = lanes_by_process.get(lane_process_id)
+                            if candidate is not None:
+                                lane = candidate
+                                break
+                    if lane is None:
+                        # 작업을 돌린 레인이 모두 사라졌다(프로세스 무효화·연결
+                        # 정리). 아파트를 되찾을 곳이 없으니 종전대로 등록된
+                        # pid 에 레인을 만들어 그 위에서 닫는다.
+                        lane = HwpProcessLane(
+                            process_id,
+                            self._process_queue_limit,
+                        )
+                        lanes_by_process[process_id] = lane
+                    try:
+                        cleanup_tasks.append((lane, lane.submit(controller.close)))
+                    except RuntimeError:
+                        lane.poison()
                 for lane, cleanup in cleanup_tasks:
                     try:
                         cleanup.result(timeout=self._call_timeout_seconds)
@@ -2011,10 +2398,22 @@ class HancomBridge(
                         lane.poison()
                     except (HwpLiveError, com_error, OSError, RuntimeError):
                         lane.poison()
+                # 레인에 올린 정리를 모두 거둔 뒤에 제자리 close 를 한다.
+                # 순서가 뒤바뀌면 여기서 새는 예외가 레인 future 를 기다리기
+                # 전에 finally 로 뛰고, lane.shutdown 의 _cancel_pending 이 아직
+                # 실행되지 않은 컨트롤러 close 를 취소해 버린다.
+                for controller in direct_closes:
+                    try:
+                        controller.close()
+                    except (HwpLiveError, com_error, OSError, RuntimeError):
+                        # 격리할 레인이 없다. 나머지 정리를 계속한다.
+                        continue
             finally:
                 self._cache.clear()
                 self._fast_inspections.clear()
+                forget_cached_content_signatures()
                 self._controllers.clear()
+                self._worked_lanes.clear()
                 self._deferred_transient_releases.clear()
                 self._lost_sessions.clear()
                 self._poison_recoveries.clear()
@@ -2029,7 +2428,7 @@ class HancomBridge(
                 self._transient_sessions.clear()
                 self._active_mutation_contexts.clear()
                 self._uncertain_save_states.clear()
-                for process_id, lane in lanes:
+                for process_id, lane in tuple(lanes_by_process.items()):
                     lane.shutdown(wait=process_id not in poisoned_processes)
 
     def _inspect_and_refresh(
@@ -2057,6 +2456,28 @@ class HancomBridge(
     def list_window_states(self) -> HancomWindowStateList:
         return self._windows.list_visible_hwp_windows()
 
+    def inspect_dialog(self, dialog_window_handle: int) -> HancomPopupStructure:
+        if dialog_window_handle < 1:
+            raise HwpLiveError("한컴 팝업 핸들은 1 이상이어야 합니다")
+        return self._windows.inspect_dialog(dialog_window_handle)
+
+    def invoke_dialog_action(
+        self,
+        dialog_window_handle: int,
+        control_id: int,
+    ) -> HancomDialogActionResult:
+        if dialog_window_handle < 1:
+            raise HwpLiveError("한컴 팝업 핸들은 1 이상이어야 합니다")
+        if control_id < -1 or control_id > 65_535:
+            raise HwpLiveError("한컴 팝업 control_id는 -1~65535여야 합니다")
+        return self._call(
+            lambda: self._windows.invoke_dialog_action(
+                dialog_window_handle,
+                control_id,
+            ),
+            process_id=self._bridge_process_id(dialog_window_handle),
+        )
+
     def dismiss_dialogs(self, window_handle: int) -> HancomDialogDismissResult:
         if window_handle < 1:
             raise HwpLiveError("한컴 창 핸들은 1 이상이어야 합니다")
@@ -2071,9 +2492,27 @@ class HancomBridge(
             session_id=session_id,
         )
 
-    def styles(self, session_id: str) -> DocumentStyleList:
-        return self._call_style_read(
-            lambda controller: controller.styles(session_id),
+    def styles(self, session_id: str) -> StyleReadOutcome:
+        controllers: list[LiveHwpController] = []
+
+        def read(controller: LiveHwpController) -> StyleReadOutcome:
+            if not controllers or controllers[-1] is not controller:
+                controllers.append(controller)
+            return StyleReadOutcome(styles=controller.styles(session_id))
+
+        try:
+            return self._call_style_read(
+                read,
+                session_id=session_id,
+                degrade=_unverified_style_read,
+            )
+        finally:
+            for controller in controllers:
+                controller.finish_public_convention_read()
+
+    def content_revision(self, session_id: str) -> str:
+        return self._call_recovery_read(
+            lambda: self._bridge_controller().content_revision(session_id),
             session_id=session_id,
         )
 
@@ -2156,3 +2595,22 @@ class HancomBridge(
             lambda: self._bridge_controller().render_page(session_id, page, dpi),
             session_id=session_id,
         )
+
+    def ground_document(
+        self,
+        session_id: str,
+        request: HwpGroundingRequest,
+    ) -> HwpGroundingReport:
+        def ground() -> HwpGroundingReport:
+            controller = self._bridge_controller()
+            # ground_document calls the controller's direct styles() method,
+            # rather than HancomBridge.styles(). Seed the same per-session
+            # token that the public style wrapper would otherwise install so
+            # G01 can bind its revision to the live read.
+            controller.set_style_state_token(
+                session_id,
+                self._style_state_token(session_id),
+            )
+            return controller.ground_document(session_id, request)
+
+        return self._call_recovery_read(ground, session_id=session_id)

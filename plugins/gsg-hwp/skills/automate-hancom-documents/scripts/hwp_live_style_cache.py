@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import ntpath
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Lock
-from typing import final
+from typing import Final, final
 
 from hwp_live_contract import DocumentStyleList
 
@@ -22,16 +23,27 @@ class _StyleCacheKey:
     state_token: str
 
 
+_STYLE_CACHE_ENTRY_LIMIT: Final = 8
+
+
 @final
 class StyleInspectionCache:
-    __slots__ = ("_hits", "_key", "_lock", "_misses", "_styles")
+    __slots__ = ("_entries", "_hits", "_lock", "_max_entries", "_misses")
 
-    def __init__(self) -> None:
+    _entries: OrderedDict[_StyleCacheKey, DocumentStyleList]
+    _hits: int
+    _lock: Lock
+    _max_entries: int
+    _misses: int
+
+    def __init__(self, *, max_entries: int = _STYLE_CACHE_ENTRY_LIMIT) -> None:
+        if max_entries < 1:
+            raise ValueError("max_entries must be at least 1")
+        self._entries = OrderedDict()
         self._hits = 0
-        self._key: _StyleCacheKey | None = None
         self._lock = Lock()
+        self._max_entries = max_entries
         self._misses = 0
-        self._styles: DocumentStyleList | None = None
 
     @staticmethod
     def _key_for(
@@ -54,19 +66,21 @@ class StyleInspectionCache:
     ) -> DocumentStyleList:
         key = self._key_for(document_id, full_name, state_token)
         with self._lock:
-            if self._key == key and self._styles is not None:
+            styles = self._entries.get(key)
+            if styles is not None:
+                self._entries.move_to_end(key)
                 self._hits += 1
-                return self._styles
+                return styles
             styles = scan()
-            self._key = key
-            self._styles = styles
+            self._entries[key] = styles
             self._misses += 1
+            while len(self._entries) > self._max_entries:
+                _ = self._entries.popitem(last=False)
             return styles
 
     def clear(self) -> None:
         with self._lock:
-            self._key = None
-            self._styles = None
+            self._entries.clear()
 
     @property
     def metrics(self) -> StyleCacheMetrics:

@@ -33,7 +33,7 @@ _NATIVE_COMMAND_LIMIT: Final = 20_000
 # 서식을 보존하는 셀 교체는 5필드 SET_CELL_TEXT 형식이다
 # (hwp_live_native_action_contract._command_lines 의 SetCellTextCommand 분기,
 # ActionProtocol.cpp:400-407 가 파싱한다). 이 저장소의 네이티브가 스스로
-# 보고하는 프로토콜은 12 이고(BatchAutomation.cpp:552 `result->lVal = 12`),
+# 보고하는 프로토콜은 13 이고(BatchAutomation.cpp `result->lVal = 13`),
 # addon/ 어디에도 명령별 버전 게이트가 없어 이 형식이 실제로 몇 번부터
 # 있었는지를 소스만으로 더 낮게 증명할 방법이 없다. 그래서 같은 명령을 이미
 # 쓰고 있는 채우기 경로의 값(hwp_live_workflow_table.prepare_table_fill 이
@@ -151,11 +151,50 @@ def _raw_replacements(
             for column_offset, value in enumerate(row)
         }
     header_row, columns = _record_columns(table, data.records)
+    start_row = _append_row(table, header_row, columns)
     return {
-        _address(header_row + offset, column): record.get(key, "")
-        for offset, record in enumerate(data.records, start=1)
+        _address(start_row + offset, column): record.get(key, "")
+        for offset, record in enumerate(data.records)
         for key, column in columns.items()
     }
+
+
+def _append_row(
+    table: StructureTable,
+    header_row: int,
+    columns: dict[str, int],
+) -> int:
+    """레코드를 쓰기 시작할 행.
+
+    머리글 바로 아래가 아니라 "이미 내용이 있는 마지막 행 다음"이다.
+
+    머리글 기준 offset 을 그대로 쓰면 이미 채워진 첫 데이터 행을 덮어쓴다.
+    라이브에서 4행 표에 레코드 1개를 넣었더니 행이 추가되지 않고 A2:D2 가
+    통째로 바뀌었다 — 응답은 succeeded 였고 사용자가 적어둔 내용은 사라졌다.
+    빈 서식 행만 있는 표는 last_filled 가 머리글 자신이므로 종전처럼
+    머리글 다음 행부터 채운다.
+
+    병합 셀은 소유 셀에만 내용이 있고 피소유 셀 text 는 빈 문자열이다. 그래서
+    "owner_address == address 인 셀만 본다"로 거르면 소유 셀이 매핑 밖 열에
+    있는 병합 행이 통째로 빈 행으로 보인다. 실제로 B열 머리글에 쓰는 요청에서
+    A2:B2 병합 행이 시작 행으로 뽑혔고, 쓰기는 prepare_expand_and_fill 의
+    `_owner(...)` 에서 A2 로 접혀 사용자가 적어둔 병합 내용을 덮어썼다.
+    그래서 매핑된 열의 셀은 어느 소유 셀에 속하든 그 소유 셀의 내용으로
+    판단하고, 병합이 여러 행에 걸치면 그 범위의 마지막 행까지 찬 것으로 본다.
+    소유 셀이 비어 있으면 병합이라도 여전히 빈 행이다 — 빈 서식 행에 행이
+    계속 덧붙는 회귀를 막는다.
+    """
+    mapped = frozenset(columns.values())
+    by_address = {cell.address: cell for cell in table.cells}
+    last_filled = header_row
+    for cell in table.cells:
+        if cell.row <= header_row or cell.column not in mapped:
+            continue
+        owner = by_address.get(cell.owner_address, cell)
+        if not owner.text.strip():
+            continue
+        last_filled = max(last_filled, cell.row, owner.row + owner.row_span - 1)
+    return last_filled + 1
 
 
 def _owner(

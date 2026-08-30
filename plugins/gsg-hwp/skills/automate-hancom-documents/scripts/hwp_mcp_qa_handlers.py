@@ -10,7 +10,9 @@ from hwp_document_rebuild import DocumentRebuildResult, rebuild_document
 from hwp_live_bridge import HancomBridge
 from hwp_live_bridge_contract import (
     BridgeState,
+    HancomDialogActionResult,
     HancomDialogDismissResult,
+    HancomPopupStructure,
     HancomWindowState,
     HancomWindowStateList,
 )
@@ -124,6 +126,26 @@ class McpQaHandlers:
 
     async def hwp_list_window_states(self) -> HancomWindowStateList:
         return await self._dispatcher.watch(self._bridge.list_window_states)
+
+    async def hwp_inspect_dialog(
+        self,
+        dialog_window_handle: int,
+    ) -> HancomPopupStructure:
+        return await self._dispatcher.watch(
+            self._bridge.inspect_dialog,
+            dialog_window_handle,
+        )
+
+    async def hwp_invoke_dialog_action(
+        self,
+        dialog_window_handle: int,
+        control_id: int,
+    ) -> HancomDialogActionResult:
+        return await self._dispatcher.run(
+            self._bridge.invoke_dialog_action,
+            dialog_window_handle,
+            control_id,
+        )
 
     async def hwp_dismiss_dialogs(
         self,

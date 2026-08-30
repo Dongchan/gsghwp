@@ -58,6 +58,17 @@ class PublicTableResolutionRequest:
     query: str
 
 
+def _observed_page(target: HwpOperateTarget | None) -> str:
+    """Which page the ambiguity was observed on, in the caller's own terms.
+
+    ``workflow_page`` answers with the page hint the caller supplied, or 0 when
+    it supplied none. Saying "the current page" either way would be a claim the
+    resolver never made.
+    """
+    page = workflow_page(target)
+    return "현재 쪽" if page == 0 else f"{page}쪽"
+
+
 async def resolve_public_table(
     reader: PublicTableStructureReader,
     targets: PublicTableTargetStore,
@@ -86,10 +97,18 @@ async def resolve_public_table(
             lookup_microseconds=0,
             target_candidates=candidates,
             message=(
-                "대상 표가 여러 개입니다"
+                (
+                    "대상 조건만으로 표 하나를 확정하지 못했습니다. "
+                    f"{_observed_page(requested.target)}에서 표 "
+                    f"{resolved.observed_total}개가 조건에 걸렸고 그중 "
+                    f"{len(candidates)}개를 후보로 실었습니다. 반환된 후보의 "
+                    "page, table_index, caption, headers를 보고 target_id 또는 "
+                    "page/table_index/caption/headers를 고쳐 다시 호출하세요"
+                )
                 if candidates
                 else "대상 조건과 일치하는 표가 없습니다"
             ),
+            retry_safe=True,
         )
     control_id = resolved.table.control_instance_id
     if control_id is None:
@@ -134,14 +153,40 @@ def repeat_plan(
     )
 
 
+def _deduplicate_text_cells(
+    cells: list[TemplateTextCell],
+) -> tuple[TemplateTextCell, ...] | None:
+    unique: dict[str, TemplateTextCell] = {}
+    for cell in cells:
+        if cell.address in unique and unique[cell.address] != cell:
+            return None
+        unique[cell.address] = cell
+    return tuple(unique.values())
+
+
+def _deduplicate_image_cells(
+    cells: list[TemplateImageCell],
+) -> tuple[TemplateImageCell, ...] | None:
+    unique: dict[str, TemplateImageCell] = {}
+    for cell in cells:
+        if cell.address in unique and unique[cell.address] != cell:
+            return None
+        unique[cell.address] = cell
+    return tuple(unique.values())
+
+
 def series_plan(
     resolved: ResolvedPublicTable,
     items: tuple[SeriesItem, ...],
 ) -> TableTemplateRepeatPlan | TablePlanInputFailure:
     blocks: list[TemplateTableBlock] = []
-    captions = tuple(dict.fromkeys(item.caption for item in items if item.caption is not None))
+    captions = tuple(
+        dict.fromkeys(item.caption for item in items if item.caption is not None)
+    )
     if len(captions) > 1:
-        return TablePlanInputFailure("items.caption", "서로 다른 캡션은 한 번에 적용할 수 없습니다")
+        return TablePlanInputFailure(
+            "items.caption", "서로 다른 캡션은 한 번에 적용할 수 없습니다"
+        )
     for index, item in enumerate(items):
         mapped_result = map_table_cells(
             resolved.table,
@@ -207,20 +252,20 @@ def series_plan(
                 f"items[{index}]",
                 "같은 셀에 값과 그림을 동시에 지정할 수 없습니다",
             )
-        text_addresses = tuple(cell.address for cell in values)
-        image_addresses = tuple(image.address for image in images)
-        if len(set(text_addresses)) != len(text_addresses):
+        unique_values = _deduplicate_text_cells(values)
+        if unique_values is None:
             return TablePlanInputFailure(
                 f"items[{index}].text_cells",
-                "같은 셀에 값을 두 번 지정할 수 없습니다",
+                "같은 셀에 서로 다른 값을 지정할 수 없습니다",
             )
-        if len(set(image_addresses)) != len(image_addresses):
+        unique_images = _deduplicate_image_cells(images)
+        if unique_images is None:
             return TablePlanInputFailure(
                 f"items[{index}].image_cells",
-                "같은 셀에 그림을 두 번 지정할 수 없습니다",
+                "같은 셀에 서로 다른 그림을 지정할 수 없습니다",
             )
         blocks.append(
-            TemplateTableBlock(text_cells=tuple(values), images=tuple(images))
+            TemplateTableBlock(text_cells=unique_values, images=unique_images)
         )
     assert resolved.table.control_instance_id is not None
     return TableTemplateRepeatPlan(

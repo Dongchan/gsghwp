@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hwp_errors import HwpLiveError
 from hwp_live_api import LiveHwpApplication
+from hwp_live_edit_history import LiveEditHistoryStore
 from hwp_live_native_action_models import NativeActionRequest
 from hwp_live_native_batch import execute_native_actions
 from hwp_live_rot import HwpDocumentCandidate
@@ -127,6 +128,7 @@ def operate_table_recipe(
     *,
     resolve_only: bool,
     allow_document_change: bool,
+    history: LiveEditHistoryStore | None = None,
 ) -> OperationResult | None:
     workflow = resolution.workflow_id
     if workflow not in _TABLE_WORKFLOWS:
@@ -140,8 +142,11 @@ def operate_table_recipe(
             resolution, "confirmation_required", "표 구조나 내용을 변경하는 작업입니다"
         )
     if workflow in {"table.repeat_template", "table.build_series"}:
+        if history is None:
+            raise HwpLiveError("표 시리즈 작업에는 MCP 편집 이력 저장소가 필요합니다")
         return operate_table_series_recipe(
             candidate,
+            history,
             resolution,
             recipe_inputs,
             postconditions,
@@ -244,21 +249,43 @@ def operate_table_recipe(
             native_protocol,
         )
     after = inspect_candidate_structure(hwp, candidate, before.page, lambda: None)
-    if workflow == "table.expand_and_fill":
-        if expansion_plan is None:
-            raise HwpLiveError("table expansion executed without a prepared plan")
-        _verify_expansion(after, before, table, expansion_plan, postconditions)
-    else:
-        control_id = table.control_instance_id
-        assert control_id is not None
-        cells = {cell.address: cell for cell in _table_after(after, control_id).cells}
-        if any(
-            address not in cells or not cells[address].has_picture
-            for address in updated_addresses
-        ):
-            raise HwpLiveError(
-                "표 그림 삽입 결과를 네이티브 구조에서 확인하지 못했습니다"
-            )
+    try:
+        if workflow == "table.expand_and_fill":
+            if expansion_plan is None:
+                raise HwpLiveError("table expansion executed without a prepared plan")
+            _verify_expansion(after, before, table, expansion_plan, postconditions)
+        else:
+            control_id = table.control_instance_id
+            assert control_id is not None
+            cells = {
+                cell.address: cell for cell in _table_after(after, control_id).cells
+            }
+            if any(
+                address not in cells or not cells[address].has_picture
+                for address in updated_addresses
+            ):
+                raise HwpLiveError(
+                    "표 그림 삽입 결과를 네이티브 구조에서 확인하지 못했습니다"
+                )
+    except HwpLiveError as error:
+        return _result(resolution, "partial_change", str(error)).model_copy(
+            update={
+                "execution_mode": "native_in_process",
+                "native_protocol": native_protocol,
+                "verification": "native_snapshot_before_after",
+                "verified": False,
+                "commands_executed": commands_executed,
+                "commands_completed": commands_executed,
+                "native_elapsed_microseconds": elapsed,
+                "current_page": after.page,
+                "page_count": after.page_count,
+                "modified": True,
+                "changed": True,
+                "updated_addresses": updated_addresses,
+                "partial_change": True,
+                "retry_safe": False,
+            }
+        )
     return _result(
         resolution,
         "executed",

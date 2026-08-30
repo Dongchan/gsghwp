@@ -246,6 +246,7 @@ def reconcile_save_fingerprint(
         "save_fingerprint_changed": changed,
     }
     baseline_reason = save_baseline_diagnostic_reason(before, attached=True)
+    evidence["save_baseline_diagnostic_reason"] = baseline_reason
     if baseline_reason is not None and base.failure_stage is None:
         evidence["failure_stage"] = f"save_baseline_{baseline_reason}"
     if _native_save_completion_matches(base, before, after, changed):

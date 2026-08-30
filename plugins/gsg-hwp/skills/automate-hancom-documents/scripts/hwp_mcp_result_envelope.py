@@ -42,6 +42,25 @@ def _reason_tokens(reason: str) -> frozenset[str]:
     return frozenset(part.strip() for part in reason.split(";") if part.strip())
 
 
+def _reason_count(tokens: frozenset[str], name: str) -> int:
+    """전송 실패 사유에 실린 수치 토큰을 읽는다.
+
+    마감으로 끊긴 작업도 실제로는 명령을 실행했을 수 있다. 그 수를 자유문에만
+    두면 결과는 "0개 실행"이라고 말하게 되므로, 구조화 필드로 옮긴다.
+    """
+
+    prefix = f"{name}="
+    for token in tokens:
+        if not token.startswith(prefix):
+            continue
+        try:
+            value = int(token[len(prefix) :])
+        except ValueError:
+            return 0
+        return max(0, value)
+    return 0
+
+
 def _is_internal_pre_mutation_wrapper(error: HwpLiveError) -> bool:
     cause = error.__cause__
     return isinstance(cause, HwpLiveError) and error.reason == (
@@ -247,14 +266,21 @@ def transport_error_result(
     else:
         mutation_evidence = mutation_started
     conservative_change = mutation_evidence is not False
+    # An unchanged document is normally the whole case for offering a retry.
+    # `safe_to_repeat=False` is how a failure says that rule does not hold for
+    # it — 한/글's undo stack moved even though the document did not, so a retry
+    # spends another of its steps. It can only subtract: nothing here can hand
+    # out retry-safety that the mutation evidence did not already earn.
     return OperationResult(
         status="transport_error",
         changed=conservative_change,
         verified=False,
+        commands_executed=_reason_count(reason_tokens, "commands_completed"),
         retry_safe=(
             not conservative_change
             and not reconcile_required
             and not dialog_user_action_required
+            and error.safe_to_repeat is not False
         ),
         reconcile_required=reconcile_required,
         request_id=inputs.request_id,

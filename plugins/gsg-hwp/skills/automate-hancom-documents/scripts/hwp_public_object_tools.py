@@ -16,12 +16,31 @@ from hwp_operation_contract import (
     HwpOperatePolicy,
     HwpOperatePostconditions,
     HwpOperateTarget,
+    OperationInputValue,
     OperationResult,
 )
+from hwp_priority_picture_edit import (
+    COPY_DESTINATION_CELL_PARAMETER,
+    COPY_DESTINATION_TABLE_PARAMETER,
+    DESTINATION_CELL_PARAMETER,
+    DESTINATION_TABLE_PARAMETER,
+    SOURCE_CELL_PARAMETER,
+    SOURCE_TABLE_PARAMETER,
+)
 from hwp_priority_recipe_contract import HwpPriorityRecipeInputs
+from hwp_public_cell_selector import PublicCellAddress
+from hwp_public_picture_edit_contract import (
+    PublicPictureCrop,
+    PublicPictureEditResult,
+    PublicPicturePage,
+    PublicPictureTableId,
+    PublicPictureTargetId,
+    to_public_picture_edit_result,
+)
 from hwp_public_action_contract import (
     OBJECT_INPUT_ALIASES,
     PublicActionExecutor,
+    PublicImageFit,
     PublicImageHeight,
     PublicImageInsertTarget,
     PublicImageSize,
@@ -73,6 +92,7 @@ class HwpPublicObjectTools:
         document_path: str | None,
         *,
         picture_only: bool,
+        requested_target_id: str | None = None,
     ) -> PublicActionResult:
         inspection = await self._executor.inspect_page_fast(document_path, 0, False)
         allowed_types = (
@@ -103,22 +123,32 @@ class HwpPublicObjectTools:
             )
             if len(candidates) == 3:
                 break
+        target_notice = (
+            ""
+            if requested_target_id is None
+            else f"지정한 target_id '{requested_target_id}'를 저장된 조회 대상과 연결하지 못했습니다. "
+        )
+        message = target_notice + (
+            f"현재 커서 쪽인 {inspection.page}쪽에서 다시 조회한 실제 대상 "
+            + "후보를 반환했습니다"
+            if candidates
+            else f"현재 커서 쪽인 {inspection.page}쪽에서 대상 후보를 찾지 못했습니다"
+        )
         return PublicActionResult(
             status="needs_target",
-            message=(
-                "현재 쪽에서 다시 조회한 실제 대상 후보를 반환했습니다"
-                if candidates
-                else (
-                    "현재 쪽에서 대상 후보를 찾지 못했습니다. hwp_inspect_page_fast로 "
-                    "대상 쪽을 다시 조회한 뒤 instance_id를 target_id로 전달하세요"
-                )
-            ),
+            message=message,
             request_id=request_id,
             runtime=RUNTIME_BUILD_INFO,
             verified=False,
             modified=False,
             required_inputs=("target_id",),
             target_candidates=tuple(candidates),
+            input_guidance=(
+                f"target_candidates는 현재 커서 쪽인 {inspection.page}쪽 후보입니다. "
+                + "대상이 다른 쪽이면 hwp_inspect_page_fast(page=<대상 쪽>, "
+                + "document_selector=<같은 selector>)로 조회한 instance_id를 "
+                + "target_id로 전달하세요.",
+            ),
             retry_safe=True,
         )
 
@@ -129,10 +159,11 @@ class HwpPublicObjectTools:
         path: Path,
         width_mm: PublicImageWidth | None = None,
         height_mm: PublicImageHeight | None = None,
+        fit: PublicImageFit = "contain",
         document_path: str | None = None,
         target: PublicImageInsertTarget = "selection",
     ) -> PublicActionResult:
-        size = PublicImageSize(width_mm=width_mm, height_mm=height_mm)
+        size = PublicImageSize(width_mm=width_mm, height_mm=height_mm, fit=fit)
         canonical_target = {
             "selection": HwpOperateTarget(kind="selection", binding="selection"),
             "document_end": HwpOperateTarget(
@@ -154,6 +185,7 @@ class HwpPublicObjectTools:
                 recipe=HwpPriorityRecipeInputs(
                     picture_width_mm=size.width_mm,
                     picture_height_mm=size.height_mm,
+                    picture_fit=size.fit,
                 ),
             ),
         )
@@ -176,6 +208,7 @@ class HwpPublicObjectTools:
                 request_id,
                 document_path,
                 picture_only=True,
+                requested_target_id=target_id,
             )
         return await self._execute(
             metadata.REPLACE_IMAGE_INTENT,
@@ -194,6 +227,129 @@ class HwpPublicObjectTools:
             ),
         )
 
+    async def hwp_edit_picture(
+        self,
+        *,
+        operation_id: PublicOperationId,
+        target_id: PublicPictureTargetId | None = None,
+        table_id: PublicPictureTableId | None = None,
+        cell: PublicCellAddress | None = None,
+        move_to_cell: PublicCellAddress | None = None,
+        move_to_table_id: PublicPictureTableId | None = None,
+        crop: PublicPictureCrop | None = None,
+        page: PublicPicturePage | None = None,
+        document_path: str | None = None,
+    ) -> PublicPictureEditResult:
+        request_id = operation_id
+        parameters: dict[str, OperationInputValue] = {}
+        if table_id is not None:
+            parameters[SOURCE_TABLE_PARAMETER] = table_id
+        if cell is not None:
+            parameters[SOURCE_CELL_PARAMETER] = cell
+        if move_to_cell is not None:
+            parameters[DESTINATION_CELL_PARAMETER] = move_to_cell
+        if move_to_table_id is not None:
+            parameters[DESTINATION_TABLE_PARAMETER] = move_to_table_id
+        if crop is not None:
+            parameters["crop_left"] = crop.left
+            parameters["crop_top"] = crop.top
+            parameters["crop_right"] = crop.right
+            parameters["crop_bottom"] = crop.bottom
+        resolved = self._targets.resolve_picture(target_id, document_path)
+        if resolved is None:
+            base = await self._unknown_target(
+                request_id,
+                document_path,
+                picture_only=True,
+                requested_target_id=target_id,
+            )
+            return to_public_picture_edit_result(base, None)
+        target = resolved.target
+        # 셀 주소로 지목한 요청은 개체 ID 없이 온다. 그때는 선택 상태를 기다리지
+        # 말고 recipe 가 표·칸으로 찾게 둔다.
+        if target_id is None and table_id is not None and cell is not None:
+            target = target.model_copy(
+                update={"binding": "active", "match_policy": "unique"}
+            )
+        if page is not None:
+            target = target.model_copy(update={"page_hint": page})
+        result = await self._executor.execute(
+            metadata.EDIT_PICTURE_INTENT,
+            HwpOperateInputs(
+                request_id=request_id,
+                document=resolved.document_path,
+                operation="image.resize",
+                target=target,
+                parameters=parameters,
+                policy=HwpOperatePolicy(ambiguity="return_candidates"),
+                postconditions=HwpOperatePostconditions(verify_structure=True),
+            ),
+            None,
+        )
+        base = self._public_result(result, resolved.document_path)
+        return to_public_picture_edit_result(base, result.picture_edit)
+
+    async def hwp_copy_picture(
+        self,
+        *,
+        operation_id: PublicOperationId,
+        to_cell: PublicCellAddress,
+        target_id: PublicPictureTargetId | None = None,
+        table_id: PublicPictureTableId | None = None,
+        cell: PublicCellAddress | None = None,
+        to_table_id: PublicPictureTableId | None = None,
+        width_mm: PublicImageWidth | None = None,
+        height_mm: PublicImageHeight | None = None,
+        page: PublicPicturePage | None = None,
+        document_path: str | None = None,
+    ) -> PublicPictureEditResult:
+        request_id = operation_id
+        size = PublicImageSize(width_mm=width_mm, height_mm=height_mm)
+        parameters: dict[str, OperationInputValue] = {
+            COPY_DESTINATION_CELL_PARAMETER: to_cell
+        }
+        if table_id is not None:
+            parameters[SOURCE_TABLE_PARAMETER] = table_id
+        if cell is not None:
+            parameters[SOURCE_CELL_PARAMETER] = cell
+        if to_table_id is not None:
+            parameters[COPY_DESTINATION_TABLE_PARAMETER] = to_table_id
+        resolved = self._targets.resolve_picture(target_id, document_path)
+        if resolved is None:
+            base = await self._unknown_target(
+                request_id,
+                document_path,
+                picture_only=True,
+                requested_target_id=target_id,
+            )
+            return to_public_picture_edit_result(base, None)
+        target = resolved.target
+        if target_id is None and table_id is not None and cell is not None:
+            target = target.model_copy(
+                update={"binding": "active", "match_policy": "unique"}
+            )
+        if page is not None:
+            target = target.model_copy(update={"page_hint": page})
+        result = await self._executor.execute(
+            metadata.COPY_PICTURE_INTENT,
+            HwpOperateInputs(
+                request_id=request_id,
+                document=resolved.document_path,
+                operation="image.resize",
+                target=target,
+                parameters=parameters,
+                recipe=HwpPriorityRecipeInputs(
+                    picture_width_mm=size.width_mm,
+                    picture_height_mm=size.height_mm,
+                ),
+                policy=HwpOperatePolicy(ambiguity="return_candidates"),
+                postconditions=HwpOperatePostconditions(verify_structure=True),
+            ),
+            None,
+        )
+        base = self._public_result(result, resolved.document_path)
+        return to_public_picture_edit_result(base, result.picture_edit)
+
     async def hwp_add_caption(
         self,
         *,
@@ -210,6 +366,7 @@ class HwpPublicObjectTools:
                 request_id,
                 document_path,
                 picture_only=False,
+                requested_target_id=target_id,
             )
         return await self._execute(
             metadata.ADD_CAPTION_INTENT,

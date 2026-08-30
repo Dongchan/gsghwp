@@ -3,7 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Final
 
+from hwp_document_style_observation import resolve_document_style_usage
+from hwp_document_style_profile import document_body_style_id
 from hwp_errors import HwpLiveError
 from hwp_live_api import LiveHwpApplication, SelectionRange
 from hwp_live_contract import (
@@ -43,8 +46,11 @@ from hwp_live_text_format_verification import verify_requested_text_format
 from hwp_live_text_patch_contract import (
     TextPatchRequest,
     TextPatchResult,
+    matches_replacement_readback,
     text_patch_minimum_protocol,
+    validate_text_patch_request,
 )
+from hwp_operation_local_precondition import native_failure_left_document_untouched
 
 
 @dataclass(slots=True)
@@ -161,6 +167,67 @@ def _normalize_paragraph_text(value: str) -> str:
     return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
+#: 진단에 실어 보낼 관측 원문의 최대 길이. 캡션 한 줄을 통째로 보여주고도 남는
+#: 길이이고, 선택이 한 문단보다 클 때 실패 메시지가 본문 덤프가 되는 것을 막는다.
+_OBSERVED_TEXT_LIMIT: Final = 200
+
+
+def _observed_selection_text(window_handle: int) -> str:
+    """실패가 멈춰 세운 그 자리에 지금 실제로 들어 있는 글자.
+
+    읽을 수 없거나 선택이 남아 있지 않으면 "". 브리지가 편집 전 검사에서
+    멈출 때 어떤 경로는 커서를 원위치시키고(`text.find.restore`) 어떤 경로는
+    찾아낸 선택을 그대로 둔다. 선택이 남아 있는 경우 -- 기대 원문과 실제가
+    달라 멈춘 바로 그 경우 -- 에만 읽을 것이 있다.
+
+    조회일 뿐이라 문서를 바꾸지 않고, 같은 스냅샷 읽기를 이 파일의 성공
+    경로가 패치 전후로 이미 두 번 한다.
+    """
+    try:
+        snapshot = read_native_snapshot(window_handle)
+    except (HwpLiveError, OSError, ValueError):
+        return ""
+    if snapshot is None or not snapshot.selection.selected:
+        return ""
+    return _normalize_paragraph_text(snapshot.selected_text)
+
+
+def _failure_with_observed_text(
+    failure: NativeActionFailure,
+    observed: str,
+) -> NativeActionFailure:
+    """실패에 "그 자리에 지금 있는 원문"을 실어 다시 만든 같은 실패.
+
+    브리지는 기대와 실제가 다르다는 것까지만 말하고 무엇이 다른지는 말하지
+    않는다(ActionTextPatch.cpp 의 `PatchSelectedText`). 그래서 호출자는 왜
+    어긋났는지 모른 채 같은 요청을 한 번 더 보냈고, 현장에서 그 재시도 한 번이
+    다시 40초였다.
+
+    실제로 읽힌 글자를 보여주면 그 판단이 호출자에게 넘어간다. 자동 그림번호
+    필드가 든 캡션이라면 요청한 `(그림 5.5.3-○)` 자리에 `(그림 5.5.3-16)` 이
+    보이고, 그 한 줄이 "여기는 리터럴이 아니라 필드다"를 말한다. 규칙으로
+    맞히지 않고 관측을 그대로 낸다.
+    """
+    trimmed = observed[:_OBSERVED_TEXT_LIMIT]
+    ellipsis = "…" if len(observed) > _OBSERVED_TEXT_LIMIT else ""
+    return NativeActionFailure(
+        NativeActionFailureEvidence(
+            code=failure.code,
+            location=failure.location,
+            message=(
+                f'{failure.message}; 그 자리에서 실제로 읽은 원문은 "{trimmed}{ellipsis}"'
+                + " 입니다"
+            ),
+            commands_completed=failure.commands_completed,
+            failed_step=failure.failed_step,
+            partial_mutation=failure.partial_mutation,
+            retry_safe=failure.retry_safe,
+            structure_digest_before=failure.structure_digest_before,
+            structure_digest_after=failure.structure_digest_after,
+        )
+    )
+
+
 def replace_validated_selection(
     hwp: LiveHwpApplication,
     candidate: HwpDocumentCandidate,
@@ -220,18 +287,7 @@ def patch_validated_text(
     guard: Callable[[], None],
 ) -> TextPatchResult:
     _ = hwp
-    if (
-        request.expected_text is not None and len(request.expected_text) > 1_000_000
-    ) or len(request.replacement) > 1_000_000:
-        raise HwpLiveError("라이브 text.patch 크기 한도를 초과했습니다")
-    if request.target.kind != "current" and request.expected_text is None:
-        raise HwpLiveError(
-            "범위·검색·표 셀 text.patch에는 확인할 기존 텍스트가 필요합니다"
-        )
-    if not request.replacement and request.formatting is not None:
-        raise HwpLiveError(
-            "삭제 결과에는 적용할 텍스트가 없으므로 글자 서식을 함께 요청할 수 없습니다"
-        )
+    validate_text_patch_request(request)
     require_writable_document(unsafe_selectors, candidate.selector)
     guard()
     before = read_native_snapshot(candidate.window_handle)
@@ -257,17 +313,28 @@ def patch_validated_text(
         ),
     )
     minimum_protocol = text_patch_minimum_protocol(request)
-    native_result = execute_native_actions(
-        candidate.window_handle,
-        NativeActionRequest(
-            document_id=candidate.document_id,
-            full_name=candidate.full_name,
-            commands=commands,
-            expected_cursor=before.cursor,
-            expected_selection=before.selection,
-        ),
-        minimum_version=minimum_protocol,
-    )
+    try:
+        native_result = execute_native_actions(
+            candidate.window_handle,
+            NativeActionRequest(
+                document_id=candidate.document_id,
+                full_name=candidate.full_name,
+                commands=commands,
+                expected_cursor=before.cursor,
+                expected_selection=before.selection,
+            ),
+            minimum_version=minimum_protocol,
+        )
+    except NativeActionFailure as failure:
+        # 편집 전 검사에서 멈춘 실패에만 읽을 것이 있다. 부분 변경이 있었을 수도
+        # 있는 실패에서 지금 선택된 글자는 "어긋난 원문"이 아니라 반쯤 쓰인
+        # 결과일 수 있고, 그것을 원문이라고 부르면 거짓말이 된다.
+        if not native_failure_left_document_untouched(failure):
+            raise
+        observed = _observed_selection_text(candidate.window_handle)
+        if not observed:
+            raise
+        raise _failure_with_observed_text(failure, observed) from failure
     if native_result is None:
         raise HwpLiveError(
             f"프로토콜 {minimum_protocol} 네이티브 text.patch를 사용할 수 없습니다"
@@ -276,9 +343,11 @@ def patch_validated_text(
     if after is None:
         raise HwpLiveError("text.patch 후 한컴 문서 상태를 읽지 못했습니다")
     if request.replacement:
-        if not after.selection.selected or _normalize_paragraph_text(
-            after.selected_text
-        ) != _normalize_paragraph_text(request.replacement):
+        if not after.selection.selected or not matches_replacement_readback(
+            after.selected_text,
+            request.replacement,
+            target.kind,
+        ):
             raise HwpLiveError(
                 "text.patch 후 변경한 본문 범위를 다시 읽어 확인하지 못했습니다"
             )
@@ -286,6 +355,35 @@ def patch_validated_text(
         raise HwpLiveError("text.patch 삭제 후 선택 영역이 예상대로 접히지 않았습니다")
     if request.formatting is not None:
         verify_requested_text_format(request.formatting, after)
+    if request.post_selection != "keep":
+        if after.selection.selected:
+            endpoint = (
+                after.selection.start
+                if request.post_selection == "collapse_to_start"
+                else after.selection.end
+            )
+        else:
+            # 삭제(빈 replacement)는 네이티브가 이미 삭제 시작점으로 커서를
+            # 접었고 선택이 없다. 이때 after.selection의 끝점 좌표는 선택이
+            # 아니라 잔상이므로 그 좌표로 접기를 검증하면 성공한 편집이
+            # 실패로 뒤집힌다. 접을 곳의 유일한 진실은 현재 커서다.
+            endpoint = after.cursor
+        guard()
+        collapsed = hwp.set_pos(
+            endpoint.list_id,
+            endpoint.paragraph,
+            endpoint.character,
+        )
+        guard()
+        if (
+            not collapsed
+            or hwp.get_pos()
+            != (endpoint.list_id, endpoint.paragraph, endpoint.character)
+            or hwp.get_selected_pos()[0]
+        ):
+            raise HwpLiveError(
+                "text.patch 검증 후 선택 영역을 요청한 위치로 접지 못했습니다"
+            )
     guard()
     return TextPatchResult(native_result, before, after)
 
@@ -316,16 +414,51 @@ def apply_validated_layout(
         raise HwpLiveError("선택 영역이 있어 레이아웃 삽입을 중단했습니다")
     if expected_selected_text is not None:
         raise HwpLiveError("선택 영역이 없으므로 예상 선택 텍스트를 보내지 마세요")
-    resolved_plan = resolve_layout_styles(hwp, plan, guard)
+    resolved_plan, page_geometry = resolve_layout_styles(
+        hwp,
+        plan,
+        guard,
+        # Same observed [shape -> style id] table the recipe path uses, so the
+        # bulk path does not fall back to name matching for "○"/"(1)".
+        usage=resolve_document_style_usage(
+            candidate.window_handle,
+            candidate.document_id,
+            candidate.full_name,
+        ),
+    )
     if resolved_plan.target == "current":
         validate_layout_anchor(hwp, resolved_plan, guard)
-    styles = inspect_styles(hwp, guard)
+    # The caret style is what the recipe path hands the native layout compiler
+    # (hwp_live_operation_recipe.py:415), so the bulk path reads it the same way
+    # instead of shipping the 0 default. The native snapshot is a C++ bridge
+    # call, not a COM round trip. Only when it is unavailable do we pay for a
+    # style list to pick the document's own body style — the edit is never
+    # refused over a base style we could not name.
+    before = read_native_snapshot(candidate.window_handle)
+    guard()
+    # 스타일 목록 실패를 여기서 삼키지 않는다. 바로 위 resolve_layout_styles 가
+    # 이미 같은 inspect_styles 를 예외 그대로 통과시키므로, 스타일을 못 읽는
+    # 문서는 이 지점에 닿기 전에 실패한다. 여기서만 0 으로 되돌리면 그 문턱을
+    # 넘어온 일시적 실패가 문서 본문 스타일 대신 조용히 기본 스타일 id 를 싣고
+    # 나가고, 호출자는 위계가 무너진 것을 응답에서 볼 수 없다. LayoutResult 에는
+    # 그 사실을 실을 자리가 없으므로 1.3.1(3aa71a1)처럼 소리내어 실패한다.
+    base_style_id = (
+        document_body_style_id(inspect_styles(hwp, guard).styles)
+        if before is None
+        else before.style_id
+    )
     position = NativePosition(*cursor)
     native_request = build_native_layout_request(
         NativeLayoutContext(
             document_id=candidate.document_id,
             full_name=candidate.full_name,
-            style_ids=tuple((style.name, style.style_id) for style in styles.styles),
+            # resolve_layout_styles already bound every block to a concrete
+            # document style id, so the name lookup table is dead weight here —
+            # the recipe path passes () for the same reason
+            # (hwp_live_operation_recipe.py:411).
+            style_ids=(),
+            page_geometry=page_geometry,
+            base_style_id=base_style_id,
             expected_cursor=position,
             expected_selection=_native_selection(selected),
         ),

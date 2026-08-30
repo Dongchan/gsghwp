@@ -6,6 +6,7 @@ license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "mcp==1.26.0",
+    "jsonschema==4.26.0",
     "pdfplumber==0.11.9",
     "pydantic==2.12.5",
     "pyhwpx==1.6.6",
@@ -33,7 +34,7 @@ testpaths = ["tests"]
 norecursedirs = ["tmp", ".venv", "legacy", "addon", "*.egg", ".git"]
 
 [tool.basedpyright]
-extraPaths = ["skills/automate-hancom-documents/scripts"]
+extraPaths = ["tools", "skills/automate-hancom-documents/scripts"]
 reportImplicitRelativeImport = false
 # tmp/ 에는 작업 산출물과 저장소 소스 복제본이 쌓인다(실측 70건 오탐).
 # addon/ 의 빌드·진단 산출물도 타입 검사 대상이 아니다.

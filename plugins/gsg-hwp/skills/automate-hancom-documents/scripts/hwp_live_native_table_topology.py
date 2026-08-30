@@ -260,6 +260,60 @@ def table_topology(
     )
 
 
+def doomed_horizontal_merge_neighbours(
+    topology: TableTopology,
+    first: str,
+    second: str,
+) -> tuple[str, str] | None:
+    """Describe the exact adjacent-span pattern HWP cannot merge safely."""
+    _ = topology.merge_region(first, second)
+    start = topology.by_address[first.upper()]
+    end = topology.by_address[second.upper()]
+    row, left = table_cell_coordinate(start.address)
+    end_row, end_column = table_cell_coordinate(end.address)
+    bottom = end_row + end.row_span - 1
+    right = end_column + end.column_span - 1
+    if bottom != row or right <= left:
+        return None
+
+    neighbours: list[str] = []
+    for neighbour_row in (row - 1, row + 1):
+        if neighbour_row < 1 or neighbour_row > topology.rows:
+            neighbours.append(f"{neighbour_row}행=표 경계(범위 밖)")
+            continue
+        spans = tuple(
+            cell
+            for cell in topology.cells
+            if (
+                table_cell_coordinate(cell.address)[0] == neighbour_row
+                and cell.row_span == 1
+                and left <= table_cell_coordinate(cell.address)[1]
+                and table_cell_coordinate(cell.address)[1] + cell.column_span - 1
+                <= right
+            )
+        )
+        if not spans or any(cell.column_span <= 1 for cell in spans):
+            return None
+        covered_columns = {
+            column
+            for cell in spans
+            for column in range(
+                table_cell_coordinate(cell.address)[1],
+                table_cell_coordinate(cell.address)[1] + cell.column_span,
+            )
+        }
+        if not set(range(left, right + 1)).issubset(covered_columns):
+            return None
+        descriptions = ", ".join(
+            f"{cell.address}(row_span={cell.row_span},column_span={cell.column_span},"
+            f"columns={table_cell_coordinate(cell.address)[1]}.."
+            f"{table_cell_coordinate(cell.address)[1] + cell.column_span - 1})"
+            for cell in sorted(spans, key=lambda item: table_cell_coordinate(item.address))
+        )
+        neighbours.append(f"{neighbour_row}행=[{descriptions}]")
+    return neighbours[0], neighbours[1]
+
+
 def verify_split_preflight(topology: TableTopology, split: SplitSpec) -> None:
     target = topology.by_address.get(split.cell.upper())
     if target is None:
@@ -334,13 +388,65 @@ def verify_merge_transition(
     end = before.by_address[second.upper()]
     start_row, start_column = table_cell_coordinate(start.address)
     end_row, end_column = table_cell_coordinate(end.address)
-    anchor = after.by_address.get(first.upper())
-    if (
-        anchor is None
-        or after.cell_count != before.cell_count - len(region) + 1
-        or anchor.row_span != end_row + end.row_span - start_row
-        or anchor.column_span != end_column + end.column_span - start_column
-    ):
+    anchor_address = first.upper()
+    anchor = after.by_address.get(anchor_address)
+    expected_cell_count = before.cell_count - len(region) + 1
+    expected_row_span = end_row + end.row_span - start_row
+    expected_column_span = end_column + end.column_span - start_column
+    failures: list[str] = []
+    if anchor is None:
+        failures.append(
+            f"owner_at_anchor(expected={anchor_address}, actual=missing)"
+        )
+    if after.cell_count != expected_cell_count:
+        failures.append(
+            f"cell_count(expected={expected_cell_count}, actual={after.cell_count})"
+        )
+    if anchor is not None and anchor.row_span != expected_row_span:
+        failures.append(
+            f"anchor_row_span(expected={expected_row_span}, actual={anchor.row_span})"
+        )
+    if anchor is not None and anchor.column_span != expected_column_span:
+        failures.append(
+            "anchor_column_span"
+            f"(expected={expected_column_span}, actual={anchor.column_span})"
+        )
+    if failures:
+        observed_anchor = (
+            "missing"
+            if anchor is None
+            else f"{anchor.address}(row_span={anchor.row_span},column_span={anchor.column_span})"
+        )
+        disappeared = tuple(
+            address for address in before.by_address if address not in after.by_address
+        )
+        span_changes = tuple(
+            (
+                address,
+                previous.row_span,
+                previous.column_span,
+                current.row_span,
+                current.column_span,
+            )
+            for address, previous in before.by_address.items()
+            if (current := after.by_address.get(address)) is not None
+            and (previous.row_span, previous.column_span)
+            != (current.row_span, current.column_span)
+        )
+        delta_items = tuple(
+            [f"owner_disappeared={address}" for address in disappeared]
+            + [
+                f"span_changed={address}({old_row}x{old_column}->{new_row}x{new_column})"
+                for address, old_row, old_column, new_row, new_column in span_changes
+            ]
+        )
+        delta_count = len(disappeared) + len(span_changes)
+        delta_preview = "; ".join(delta_items[:6]) or "없음"
+        if len(delta_items) > 6:
+            delta_preview = f"{delta_preview}; ..."
         raise HwpLiveError(
-            "요청한 직사각형 CellTopology 영역이 실제 표에서 병합되지 않았습니다"
+            "요청한 직사각형 CellTopology 영역이 실제 표에서 병합되지 않았습니다: "
+            f"failed_terms=[{'; '.join(failures)}]; "
+            f"after_anchor={observed_anchor}; after_cell_count={after.cell_count}; "
+            f"span_delta_changed_cells={delta_count}; span_delta=[{delta_preview}]"
         )

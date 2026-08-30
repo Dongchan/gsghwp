@@ -9,10 +9,15 @@ from hwp_operation_contract import (
     HwpOperateInputs,
     HwpOperatePolicy,
     HwpOperatePostconditions,
+    OperationInputValue,
     OperationResult,
 )
 from hwp_public_action_contract import PublicOperationId
-from hwp_public_cell_selector import PublicCellReference
+from hwp_public_cell_selector import (
+    PublicCellAddress,
+    PublicCellRange,
+    PublicCellReference,
+)
 from hwp_public_contract import PublicActionResult, PublicTableTarget
 from hwp_public_contract import refresh_public_target_ids, to_public_action_result
 from hwp_public_table_edit_contract import (
@@ -37,6 +42,7 @@ from hwp_public_table_edit_resolution import (
     resolve_public_table_edit,
 )
 from hwp_public_table_plan import PublicTableResolutionRequest
+from hwp_operation_registry import operation_registry
 from hwp_public_table_target import PublicTableTargetStore
 from hwp_public_table_tools import PublicTableExecutor
 
@@ -104,6 +110,17 @@ class HwpPublicTableEditTools:
         operation_id: PublicOperationId,
         target: PublicTableTarget | None = None,
         cell: PublicCellReference | None = None,
+        cells: Annotated[
+            tuple[PublicCellAddress | PublicCellRange, ...] | None,
+            Field(
+                max_length=2_000,
+                description=(
+                    "같은 서식을 적용할 셀들입니다. 'A4:P4'처럼 구간으로 적거나 "
+                    "['A4','C4']처럼 주소를 나열합니다. cell과 함께 쓸 수 있고, "
+                    "겹치는 주소는 한 번만 적용합니다."
+                ),
+            ),
+        ] = None,
         row_height_mm: Annotated[float | None, Field(ge=1, le=250)] = None,
         column_width_mm: Annotated[float | None, Field(ge=1, le=250)] = None,
         padding_left_mm: Annotated[float | None, Field(ge=0, le=20)] = None,
@@ -128,11 +145,7 @@ class HwpPublicTableEditTools:
                 request_id=operation_id,
                 query=metadata.FORMAT_TABLE_INTENT,
             ),
-            cells=(
-                ()
-                if cell is None
-                else (NamedPublicCellReference("cell", cell),)
-            ),
+            cells=(() if cell is None else (NamedPublicCellReference("cell", cell),)),
         )
         resolved = await self._resolved(request)
         match resolved:
@@ -158,6 +171,10 @@ class HwpPublicTableEditTools:
                     border_color=border_color,
                 )
                 parameters = dict(requested.to_parameters())
+                if cells:
+                    # OperationInputValue 는 스칼라만 담는다. 구간 전개와 중복
+                    # 제거는 parse_table_format 이 한 번에 한다.
+                    parameters["cells"] = ",".join(address.upper() for address in cells)
                 for name, value in (
                     ("padding_left_mm", padding_left_mm),
                     ("padding_right_mm", padding_right_mm),
@@ -189,6 +206,23 @@ class HwpPublicTableEditTools:
     ) -> PublicActionResult:
         # Both omitted means "the cells the user already selected". Requiring
         # the addresses made models invent them and merge the wrong cells.
+        if (start_cell is None) != (end_cell is None):
+            document_path = None if target is None else target.document_path
+            return self._public_result(
+                OperationResult(
+                    request_id=operation_id,
+                    status="schema_conflict",
+                    query=metadata.MERGE_TABLE_CELLS_INTENT,
+                    registry_entries=operation_registry().count,
+                    lookup_microseconds=0,
+                    message=(
+                        "병합 범위는 시작·끝 셀을 모두 지정하거나 현재 선택을 "
+                        "사용하도록 둘 다 생략해야 합니다"
+                    ),
+                    retry_safe=True,
+                ),
+                document_path,
+            )
         named = tuple(
             (parameter, NamedPublicCellReference(input_name, reference))
             for parameter, input_name, reference in (
@@ -214,6 +248,7 @@ class HwpPublicTableEditTools:
                 assert_never(unreachable)
             case _:
                 addresses = resolved.addresses
+                parameters: dict[str, OperationInputValue]
                 if len(addresses) == 2:
                     requested = PublicMergeTableCellsInput(
                         start_cell=addresses[0],
@@ -269,6 +304,7 @@ class HwpPublicTableEditTools:
             case _ as unreachable if not _is_resolved_edit(unreachable):
                 assert_never(unreachable)
             case _:
+                parameters: dict[str, OperationInputValue]
                 if resolved.addresses:
                     requested = PublicSplitTableCellInput(
                         cell=resolved.addresses[0],

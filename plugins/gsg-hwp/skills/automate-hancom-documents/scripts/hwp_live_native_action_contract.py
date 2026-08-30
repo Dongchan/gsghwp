@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from base64 import b64decode, b64encode
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -12,6 +13,7 @@ from hwp_live_native_action_models import (
     CallCommand,
     CaptureTableCommand,
     CaptionCommand,
+    CaptureDocumentBlockProbeCommand,
     CellCommand,
     CopyControlCommand,
     DeleteControlCommand,
@@ -32,6 +34,8 @@ from hwp_live_native_action_models import (
     NativeActionValue,
     NativeBooleanCallResult,
     NativeCallResult,
+    NativeCellBorder,
+    NativeCellFormat,
     NativeCharacterFormat,
     NativeControlInspectionError,
     NativeDetailedCaption,
@@ -42,6 +46,8 @@ from hwp_live_native_action_models import (
     NativePageCell,
     NativePageInspection,
     NativeIntegerCallResult,
+    NativeParagraphStyle,
+    NativeParagraphStyleScan,
     NativePosition,
     NativeParagraphFormat,
     NativeSelection,
@@ -59,6 +65,10 @@ from hwp_live_native_action_models import (
     SetCellTextCommand,
     TextPatchCommand,
     TextValue,
+)
+from hwp_live_native_action_results import (
+    NativeDetailedParagraph,
+    NativeUnsupportedRecord,
 )
 
 
@@ -258,6 +268,8 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
             return (f"COPY_CONTROL\t{_encode(instance_id)}",)
         case SaveDocumentFileCommand(path=path):
             return (f"SAVE_DOCUMENT_FILE\t{_encode(_absolute_path(path))}",)
+        case CaptureDocumentBlockProbeCommand(path=path):
+            return (f"CAPTURE_DOCUMENT_BLOCK_PROBE\t{_encode(_absolute_path(path))}",)
         case RestoreDocumentFileCommand(
             path=path,
             expected_page_count=expected_page_count,
@@ -302,6 +314,7 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
             table_instance_id=table_instance_id,
             cell_address=cell_address,
             preserve_format=preserve_format,
+            preflight_only=preflight_only,
         ):
             if target == "current":
                 if any(
@@ -329,7 +342,13 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                         + (("1",) if preserve_format else ())
                     ),
                 )
-            if expected is None:
+            if preflight_only and (
+                expected is not None or target not in {"range", "table_cell"}
+            ):
+                raise HwpLiveError(
+                    "native text.patch preflight command가 올바르지 않습니다"
+                )
+            if expected is None and target not in {"range", "table_cell"}:
                 raise HwpLiveError(
                     "범위·검색·표 셀 text.patch에는 확인할 기존 텍스트가 필요합니다"
                 )
@@ -343,6 +362,22 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                     or start.list_id != end.list_id
                 ):
                     raise HwpLiveError("범위 text.patch 좌표가 올바르지 않습니다")
+                if preflight_only:
+                    return (
+                        "\t".join(
+                            (
+                                "PREPARE_TEXT",
+                                "RANGE",
+                                str(start.list_id),
+                                str(start.paragraph),
+                                str(start.character),
+                                str(end.list_id),
+                                str(end.paragraph),
+                                str(end.character),
+                                _encode(replacement),
+                            )
+                        ),
+                    )
                 return (
                     "\t".join(
                         (
@@ -354,7 +389,7 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                             str(end.list_id),
                             str(end.paragraph),
                             str(end.character),
-                            _encode(expected),
+                            _encode("" if expected is None else expected),
                             _encode(replacement),
                         )
                         + (("1",) if preserve_format else ())
@@ -364,6 +399,8 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
             if occurrence_value < 0:
                 raise HwpLiveError("text.patch 검색 순번은 1 이상이어야 합니다")
             if target == "find":
+                if expected is None:
+                    raise HwpLiveError("검색 text.patch에는 기존 텍스트가 필요합니다")
                 if start is not None or end is not None:
                     raise HwpLiveError(
                         "검색 text.patch 대상에 범위 입력을 함께 쓸 수 없습니다"
@@ -411,6 +448,20 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                     raise HwpLiveError(
                         "표 셀 text.patch에는 표 ID와 셀 주소가 필요합니다"
                     )
+                if preflight_only:
+                    return (
+                        "\t".join(
+                            (
+                                "PREPARE_TEXT",
+                                "CELL",
+                                _encode(table_instance_id),
+                                _plain(cell_address, "셀 주소").upper(),
+                                str(occurrence_value),
+                                "1" if match_case else "0",
+                                _encode(replacement),
+                            )
+                        ),
+                    )
                 return (
                     "\t".join(
                         (
@@ -420,26 +471,46 @@ def _command_lines(command: NativeActionCommand) -> tuple[str, ...]:
                             _plain(cell_address, "셀 주소").upper(),
                             str(occurrence_value),
                             "1" if match_case else "0",
-                            _encode(expected),
+                            _encode("" if expected is None else expected),
                             _encode(replacement),
                         )
                         + (("1",) if preserve_format else ())
                     ),
                 )
             raise HwpLiveError("지원하지 않는 text.patch 대상입니다")
-        case InsertPictureCommand(path=path, width_mm=width, height_mm=height):
+        case InsertPictureCommand(
+            path=path,
+            width_mm=width,
+            height_mm=height,
+            crop=crop,
+        ):
             if (width is None) != (height is None):
                 raise HwpLiveError(
                     "네이티브 그림 배치 영역의 가로와 세로가 함께 필요합니다"
                 )
             if width is None or height is None:
+                if crop is not None:
+                    raise HwpLiveError(
+                        "네이티브 그림 자르기에는 배치 영역이 함께 필요합니다"
+                    )
                 return (f"INSERT_PICTURE\t{_encode(_absolute_path(path))}",)
             if width <= 0 or height <= 0:
                 raise HwpLiveError("네이티브 그림 배치 영역은 0보다 커야 합니다")
-            return (
+            box = (
                 f"INSERT_PICTURE\t{_encode(_absolute_path(path))}\t"
-                + f"{format(width, '.10g')}\t{format(height, '.10g')}",
+                + f"{format(width, '.10g')}\t{format(height, '.10g')}"
             )
+            if crop is None:
+                return (box,)
+            edges = (crop.left, crop.top, crop.right, crop.bottom)
+            if any(not 0.0 <= edge < 1.0 for edge in edges) or (
+                crop.left + crop.right >= 1.0 or crop.top + crop.bottom >= 1.0
+            ):
+                raise HwpLiveError(
+                    "네이티브 그림 자르기 비율은 0 이상 1 미만이고 "
+                    + "마주 보는 두 변의 합이 1보다 작아야 합니다"
+                )
+            return (box + "\t" + "\t".join(format(edge, ".10g") for edge in edges),)
         case CellCommand(address=address):
             return (f"CELL\t{_plain(address, '셀 주소').upper()}",)
         case SetCellTextCommand(
@@ -819,7 +890,83 @@ def decode_snapshot(payload: str) -> NativeSnapshot:
             indentation_hwpunit=_integer(paragraph[5], "문단 들여쓰기"),
             previous_spacing_hwpunit=_integer(paragraph[6], "문단 위 간격"),
             next_spacing_hwpunit=_integer(paragraph[7], "문단 아래 간격"),
+            heading_type=(
+                _integer(paragraph[8], "문단 머리 모양")
+                if len(paragraph) > 8 and paragraph[8]
+                else None
+            ),
+            heading_level=(
+                _integer(paragraph[9], "문단 번호 수준")
+                if len(paragraph) > 9 and paragraph[9]
+                else None
+            ),
+            marker_is_automatic=(
+                _boolean(paragraph[10], "자동 번호 여부")
+                if len(paragraph) > 10 and paragraph[10]
+                else None
+            ),
+            manual_marker_value=(
+                _decode(paragraph[11])[:64]
+                if len(paragraph) > 11 and paragraph[11]
+                else None
+            ),
         ),
+    )
+
+
+# CELLFMT: tableId, address, fill(2), four sides of three, margins(4),
+# vertical align, paragraph align, face name, character height, bold.
+_CELL_FORMAT_FIELDS = 26
+
+
+def _absent_when_negative(value: str, label: str) -> int | None:
+    """-1 on the wire means the bridge could not read the property.
+
+    Absent is not zero. A fill color of 0 is black; a fill color nobody could
+    read is ``None``, and only the first one may be replayed onto a new table.
+    The CELL record already spells "unreadable" as -1 for width and height, so
+    the appearance record spells it the same way.
+    """
+    number = _integer(value, label)
+    return None if number < 0 else number
+
+
+def _cell_border(fields: list[str], start: int, label: str) -> NativeCellBorder:
+    return NativeCellBorder(
+        line_type=_absent_when_negative(fields[start], f"{label} 테두리 종류"),
+        width=_absent_when_negative(fields[start + 1], f"{label} 테두리 굵기"),
+        color=_absent_when_negative(fields[start + 2], f"{label} 테두리 색"),
+    )
+
+
+def _decode_cell_format(fields: list[str]) -> NativeCellFormat:
+    bold = _integer(fields[25], "셀 글자 진하게")
+    face_name = _decode(fields[23])
+    addresses = tuple(
+        address.strip().upper()
+        for address in _decode(fields[2]).split(",")
+        if address.strip()
+    )
+    if not addresses:
+        raise HwpLiveError("네이티브 셀 서식 주소가 비어 있습니다")
+    return NativeCellFormat(
+        table_instance_id=_decode(fields[1]),
+        addresses=addresses,
+        fill_color=_absent_when_negative(fields[3], "셀 채우기 색"),
+        fill_brush=_absent_when_negative(fields[4], "셀 채우기 종류"),
+        border_left=_cell_border(fields, 5, "셀 왼쪽"),
+        border_right=_cell_border(fields, 8, "셀 오른쪽"),
+        border_top=_cell_border(fields, 11, "셀 위"),
+        border_bottom=_cell_border(fields, 14, "셀 아래"),
+        margin_left_hwpunit=_absent_when_negative(fields[17], "셀 왼쪽 여백"),
+        margin_right_hwpunit=_absent_when_negative(fields[18], "셀 오른쪽 여백"),
+        margin_top_hwpunit=_absent_when_negative(fields[19], "셀 위 여백"),
+        margin_bottom_hwpunit=_absent_when_negative(fields[20], "셀 아래 여백"),
+        vertical_align=_absent_when_negative(fields[21], "셀 세로 정렬"),
+        alignment=_absent_when_negative(fields[22], "셀 문단 정렬"),
+        face_name=face_name or None,
+        character_height=_absent_when_negative(fields[24], "셀 글자 크기"),
+        bold=None if bold < 0 else bold == 1,
     )
 
 
@@ -841,6 +988,7 @@ def decode_page_inspection(payload: str) -> NativePageInspection:
     controls: list[NativePageControl] = []
     control_formats: dict[str, tuple[int, NativeParagraphFormat]] = {}
     cells: list[NativePageCell] = []
+    cell_formats: list[NativeCellFormat] = []
     inspection_errors: list[NativeControlInspectionError] = []
     for line in lines[3:-1]:
         fields = line.split("\t")
@@ -904,6 +1052,9 @@ def decode_page_inspection(payload: str) -> NativePageInspection:
                 )
             )
             continue
+        if len(fields) == _CELL_FORMAT_FIELDS and fields[0] == "CELLFMT":
+            cell_formats.append(_decode_cell_format(fields))
+            continue
         if len(fields) == 4 and fields[0] == "CTRL_ERROR":
             inspection_errors.append(
                 NativeControlInspectionError(
@@ -933,6 +1084,7 @@ def decode_page_inspection(payload: str) -> NativePageInspection:
         controls=controls_with_formats,
         cells=tuple(cells),
         inspection_errors=tuple(inspection_errors),
+        cell_formats=tuple(cell_formats),
     )
 
 
@@ -984,7 +1136,13 @@ def decode_detailed_inspection(payload: str) -> NativeDetailedInspection:
 
     controls: list[NativeDetailedControl] = []
     cells: list[NativeDetailedCell] = []
+    cell_formats: list[NativeCellFormat] = []
     captions: list[NativeDetailedCaption] = []
+    paragraphs: list[NativeDetailedParagraph] = []
+    paragraphs_complete = False
+    paragraph_scan_error: str | None = None
+    paragraph_scan_reported = False
+    unsupported_records: list[NativeUnsupportedRecord] = []
     inspection_errors: list[NativeControlInspectionError] = []
     for line in lines[3:-1]:
         fields = line.split("\t")
@@ -1048,6 +1206,9 @@ def decode_detailed_inspection(payload: str) -> NativeDetailedInspection:
                 )
             )
             continue
+        if len(fields) == _CELL_FORMAT_FIELDS and fields[0] == "CELLFMT":
+            cell_formats.append(_decode_cell_format(fields))
+            continue
         if len(fields) == 8 and fields[0] == "CAPTION":
             style_id = _integer(fields[4], "캡션 스타일")
             page_start = _integer(fields[6], "캡션 시작 쪽")
@@ -1062,9 +1223,79 @@ def decode_detailed_inspection(payload: str) -> NativeDetailedInspection:
                     text=_decode(fields[2]),
                     automatic_number=_boolean(fields[3], "자동 번호"),
                     style_id=None if style_id == -1 else style_id,
-                    style_name=None if fields[5].isspace() else _decode(fields[5]),
+                    style_name=_decode(fields[5]) or None,
                     page_start=page_start,
                     page_end=page_end,
+                )
+            )
+            continue
+        if len(fields) == 3 and fields[0] == "PARA_SCAN":
+            if paragraph_scan_reported:
+                raise HwpLiveError("네이티브 상세 구조 문단 조회 상태가 중복되었습니다")
+            paragraph_scan_reported = True
+            paragraphs_complete = _boolean(fields[1], "문단 조회 완료")
+            paragraph_scan_error = _decode(fields[2]) or None
+            if paragraphs_complete and paragraph_scan_error is not None:
+                raise HwpLiveError(
+                    "네이티브 상세 구조 문단 조회 상태가 서로 모순됩니다"
+                )
+            continue
+        if len(fields) == 21 and fields[0] == "PARA":
+            page_start = _integer(fields[3], "문단 시작 쪽")
+            page_end = _integer(fields[4], "문단 끝 쪽")
+            text_available = _boolean(fields[5], "문단 텍스트 관측")
+            text = _decode(fields[6])
+            style_id = _integer(fields[7], "문단 스타일")
+            if page_start < 1 or page_end < page_start:
+                raise HwpLiveError(
+                    "네이티브 상세 구조 문단 쪽 범위가 올바르지 않습니다"
+                )
+            if not text_available and text:
+                raise HwpLiveError(
+                    "네이티브 상세 구조 문단 텍스트 상태가 서로 모순됩니다"
+                )
+            paragraphs.append(
+                NativeDetailedParagraph(
+                    position=NativePosition(
+                        _integer(fields[1], "문단 리스트"),
+                        _integer(fields[2], "문단 번호"),
+                        0,
+                    ),
+                    page_start=page_start,
+                    page_end=page_end,
+                    text_available=text_available,
+                    text=text,
+                    style_id=None if style_id < 0 else style_id,
+                    face_name=_decode(fields[8]) or None,
+                    height_hwpunit=_optional_integer(fields[9], "문단 글자 크기"),
+                    bold=(
+                        None if fields[10] == "" else _boolean(fields[10], "문단 굵기")
+                    ),
+                    text_color=_optional_integer(fields[11], "문단 글자색"),
+                    alignment=_optional_integer(fields[12], "문단 정렬"),
+                    line_spacing=_optional_integer(fields[13], "문단 줄 간격"),
+                    left_margin_hwpunit=_optional_integer(
+                        fields[14],
+                        "문단 왼쪽 여백",
+                    ),
+                    right_margin_hwpunit=_optional_integer(
+                        fields[15],
+                        "문단 오른쪽 여백",
+                    ),
+                    indentation_hwpunit=_optional_integer(
+                        fields[16],
+                        "문단 들여쓰기",
+                    ),
+                    previous_spacing_hwpunit=_optional_integer(
+                        fields[17],
+                        "문단 위 간격",
+                    ),
+                    next_spacing_hwpunit=_optional_integer(
+                        fields[18],
+                        "문단 아래 간격",
+                    ),
+                    heading_type=_optional_integer(fields[19], "문단 번호 종류"),
+                    heading_level=_optional_integer(fields[20], "문단 번호 수준"),
                 )
             )
             continue
@@ -1077,7 +1308,35 @@ def decode_detailed_inspection(payload: str) -> NativeDetailedInspection:
                 )
             )
             continue
-        raise HwpLiveError("네이티브 상세 구조 개체 레코드가 올바르지 않습니다")
+        record_type = _plain(fields[0], "상세 구조 레코드 종류")
+        if record_type in {"PARA", "PARA_SCAN"}:
+            raise HwpLiveError("네이티브 상세 구조 문단 레코드가 올바르지 않습니다")
+        if record_type in {
+            "HDS1",
+            "DOC",
+            "PAGE",
+            "CTRL",
+            "CELL",
+            "CELLFMT",
+            "CAPTION",
+            "CTRL_ERROR",
+            "END",
+        }:
+            raise HwpLiveError("네이티브 상세 구조 개체 레코드가 올바르지 않습니다")
+        if len(record_type) > 100:
+            raise HwpLiveError("네이티브 상세 구조 미지원 레코드 종류가 너무 깁니다")
+        unsupported_records.append(
+            NativeUnsupportedRecord(
+                record_type=record_type,
+                payload_sha256=hashlib.sha256(line.encode("utf-8")).hexdigest(),
+            )
+        )
+    if not paragraph_scan_reported:
+        paragraph_scan_error = (
+            "네이티브 브리지가 쪽 문단 관측 지원 여부를 보고하지 않았습니다"
+        )
+    elif not paragraphs_complete and paragraph_scan_error is None:
+        paragraph_scan_error = "네이티브 브리지가 쪽 문단 관측을 완료하지 못했습니다"
 
     return NativeDetailedInspection(
         document_id=_integer(document[1], "문서 ID"),
@@ -1088,5 +1347,190 @@ def decode_detailed_inspection(payload: str) -> NativeDetailedInspection:
         controls=tuple(controls),
         cells=tuple(cells),
         captions=tuple(captions),
+        paragraphs=tuple(paragraphs),
+        paragraphs_complete=paragraphs_complete,
+        paragraph_scan_error=paragraph_scan_error,
+        unsupported_records=tuple(unsupported_records),
         inspection_errors=tuple(inspection_errors),
+        cell_formats=tuple(cell_formats),
+    )
+
+
+# Native source: LiveInspection.cpp::kParagraphShape* -- how much of each
+# paragraph's real appearance the scan carries back.
+PARAGRAPH_SHAPE_DETAIL_NONE: Final = 0
+PARAGRAPH_SHAPE_DETAIL_CHARACTER: Final = 1
+PARAGRAPH_SHAPE_DETAIL_PARAGRAPH: Final = 2
+PARAGRAPH_SHAPE_DETAIL_CONVENTION: Final = 3
+# Field count per PSTYLE line, indexed by the detail level the bridge echoes.
+_PARAGRAPH_SCAN_FIELDS: Final[tuple[int, ...]] = (4, 7, 17, 26)
+
+
+def encode_paragraph_style_request(
+    *,
+    list_id: int,
+    start: int,
+    limit: int,
+    character_shape: bool,
+    paragraph_shape: bool = False,
+    convention_detail: bool = False,
+) -> str:
+    """Wire form of the scan request.
+
+    The fourth field kept its position and its old meaning for 0 and 1, so a
+    bridge that predates paragraph shape still answers a level-2 request -- it
+    simply answers at level 1 and says so in the response.
+    """
+    if list_id < 0 or start < 0 or limit < 1:
+        raise HwpLiveError("네이티브 문단 스타일 조회 범위가 올바르지 않습니다")
+    detail = (
+        PARAGRAPH_SHAPE_DETAIL_CONVENTION
+        if convention_detail
+        else PARAGRAPH_SHAPE_DETAIL_PARAGRAPH
+        if paragraph_shape
+        else PARAGRAPH_SHAPE_DETAIL_CHARACTER
+        if character_shape
+        else PARAGRAPH_SHAPE_DETAIL_NONE
+    )
+    return f"{list_id},{start},{limit},{detail}"
+
+
+def _optional_integer(value: str, label: str) -> int | None:
+    """A native field that is empty when the property could not be read.
+
+    Absent is not zero. An indentation of 0 and an indentation nobody could
+    read are different answers and only the first may be replayed.
+    """
+    return None if value == "" else _integer(value, label)
+
+
+def decode_paragraph_style_scan(payload: str) -> NativeParagraphStyleScan:
+    error_fields = payload.split("\t")
+    _native_error(error_fields)
+    lines = payload.splitlines()
+    if len(lines) < 4 or lines[0] != "HPS1" or lines[-1] != "END":
+        raise HwpLiveError("네이티브 문단 스타일 응답 형식이 올바르지 않습니다")
+    document = lines[1].split("\t")
+    scan = lines[2].split("\t")
+    if (
+        len(document) != 3
+        or document[0] != "DOC"
+        or len(scan) != 6
+        or scan[0] != "SCAN"
+    ):
+        raise HwpLiveError("네이티브 문단 스타일 기본 레코드가 올바르지 않습니다")
+    detail = _integer(scan[5], "문단 모양 상세 수준")
+    if not 0 <= detail < len(_PARAGRAPH_SCAN_FIELDS):
+        raise HwpLiveError("네이티브 문단 모양 상세 수준을 해석하지 못했습니다")
+    expected_fields = _PARAGRAPH_SCAN_FIELDS[detail]
+    character_shape = detail >= PARAGRAPH_SHAPE_DETAIL_CHARACTER
+    paragraph_shape = detail >= PARAGRAPH_SHAPE_DETAIL_PARAGRAPH
+    convention_detail = detail >= PARAGRAPH_SHAPE_DETAIL_CONVENTION
+    paragraphs: list[NativeParagraphStyle] = []
+    for line in lines[3:-1]:
+        fields = line.split("\t")
+        if len(fields) != expected_fields or fields[0] != "PSTYLE":
+            raise HwpLiveError("네이티브 문단 스타일 레코드가 올바르지 않습니다")
+        style_id = _integer(fields[2], "문단 스타일")
+        paragraphs.append(
+            NativeParagraphStyle(
+                paragraph=_integer(fields[1], "문단 번호"),
+                style_id=None if style_id < 0 else style_id,
+                lead_text=_decode(fields[3]),
+                face_name=_decode(fields[4]) or None if character_shape else None,
+                height=_integer(fields[5], "문단 글자 크기")
+                if character_shape
+                else None,
+                bold=_boolean(fields[6], "문단 굵기") if character_shape else None,
+                text_color=(
+                    _optional_integer(fields[7], "문단 글자색")
+                    if paragraph_shape
+                    else None
+                ),
+                alignment=(
+                    _optional_integer(fields[8], "문단 정렬")
+                    if paragraph_shape
+                    else None
+                ),
+                line_spacing=(
+                    _optional_integer(fields[9], "문단 줄 간격")
+                    if paragraph_shape
+                    else None
+                ),
+                left_margin_hwpunit=(
+                    _optional_integer(fields[10], "문단 왼쪽 여백")
+                    if paragraph_shape
+                    else None
+                ),
+                right_margin_hwpunit=(
+                    _optional_integer(fields[11], "문단 오른쪽 여백")
+                    if paragraph_shape
+                    else None
+                ),
+                indentation_hwpunit=(
+                    _optional_integer(fields[12], "문단 들여쓰기")
+                    if paragraph_shape
+                    else None
+                ),
+                previous_spacing_hwpunit=(
+                    _optional_integer(fields[13], "문단 위 간격")
+                    if paragraph_shape
+                    else None
+                ),
+                next_spacing_hwpunit=(
+                    _optional_integer(fields[14], "문단 아래 간격")
+                    if paragraph_shape
+                    else None
+                ),
+                heading_type=(
+                    _optional_integer(fields[15], "문단 번호 종류")
+                    if paragraph_shape
+                    else None
+                ),
+                heading_level=(
+                    _optional_integer(fields[16], "문단 번호 수준")
+                    if paragraph_shape
+                    else None
+                ),
+                tail_text=_decode(fields[17]) if convention_detail else "",
+                text_length=(
+                    _optional_integer(fields[18], "문단 전체 글자 수")
+                    if convention_detail
+                    else None
+                ),
+                text_complete=(
+                    _boolean(fields[19], "문단 끝 관측 완료")
+                    if convention_detail
+                    else False
+                ),
+                face_name_latin=(
+                    _decode(fields[20]) or None if convention_detail else None
+                ),
+                face_name_hanja=(
+                    _decode(fields[21]) or None if convention_detail else None
+                ),
+                face_name_japanese=(
+                    _decode(fields[22]) or None if convention_detail else None
+                ),
+                face_name_other=(
+                    _decode(fields[23]) or None if convention_detail else None
+                ),
+                face_name_symbol=(
+                    _decode(fields[24]) or None if convention_detail else None
+                ),
+                face_name_user=(
+                    _decode(fields[25]) or None if convention_detail else None
+                ),
+            )
+        )
+    returned = _integer(scan[3], "문단 스타일 개수")
+    if returned != len(paragraphs):
+        raise HwpLiveError("네이티브 문단 스타일 응답 개수가 맞지 않습니다")
+    return NativeParagraphStyleScan(
+        document_id=_integer(document[1], "문서 ID"),
+        full_name=_decode(document[2]),
+        list_id=_integer(scan[1], "문단 리스트"),
+        start=_integer(scan[2], "문단 시작 번호"),
+        complete=_boolean(scan[4], "문단 훑기 완료"),
+        paragraphs=tuple(paragraphs),
     )

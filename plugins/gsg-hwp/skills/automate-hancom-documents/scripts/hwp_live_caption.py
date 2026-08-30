@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import ntpath
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
+from hwp_document_style_usage import DocumentStyleUsage, EMPTY_STYLE_USAGE
 from hwp_errors import HwpLiveError
 from hwp_live_api import LiveHwpApplication
 from hwp_live_caption_edit import attach_table_caption as attach_table_caption
@@ -11,6 +12,8 @@ from hwp_live_caption_format import (
     caption_format_sources as caption_format_sources,
     caption_text_uses_hierarchy,
     has_hierarchical_table_caption as has_hierarchical_table_caption,
+    page_uses_observed_caption_prefix,
+    text_uses_observed_caption_prefix,
 )
 from hwp_live_native_action_models import (
     NativeActionRequest,
@@ -25,6 +28,7 @@ from hwp_live_native_batch import (
 )
 from hwp_live_rot import HwpDocumentCandidate
 from hwp_live_state_guard import preserved_live_state
+from hwp_object_control_types import is_picture_control_type
 
 
 def _is_candidate_document(
@@ -43,6 +47,7 @@ def _read_attached_caption_source(
     expected_style_id: int,
     *,
     hierarchy_confirmed: bool,
+    usage: DocumentStyleUsage,
 ) -> TableCaptionFormatSource | None:
     entered = execute_native_actions(
         candidate.window_handle,
@@ -79,8 +84,14 @@ def _read_attached_caption_source(
             raise HwpLiveError(
                 "계층형 표 캡션의 스타일과 서식 원본 위치를 일치시켜 읽지 못했습니다"
             )
-        if not hierarchy_confirmed and not has_hierarchical_table_caption(
-            snapshot.selected_text
+        if (
+            not hierarchy_confirmed
+            and not has_hierarchical_table_caption(snapshot.selected_text)
+            and not text_uses_observed_caption_prefix(
+                snapshot.selected_text,
+                usage,
+                style_id=snapshot.style_id,
+            )
         ):
             return None
         return TableCaptionFormatSource(
@@ -108,6 +119,8 @@ def _read_preceding_caption_source(
     *,
     page: int,
     table_positions: tuple[NativePosition, ...],
+    control_types: Mapping[str, str],
+    usage: DocumentStyleUsage,
 ) -> TableCaptionFormatSource | None:
     scanned_paragraph_pages: dict[tuple[int, int], int] = {}
     for table_position in sorted(
@@ -146,7 +159,9 @@ def _read_preceding_caption_source(
                 format="UNICODE",
                 option="saveblock:true",
             )
-            if not has_hierarchical_table_caption(text):
+            wrapped_hierarchy = has_hierarchical_table_caption(text)
+            observed_hierarchy = text_uses_observed_caption_prefix(text, usage)
+            if not wrapped_hierarchy and not observed_hierarchy:
                 scanned_paragraph_pages[paragraph_key] = current_page
                 continue
             snapshot = read_native_snapshot(candidate.window_handle)
@@ -164,10 +179,23 @@ def _read_preceding_caption_source(
                 or not native_selection.selected
                 or native_selection.start.list_id != native_selection.end.list_id
                 or native_selection.start.paragraph != native_selection.end.paragraph
+                or (
+                    not wrapped_hierarchy
+                    and not text_uses_observed_caption_prefix(
+                        text,
+                        usage,
+                        style_id=snapshot.style_id,
+                    )
+                )
             ):
                 raise HwpLiveError(
                     "계층형 표 제목 문단의 스타일과 서식 원본 위치를 일치시켜 읽지 못했습니다"
                 )
+            if is_picture_control_type(
+                control_types.get(snapshot.control_instance_id, "")
+            ):
+                scanned_paragraph_pages[paragraph_key] = current_page
+                continue
             return TableCaptionFormatSource(
                 style_id=snapshot.style_id,
                 position=native_selection.start,
@@ -181,6 +209,7 @@ def find_hierarchical_table_caption_source(
     guard: Callable[[], None],
     *,
     setup_page: int,
+    usage: DocumentStyleUsage = EMPTY_STYLE_USAGE,
 ) -> TableCaptionFormatSource | None:
     with preserved_live_state(hwp, guard=guard):
         guard()
@@ -192,7 +221,9 @@ def find_hierarchical_table_caption_source(
             # caption that lives past the cut into a silent "not found".
             page_text = hwp.get_page_text(page - 1)
             guard()
-            if not has_hierarchical_table_caption(page_text):
+            if not has_hierarchical_table_caption(
+                page_text
+            ) and not page_uses_observed_caption_prefix(page_text, usage):
                 # Nothing crossed COM since the guard above, so the next page
                 # starts with the active-document check already satisfied.
                 continue
@@ -208,6 +239,11 @@ def find_hierarchical_table_caption_source(
                 raise HwpLiveError(
                     "계층형 표 캡션 구조 조회 결과가 대상 문서와 다릅니다"
                 )
+            control_types = {
+                control.instance_id: control.control_type
+                for control in detailed.controls
+                if control.instance_id
+            }
             control_order = {
                 control.instance_id: control.anchor
                 for control in detailed.controls
@@ -218,6 +254,7 @@ def find_hierarchical_table_caption_source(
                     caption
                     for caption in detailed.captions
                     if caption.style_id is not None
+                    and caption.table_instance_id in control_order
                 ),
                 key=lambda caption: (
                     (
@@ -243,6 +280,7 @@ def find_hierarchical_table_caption_source(
                         page_text,
                         caption.text,
                     ),
+                    usage=usage,
                 )
                 guard()
                 if source is not None:
@@ -253,6 +291,8 @@ def find_hierarchical_table_caption_source(
                 guard,
                 page=page,
                 table_positions=tuple(control_order.values()),
+                control_types=control_types,
+                usage=usage,
             )
             if source is not None:
                 return source

@@ -32,8 +32,14 @@ def register_guidance_resources(server: FastMCP[None]) -> None:
         SKILL_RESOURCE_URI,
         name="automate-hancom-documents",
         title="GSG HWP automation instructions",
+        # 무엇이 여기 있는지와 어디서 얻는지만 적는다. "먼저 읽어라"는 강제는
+        # 걷어냈다(.codex-plugin/plugin.json, AGENTS.md 는 8762f2f 에서 이미).
+        # 얻는 방법이 적혀 있지 않으면 모델은 파일 경로를 셸로 열러 간다 --
+        # 실제로 따옴표 처리와 하위 경로를 각각 한 번씩 틀려 왕복을 더 썼다.
         description=(
-            "Read this UTF-8 guidance before editing, analyzing, or verifying an HWP document."
+            "The automate-hancom-documents skill text (SKILL.md) for editing,"
+            " analyzing, and verifying HWP documents. Served here as UTF-8"
+            " markdown; reading this resource needs no file path."
         ),
         mime_type="text/markdown",
     )(read_hwp_skill)
@@ -46,7 +52,10 @@ def register_guidance_resources(server: FastMCP[None]) -> None:
         name="native-layout",
         title="Image-to-editable-HWP layout guidance",
         description=(
-            "Read this before rebuilding a screenshot, slide, or reference image as an editable native HWP table."
+            "The native-layout reference (references/native-layout.md) for"
+            " rebuilding a screenshot, slide, or reference image as an editable"
+            " native HWP table. Served here as UTF-8 markdown; reading this"
+            " resource needs no file path."
         ),
         mime_type="text/markdown",
     )(read_native_layout_guidance)

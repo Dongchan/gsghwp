@@ -332,6 +332,24 @@ bool GetSelection(
         FormatHResult(failure.detail, failure.status));
 }
 
+// SelectText refuses ranges the caret can still reach. Measured in HWP
+// 2024: a paragraph whose number is drawn automatically answers false for a
+// range that lies inside its body, because the drawn number occupies no
+// character cell and the call measures against the paragraph's own extent.
+// Moving the caret to the start, turning on block selection, and moving to
+// the end selects the same range. Whether it actually did is not assumed
+// here -- the endpoint comparison in SelectTextRange decides that, exactly
+// as it does for a range SelectText accepted.
+bool SelectTextRangeUsingCaret(
+    Context* const context,
+    const Position& start,
+    const Position& end,
+    const std::wstring& location) {
+    return SetPosition(context->hwp, start, context->result, location) &&
+        RunAction(context->action, L"Select", context->result, location) &&
+        SetPosition(context->hwp, end, context->result, location);
+}
+
 bool SelectTextRange(
     Context* const context,
     const Position& start,
@@ -352,19 +370,19 @@ bool SelectTextRange(
         return false;
     }
     bool selected = false;
-    if (!CallBooleanMethod(
-            context->hwp,
-            L"SelectText",
-            {
-                CComVariant(start.paragraph),
-                CComVariant(start.character),
-                CComVariant(end.paragraph),
-                CComVariant(end.character),
-            },
-            &selected,
-            context->result,
-            location) ||
-        !selected) {
+    const bool queried = CallBooleanMethod(
+        context->hwp,
+        L"SelectText",
+        {
+            CComVariant(start.paragraph),
+            CComVariant(start.character),
+            CComVariant(end.paragraph),
+            CComVariant(end.character),
+        },
+        &selected,
+        context->result,
+        location);
+    if (!queried) {
         return selected
             ? false
             : SetError(
@@ -373,17 +391,36 @@ bool SelectTextRange(
                   location,
                   L"SelectText returned false");
     }
+    bool usedCaret = false;
+    if (!selected) {
+        if (!SelectTextRangeUsingCaret(context, start, end, location)) {
+            return false;
+        }
+        usedCaret = true;
+    }
     Selection actual;
     if (!GetSelection(context->hwp, &actual, context->result)) {
         return false;
     }
     if (!actual.selected || !SamePosition(actual.start, start) ||
         !SamePosition(actual.end, end)) {
+        std::wostringstream detail;
+        detail << L"selected text range does not match the requested endpoints; requested="
+               << start.list << L":" << start.paragraph << L":" << start.character
+               << L"-" << end.list << L":" << end.paragraph << L":" << end.character
+               << L"; actual=" << actual.start.list << L":"
+               << actual.start.paragraph << L":" << actual.start.character
+               << L"-" << actual.end.list << L":" << actual.end.paragraph
+               << L":" << actual.end.character;
+        if (usedCaret) {
+            detail << L"; SelectText returned false and the caret selection "
+                      L"path did not reach the requested range";
+        }
         return SetError(
             context->result,
             L"TEXT_RANGE",
             location,
-            L"selected text range does not match the requested endpoints");
+            detail.str());
     }
     return true;
 }
@@ -782,25 +819,38 @@ bool AppliedSetterMatches(
 
 bool GoToCell(Context* context, const std::wstring& requested);
 
-bool VerifyAppliedCellFormat(
+bool VerifyAppliedParameterFormat(
     Context* const context,
     const Command& command,
     IDispatch* const parameter,
     IDispatch* const set) {
     const bool cellFormatAction =
         command.name == L"CellFill" || command.name == L"CellBorder";
-    if (!cellFormatAction) {
+    const bool textFormatAction =
+        command.name == L"CharShape" || command.name == L"ParagraphShape";
+    if (!cellFormatAction && !textFormatAction) {
         return true;
     }
-    if (context->currentCell.empty()) {
-        return SetError(
-            context->result,
-            L"POSTCONDITION",
-            command.name,
-            L"cell format verification has no target cell");
-    }
-    if (!GoToCell(context, context->currentCell)) {
-        return false;
+    if (cellFormatAction) {
+        Selection selection;
+        if (!GetSelection(context->hwp, &selection, context->result)) {
+            return false;
+        }
+        const bool liveCellRange =
+            (selection.mode & kSelectionModeMask) ==
+            hancom::com_state::kSelectionCells;
+        if (!liveCellRange) {
+            if (context->currentCell.empty()) {
+                return SetError(
+                    context->result,
+                    L"POSTCONDITION",
+                    command.name,
+                    L"cell format verification has no target cell");
+            }
+            if (!GoToCell(context, context->currentCell)) {
+                return false;
+            }
+        }
     }
     CComVariant ignored;
     const HRESULT status = Method(
@@ -813,14 +863,34 @@ bool VerifyAppliedCellFormat(
             context->result,
             L"POSTCONDITION",
             command.name,
-            FormatHResult(L"read applied cell format", status));
+            FormatHResult(L"read applied format", status));
     }
+    // One font choice arrives as fourteen setters -- seven FaceName* and seven
+    // FontType*, one pair per script (hwp_live_native_text_format.py:121-134) --
+    // and this bridge has never claimed to read all fourteen back. Its capture
+    // half reads a single face name for every script and reads FontType not at
+    // all (ActionTextPatch.cpp:183-195), and the inverse recipe rebuilds them on
+    // that same convention (hwp_live_text_patch_batch_history.py:94-97).
+    // Verification is held to the contract the rest of the bridge keeps: a font
+    // is proven on the face name the capture reads, and the family kind nothing
+    // captures is not something the engine promised to echo. Holding the other
+    // twelve to an exact echo failed whole batches with POSTCONDITION and
+    // retrySafe=false whenever the engine answered with its own normalization.
+    // Every setter outside those two families still has to match exactly.
+    const bool characterFormatAction = command.name == L"CharShape";
     for (const Setter& setter : command.setters) {
+        if (characterFormatAction && setter.path.rfind(L"FontType", 0) == 0) {
+            continue;
+        }
+        Setter read = setter;
+        if (characterFormatAction && setter.path.rfind(L"FaceName", 0) == 0) {
+            read.path = L"FaceNameHangul";
+        }
         CComVariant actual;
         if (!ReadAppliedSetterValue(
                 parameter,
                 command,
-                setter,
+                read,
                 &actual,
                 context->result)) {
             return false;
@@ -830,7 +900,7 @@ bool VerifyAppliedCellFormat(
                 context->result,
                 L"POSTCONDITION",
                 setter.path,
-                L"applied cell format does not match the requested value");
+                L"applied format does not match the requested value");
         }
     }
     return true;
@@ -839,7 +909,7 @@ bool VerifyAppliedCellFormat(
 bool ExecuteParameterAction(
     Context* const context,
     const Command& command,
-    const bool verifyCellFormat) {
+    const bool verifyFormat) {
     CComPtr<IDispatch> parameterSets;
     CComPtr<IDispatch> parameter;
     CComPtr<IDispatch> set;
@@ -946,12 +1016,14 @@ bool ExecuteParameterAction(
             command.name,
             command.name + L" returned false");
     }
+    context->result->partialMutation = true;
     if (!ApplyDirectSelectedShapeProperties(context, command)) {
         context->result->partialMutation = true;
         return false;
     }
     ++context->result->actionsExecuted;
-    if (verifyCellFormat && !VerifyAppliedCellFormat(context, command, parameter, set)) {
+    if (verifyFormat &&
+        !VerifyAppliedParameterFormat(context, command, parameter, set)) {
         context->result->partialMutation = true;
         return false;
     }
@@ -989,6 +1061,24 @@ bool MoveToPage(Context* const context, const LONG requestedPage) {
     HRESULT status = PropertyGet(context->hwp, L"PageCount", &rawCount);
     if (SUCCEEDED(status)) {
         status = AsLong(rawCount, &pageCount);
+    }
+    if (SUCCEEDED(status) && pageCount < 1) {
+        // Pagination is not finished yet, so there is no range to check
+        // against. Unlike an inspection this cannot simply proceed -- Goto
+        // needs a real upper bound to tell a valid page from an invalid one --
+        // so the engine is asked to finish paginating on the spot and the
+        // count is read again. RecalcPageCount is synchronous, so once is
+        // enough; a call that does not land leaves the refusal below unchanged.
+        // No time budget bounds this call, unlike the Python wait for the same
+        // value -- see the budget-asymmetry note on ReadSettledPageCount in
+        // LiveInspection.cpp.
+        CComVariant recalculated;
+        static_cast<void>(
+            Method(context->hwp, L"RecalcPageCount", {}, &recalculated));
+        status = PropertyGet(context->hwp, L"PageCount", &rawCount);
+        if (SUCCEEDED(status)) {
+            status = AsLong(rawCount, &pageCount);
+        }
     }
     if (FAILED(status)) {
         return SetError(context->result, L"PAGE", L"page", FormatHResult(L"PageCount", status));
@@ -1140,7 +1230,9 @@ ExecutionResult Execute(IDispatch* const hwp, const Request& request) noexcept {
             !ValidateAssets(request, &result)) {
             return finish();
         }
-        result.structureDigestBefore = StructureDigest(hwp);
+        if (rollbackAppendTail) {
+            result.structureDigestBefore = StructureDigest(hwp);
+        }
         if (!messageBoxMode.Activate(hwp, &result)) {
             return finish();
         }
@@ -1172,9 +1264,18 @@ ExecutionResult Execute(IDispatch* const hwp, const Request& request) noexcept {
             }
             if (rollbackAppendTail && command.kind == CommandKind::MoveDocumentEnd &&
                 !hasAtomicAppendStart) {
-                if (!GetPosition(hwp, &atomicAppendStart, &result)) {
+                // MOVE_DOC_END records where the append starts before it may
+                // add a paragraph break. Reading the caret here instead would
+                // start the rollback after that break and leave it behind.
+                if (!context.hasAppendAnchor) {
+                    SetError(
+                        &result,
+                        L"MOVE_DOC_END",
+                        L"",
+                        L"append anchor was not recorded by MOVE_DOC_END");
                     return finish();
                 }
+                atomicAppendStart = context.appendAnchor;
                 hasAtomicAppendStart = true;
             }
             if (CommandMayMutate(command)) {

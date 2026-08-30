@@ -140,6 +140,25 @@ bool ParsePositiveMillimeter(const std::wstring& value, double* const result) {
     return true;
 }
 
+// A crop fraction is the part of one source edge Hancom hides, so it is a
+// ratio in [0, 1) and never a length. Keeping it unitless is deliberate: the
+// unit SkipLeft/SkipTop/SkipRight/SkipBottom expect is the picture control's
+// own OriginalSizeX/OriginalSizeY, which only the bridge can read at runtime.
+bool ParseCropFraction(const std::wstring& value, double* const result) {
+    if (value.empty() || result == nullptr) {
+        return false;
+    }
+    wchar_t* end = nullptr;
+    errno = 0;
+    const double parsed = wcstod(value.c_str(), &end);
+    if (errno != 0 || end == nullptr || *end != L'\0' || !std::isfinite(parsed) ||
+        parsed < 0.0 || parsed >= 1.0) {
+        return false;
+    }
+    *result = parsed;
+    return true;
+}
+
 bool PlainName(const std::wstring& value) {
     if (value.empty() || value.size() > 128) {
         return false;
@@ -304,6 +323,10 @@ bool ParseRequest(
             } else if (fields[0] == L"SAVE_DOCUMENT_FILE" && fields.size() == 2 &&
                 DecodeUtf8Base64(fields[1], &command.first) && !command.first.empty()) {
                 command.kind = CommandKind::SaveDocumentFile;
+            } else if (fields[0] == L"CAPTURE_DOCUMENT_BLOCK_PROBE" &&
+                fields.size() == 2 &&
+                DecodeUtf8Base64(fields[1], &command.first) && !command.first.empty()) {
+                command.kind = CommandKind::CaptureDocumentBlockProbe;
             } else if (fields[0] == L"RESTORE_DOCUMENT_FILE" && fields.size() == 3 &&
                 DecodeUtf8Base64(fields[1], &command.first) && !command.first.empty() &&
                 ParseLong(fields[2], &command.page) && command.page > 0) {
@@ -330,6 +353,31 @@ bool ParseRequest(
                 DecodeUtf8Base64(fields[1], &command.first) &&
                 DecodeUtf8Base64(fields[2], &command.second)) {
                 command.kind = CommandKind::ReplaceSelection;
+            } else if (fields[0] == L"PREPARE_TEXT" &&
+                fields.size() == 9 &&
+                fields[1] == L"RANGE" &&
+                ParseLong(fields[2], &command.list) &&
+                ParseLong(fields[3], &command.paragraph) &&
+                ParseLong(fields[4], &command.character) &&
+                ParseLong(fields[5], &command.endList) &&
+                ParseLong(fields[6], &command.endParagraph) &&
+                ParseLong(fields[7], &command.endCharacter) &&
+                DecodeUtf8Base64(fields[8], &command.second)) {
+                command.kind = CommandKind::TextPatch;
+                command.name = fields[1];
+                command.preflightOnly = true;
+            } else if (fields[0] == L"PREPARE_TEXT" &&
+                fields.size() == 7 &&
+                fields[1] == L"CELL" &&
+                DecodeUtf8Base64(fields[2], &command.tableInstanceId) &&
+                !command.tableInstanceId.empty() && !fields[3].empty() &&
+                ParseLong(fields[4], &command.occurrence) &&
+                ParseBoolean(fields[5], &command.matchCase) &&
+                DecodeUtf8Base64(fields[6], &command.second)) {
+                command.kind = CommandKind::TextPatch;
+                command.name = fields[1];
+                command.cellAddress = fields[3];
+                command.preflightOnly = true;
             } else if (fields[0] == L"PATCH_TEXT" &&
                 (fields.size() == 5 || fields.size() == 6) &&
                 fields[1] == L"CURRENT" &&
@@ -400,15 +448,25 @@ bool ParseRequest(
                 command.cellAddress = fields[3];
                 command.hasExpectedText = true;
             } else if (fields[0] == L"INSERT_PICTURE" &&
-                (fields.size() == 2 || fields.size() == 4) &&
+                (fields.size() == 2 || fields.size() == 4 || fields.size() == 8) &&
                 DecodeUtf8Base64(fields[1], &command.first) && !command.first.empty()) {
-                if (fields.size() == 4 &&
+                if (fields.size() >= 4 &&
                     (!ParsePositiveMillimeter(fields[2], &command.pictureWidthMm) ||
                      !ParsePositiveMillimeter(fields[3], &command.pictureHeightMm))) {
                     return Fail(error, L"BAD_REQUEST", L"INSERT_PICTURE", L"picture box is invalid");
                 }
+                if (fields.size() == 8 &&
+                    (!ParseCropFraction(fields[4], &command.pictureCrop.left) ||
+                     !ParseCropFraction(fields[5], &command.pictureCrop.top) ||
+                     !ParseCropFraction(fields[6], &command.pictureCrop.right) ||
+                     !ParseCropFraction(fields[7], &command.pictureCrop.bottom) ||
+                     command.pictureCrop.left + command.pictureCrop.right >= 1.0 ||
+                     command.pictureCrop.top + command.pictureCrop.bottom >= 1.0)) {
+                    return Fail(error, L"BAD_REQUEST", L"INSERT_PICTURE", L"picture crop is invalid");
+                }
                 command.kind = CommandKind::InsertPicture;
-                command.hasPictureBox = fields.size() == 4;
+                command.hasPictureBox = fields.size() >= 4;
+                command.hasPictureCrop = fields.size() == 8;
             } else if (fields[0] == L"CELL" && fields.size() == 2 && !fields[1].empty()) {
                 command.kind = CommandKind::Cell;
                 command.first = fields[1];

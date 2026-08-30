@@ -11,6 +11,7 @@ public:
         CreateArray,
         SetArrayItem,
         SetIndexedProperty,
+        GetDispatchProperty,
     };
 
     FakeVirtualTypeInfo(
@@ -89,34 +90,44 @@ public:
         }
         FUNCDESC* const value =
             static_cast<FUNCDESC*>(CoTaskMemAlloc(sizeof(FUNCDESC)));
-        ELEMDESC* const parameters =
-            static_cast<ELEMDESC*>(CoTaskMemAlloc(2U * sizeof(ELEMDESC)));
-        if (value == nullptr || parameters == nullptr) {
+        const bool propertyGet =
+            signature_ == Signature::GetDispatchProperty;
+        ELEMDESC* const parameters = propertyGet
+            ? nullptr
+            : static_cast<ELEMDESC*>(
+                  CoTaskMemAlloc(2U * sizeof(ELEMDESC)));
+        if (value == nullptr || (!propertyGet && parameters == nullptr)) {
             CoTaskMemFree(value);
             CoTaskMemFree(parameters);
             return E_OUTOFMEMORY;
         }
         ZeroMemory(value, sizeof(FUNCDESC));
-        ZeroMemory(parameters, 2U * sizeof(ELEMDESC));
+        if (parameters != nullptr) {
+            ZeroMemory(parameters, 2U * sizeof(ELEMDESC));
+        }
         value->memid = memberId_;
         value->lprgelemdescParam = parameters;
         value->funckind = FUNC_VIRTUAL;
-        value->invkind =
-            signature_ == Signature::SetIndexedProperty
+        value->invkind = propertyGet
+            ? INVOKE_PROPERTYGET
+            : signature_ == Signature::SetIndexedProperty
             ? INVOKE_PROPERTYPUT
             : INVOKE_FUNC;
         value->callconv = CC_STDCALL;
-        value->cParams = 2;
+        value->cParams = propertyGet ? 0 : 2;
         value->oVft = static_cast<SHORT>(slot_ * sizeof(void*));
-        value->elemdescFunc.tdesc.vt = VT_VOID;
-        parameters[0].paramdesc.wParamFlags = PARAMFLAG_FIN;
-        parameters[1].paramdesc.wParamFlags = PARAMFLAG_FIN;
-        if (signature_ == Signature::CreateArray) {
-            parameters[0].tdesc.vt = VT_BSTR;
-            parameters[1].tdesc.vt = VT_I4;
-        } else {
-            parameters[0].tdesc.vt = VT_I4;
-            parameters[1].tdesc.vt = VT_VARIANT;
+        value->elemdescFunc.tdesc.vt = static_cast<VARTYPE>(
+            propertyGet ? VT_DISPATCH : VT_VOID);
+        if (parameters != nullptr) {
+            parameters[0].paramdesc.wParamFlags = PARAMFLAG_FIN;
+            parameters[1].paramdesc.wParamFlags = PARAMFLAG_FIN;
+            if (signature_ == Signature::CreateArray) {
+                parameters[0].tdesc.vt = VT_BSTR;
+                parameters[1].tdesc.vt = VT_I4;
+            } else {
+                parameters[0].tdesc.vt = VT_I4;
+                parameters[1].tdesc.vt = VT_VARIANT;
+            }
         }
         *description = value;
         return S_OK;

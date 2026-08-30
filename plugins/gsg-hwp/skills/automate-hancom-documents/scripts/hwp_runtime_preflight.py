@@ -12,7 +12,7 @@ from typing import Final, Never, cast
 
 
 _SUPPORTED_PYTHON: Final = (3, 12)
-_PROTOCOL_VERSION: Final = 12
+_PROTOCOL_VERSION: Final = 14
 _REQUIRED_MODULES: Final = (
     "mcp",
     "pdfplumber",
@@ -188,9 +188,7 @@ def verify_runtime(
     module_loader: Callable[[str], object] | None = None,
 ) -> RuntimePreflightReport:
     root = plugin_root.resolve()
-    version = tuple(
-        sys.version_info[:3] if version_info is None else version_info[:3]
-    )
+    version = tuple(sys.version_info[:3] if version_info is None else version_info[:3])
     if len(version) < 2 or version[:2] != _SUPPORTED_PYTHON:
         observed = ".".join(str(value) for value in version) or "unknown"
         _fail(

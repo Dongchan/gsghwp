@@ -31,6 +31,14 @@ class HwpWorkerTransportLost(HwpWorkerProtocolError):
         super().__init__(f"HWP worker transport lost during {tool_name}: {error}")
 
 
+def _is_closed_session_delivery(error: BaseException) -> bool:
+    if isinstance(error, BaseExceptionGroup):
+        return bool(error.exceptions) and all(
+            _is_closed_session_delivery(nested) for nested in error.exceptions
+        )
+    return isinstance(error, anyio.BrokenResourceError)
+
+
 @dataclass(frozen=True, slots=True)
 class HwpWorkerLaunch:
     python_executable: Path
@@ -74,10 +82,18 @@ async def open_worker_session(
         ],
         cwd=launch.worker_script.parent,
     )
-    async with stdio_client(parameters) as streams:
-        async with ClientSession(*streams) as session:
-            _ = await session.initialize()
-            yield session
+    try:
+        async with stdio_client(parameters) as streams:
+            async with ClientSession(*streams) as session:
+                _ = await session.initialize()
+                yield session
+    except BaseException as error:
+        # A cancelled in-flight request closes ClientSession's receive stream
+        # before the worker process finishes writing its last response. The MCP
+        # stdio reader then reports delivery to that already-closed local stream
+        # as BrokenResourceError. It is cleanup evidence, not transport loss.
+        if not _is_closed_session_delivery(error):
+            raise
 
 
 async def read_worker_status(cycle: WorkerCycle) -> WorkerStatus:
