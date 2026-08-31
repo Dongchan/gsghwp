@@ -2,16 +2,44 @@
 
 GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서 현재 열려 있는 HWP 문서를 빠르게 조회하고 네이티브 방식으로 편집·검수하도록 연결하는 로컬 MCP**입니다.
 
-- 배포 버전: **v1.6.1**
+- 배포 버전: **v1.6.2**
 - 원본 소스 버전: `0.5.73-dev.3`
 - MCP 런타임: `0.3.91`
 - C++ 네이티브 브리지: `0.5.176`
-- 네이티브 프로토콜: `14`
+- 네이티브 프로토콜: `14` (그래프 전송 프로토콜: `15`)
 - 개발자: **inodesign**
 - 공개 도구: 업무 도구 76개 + 런타임 재로드 1개 = 총 77개
 - 공식 API 카탈로그: 1,452개 중 네이티브 라우팅 1,448개
 
+위 수치의 출처는 `plugins/gsg-hwp/compatibility-manifest.json`입니다(`distribution`, `source_version`, `mcp`, `native_bridge`, `protocol`, `graph_protocol.protocol`, `exposed_tool_count`, `official_api_catalog_entries`, `official_api_enabled_routes`). 릴리스마다 이 파일을 기준으로 갱신합니다.
+
 버전별 변경사항은 [CHANGELOG.md](CHANGELOG.md)에 기록합니다.
+
+### v1.6.2 주요 변경
+
+- **배포본 문서와 스크립트 출력의 사실 주장을 전수 정정했습니다.** 도구 수,
+  버전 표기, 설치가 바꾸는 경로, 자동 업데이트 순서, 제거 스크립트가 실제로
+  지우는 범위처럼 확인할 수 있는 문장을 매니페스트와 스크립트 구현에 하나씩
+  맞췄습니다. 실행 중 화면에 찍히는 런처·설치기 문구도 같은 기준으로
+  고쳤습니다.
+- **안내 문서에 박아 두던 버전 문자열을 없앴습니다.** `QUICKSTART-KO.md`의
+  제목과 경로·파일명은 `<배포버전>` 자리표시자와
+  `plugins/gsg-hwp/compatibility-manifest.json` 참조로 바꿨습니다. 위 사실
+  블록도 어느 필드에서 읽은 값인지 함께 적습니다.
+- **문서 진실성 QA 게이트를 신설했습니다.**
+  `tests/release_installation_qa.ps1`이 이 README와 `QUICKSTART-KO.md`,
+  `AGENTS.md`, `CLAUDE.md`, `CHANGELOG.md`의 최신 항목, 그리고
+  `install.ps1`·`uninstall.ps1`·`restore-update.ps1`과
+  `docs/release-integrity.md`를 읽어 버전·수치·도구 이름·MCP 서버명·
+  레지스트리와 데이터 경로·문서가 가리키는 파일이 실제 배포본과 맞는지
+  대조합니다. 사용자가 복사해 쓰는 코드 블록 안까지 검사하고, 게시된 해시와
+  크기는 동봉 파일에서 다시 계산합니다.
+- **동봉 파일의 해시 문서를 새로 실었습니다.** `docs/release-integrity.md`에
+  실행 파일 3개와 릴리스 아카이브의 SHA-256·크기, 직접 확인하는 절차, 코드
+  서명이 없다는 사실과 백신 오탐 대응, 설치가 바꾸는 범위를 모았습니다.
+- **사용자 기능 변경은 없습니다.** 공개 도구도, 네이티브 브리지도, MCP
+  런타임도, 프로토콜도 v1.6.1과 같습니다. 이번 판은 문서와 검증 게이트만
+  바뀌었습니다.
 
 ### v1.6.1 주요 변경
 
@@ -43,8 +71,9 @@ GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서
   바뀌었습니다**. 기본값은 시간 예산을 지키는 대신 미완 결과를 돌려주고 그
   사실을 `analysis_complete`·`stop_reason`·`omissions`로 밝힙니다. 예산 없는
   전수 훑기가 필요하면 `full_scan=true`를 명시하세요.
-- `hwp_format_table`에 `cells`를 더해 `'A4:P4'` 구간이나 주소 나열로 최대
-  2,000개 셀을 한 호출에 서식 적용합니다.
+- `hwp_format_table`에 `cells`를 더해 `'A4:P4'` 구간이나 주소 나열을 최대
+  2,000개 항목까지 받고, 펼친 셀 기준 최대 20,000개를 한 호출에 서식
+  적용합니다.
 - 체크포인트를 만들 수 없는 대형 문서에서 텍스트 배치를 통째로 거부하던
   동작을 걷어냈습니다. 이제 실행하고, MCP 되돌리기 항목이 없다는 사실을
   응답에 적습니다.
@@ -118,6 +147,10 @@ GSG HWP는 **Codex, Claude Code 같은 에이전트 앱이 Windows 한/글에서
 - Excel 표와 보고서 레이아웃 추가
 - `CreatePageImage` 기반 페이지 렌더 검수
 - 사용자가 명시한 경우에만 저장·재열기 검증
+- 참고 이미지 분석과 편집 가능한 네이티브 레이아웃 재구성
+- 문서 전체 불변 그래프 조회와 검증된 그래프 패치 적용·되돌리기
+- 한/글 대화상자 상태 조회와 지정 액션 실행
+- 리본 사용자 액션 등록·수정·재정렬
 
 ## 실제 동작 영상
 
@@ -233,13 +266,13 @@ UserAction DLL은 실행 중인 한/글이 넘겨준 `IHwpObject`를 `!HancomLiv
 - Windows 10 또는 Windows 11
 - 한컴오피스 한/글 2024
 - Codex 데스크톱/CLI, Claude Code 또는 로컬 stdio MCP를 지원하는 에이전트 앱
-- Git
+- Git (아래 "수동 설치"의 `git clone` 경로를 쓸 때만 필요합니다. `install.ps1`은 Git을 사용하지 않습니다)
 - `uv` 패키지 관리자
 - `uv`가 내려받고 관리하는 Python 3.12를 버전별 `.venv`에 격리하여 사용
 
 배포 ZIP에는 개발자의 `.venv`나 일반 Python 설치본을 넣지 않습니다. `install.ps1`이 `uv sync --managed-python`으로 `%LOCALAPPDATA%\GSG_HWP\runtime\<배포버전>\.venv`를 새로 만들며, 시작 스크립트는 그 안의 `Scripts\python.exe`만 실행합니다. PC에 별도로 설치된 시스템 Python 3.12는 선택하거나 수정하지 않습니다.
 
-네이티브 UserAction DLL, 파일 경로 보안 모듈과 Event Bridge는 `Win32`, 런처는 `x64` Release 빌드입니다. 다른 한/글 주버전·비트 조합은 별도 검증 전까지 지원 대상으로 간주하지 않습니다.
+네이티브 UserAction DLL과 Event Bridge는 `Win32`, 런처는 `x64` Release 빌드입니다. 파일 경로 보안 모듈은 GSG HWP가 빌드하지 않고 `pyhwpx`가 배포하는 32비트 DLL을 그대로 사용합니다. 다른 한/글 주버전·비트 조합은 별도 검증 전까지 지원 대상으로 간주하지 않습니다.
 
 ## 한컴 파일 경로 보안 모듈
 
@@ -269,7 +302,7 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 
 | 항목 | 변경 내용 |
 |---|---|
-| 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.176\HancomLiveBridge.dll` 복사 또는 교체 |
+| 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\<브리지버전>\HancomLiveBridge.dll` 복사 또는 교체 |
 | 파일 경로 보안 DLL | `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll` 복사 또는 교체 |
 | 레지스트리 1 | `HKCU\Software\HNC\HwpUserAction\Modules`의 `한컴브릿지` 값 |
 | 레지스트리 2 | `HKCU\Software\HNC\HwpUserAction\Modules\Uses`의 `한컴브릿지` 값 |
@@ -280,7 +313,7 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 | 자동 업데이트 상태 | `%LOCALAPPDATA%\GSG_HWP\updater` |
 | 내려받은 버전 | `%LOCALAPPDATA%\GSG_HWP\packages\<버전>\gsg-hwp` |
 
-`<배포버전>`과 `<버전>` 자리의 실제 폴더 이름은 `plugins\gsg-hwp\compatibility-manifest.json`의 `distribution`에서 읽습니다. 네이티브 DLL 경로의 버전은 같은 파일의 `native_bridge`입니다.
+`<배포버전>`과 `<버전>` 자리의 실제 폴더 이름은 `plugins\gsg-hwp\compatibility-manifest.json`의 `distribution`에서 읽습니다. 네이티브 DLL 경로의 `<브리지버전>`은 같은 파일의 `native_bridge`입니다.
 
 백업에는 다음 정보가 저장됩니다.
 
@@ -296,13 +329,14 @@ v1.0.1부터 설치기는 잠금된 `pyhwpx==1.6.6` 환경에 포함된 `FilePat
 설치 후 MCP를 시작할 때 다음 순서로 업데이트합니다.
 
 1. 6시간 간격으로 공식 GitHub Release의 `latest.json`을 확인합니다.
-2. 버전이 더 높을 때만 태그가 고정된 `gsg-hwp-plugin-v<버전>.zip`을 받습니다.
-3. `latest.json`의 SHA-256과 ZIP 내부 경로를 검증합니다. 임의 서버나 `main` 브랜치 ZIP은 실행하지 않습니다.
-4. 새 버전 전용 uv 관리 `.venv`를 만들고 MCP import 자체 테스트를 수행합니다.
-5. 한/글이 실행 중이면 변경하지 않고 다음 시작까지 보류합니다.
-6. DLL·레지스트리 직전 상태를 백업한 뒤 새 버전을 적용합니다. 네트워크 또는 검증 실패 시 현재 버전을 그대로 실행합니다.
+2. 버전이 더 높지 않으면 여기서 끝냅니다.
+3. 한/글이 실행 중이면 **내려받지 않고** 보류 기록만 남긴 뒤 다음 시작까지 미룹니다.
+4. 태그가 고정된 `gsg-hwp-plugin-v<버전>.zip`을 받습니다.
+5. `latest.json`의 SHA-256과 ZIP 내부 경로를 검증합니다. 임의 서버나 `main` 브랜치 ZIP은 실행하지 않습니다.
+6. 새 버전 전용 uv 관리 `.venv`를 만들고 MCP import 자체 테스트를 수행합니다.
+7. DLL·레지스트리 직전 상태를 백업한 뒤 새 버전을 적용합니다. 네트워크 또는 검증 실패 시 현재 버전을 그대로 실행합니다.
 
-자동 업데이트를 끄려면 MCP 클라이언트 환경 변수에 `GSG_HWP_AUTO_UPDATE=0`을 설정합니다. 직전 업데이트만 되돌릴 때는 한/글을 종료한 뒤 다음 명령을 사용합니다.
+자동 업데이트를 끄려면 MCP 클라이언트 환경 변수 `GSG_HWP_AUTO_UPDATE`를 `0`(또는 `false`, `off`)으로 설정합니다. 직전 업데이트만 되돌릴 때는 한/글을 종료한 뒤 다음 명령을 사용합니다.
 
 ```powershell
 # 미리보기
@@ -404,7 +438,9 @@ codex plugin marketplace remove gsg-hwp
 claude mcp remove gsg-hwp-beta-live
 ```
 
-설치 전에 네이티브 또는 파일 경로 보안 DLL이 있었다면 각 원본 DLL을 되돌리고, 없었다면 GSG HWP가 추가한 DLL을 제거합니다. 레지스트리 3개 값도 설치 전의 존재 여부·종류·값으로 복원합니다. 복구에 사용한 백업은 감사와 추가 복구를 위해 보존합니다. Python 환경을 남기려면 `uninstall.ps1 -AcceptChanges -KeepRuntime`을 사용합니다.
+설치 전에 네이티브 또는 파일 경로 보안 DLL이 있었다면 각 원본 DLL을 되돌리고, 없었다면 GSG HWP가 추가한 DLL을 제거합니다. 레지스트리 3개 값도 설치 전의 존재 여부·종류·값으로 복원합니다. 복구에 사용한 백업은 감사와 추가 복구를 위해 보존합니다.
+
+`uninstall.ps1 -AcceptChanges`는 DLL·레지스트리 복원과 함께 `%LOCALAPPDATA%\GSG_HWP`의 `packages`(내려받은 패키지)와 `updater`(자동 업데이트 상태)를 지우고, `-KeepRuntime`을 주지 않으면 `runtime` 아래 **설치된 모든 버전의 `.venv`**도 지웁니다. 백업(`backups`)은 지우지 않습니다. Python 환경을 남기려면 `uninstall.ps1 -AcceptChanges -KeepRuntime`을 사용합니다.
 
 ## 사용 예시
 
@@ -438,15 +474,21 @@ gsghwp/
 ├─ AGENTS.md                          # 범용·Codex 설치/복원 지침
 ├─ CLAUDE.md                          # Claude Code 설치/복원 지침
 ├─ README.md                          # 한글 소개, 구조, 사용법
+├─ QUICKSTART-KO.md                   # 한글 빠른 설치 안내
 ├─ CHANGELOG.md                       # 버전별 변경사항
 ├─ LICENSE                            # GSG HWP 자체 코드의 MIT License
 ├─ THIRD_PARTY_NOTICES.md             # 외부 구성요소·한컴·미디어 권리 고지
 ├─ install.ps1                        # 미리보기, 런타임 설치, DLL/레지스트리 백업·등록
 ├─ restore-update.ps1                 # 직전 자동 업데이트 상태 복원
 ├─ uninstall.ps1                      # DLL/레지스트리 원상복구
+├─ docs/media/                        # 소개용 시연 영상과 썸네일
+├─ tests/                             # 릴리스 안전 QA 스크립트(개발·CI 전용, 배포 ZIP 미포함)
 └─ plugins/gsg-hwp/
    ├─ .codex-plugin/plugin.json       # inodesign 개발자 메타데이터
    ├─ .mcp.json                       # Codex 플러그인 stdio 설정
+   ├─ .python-version                 # uv가 사용할 Python 버전 고정
+   ├─ LICENSE                         # 플러그인 패키지에 동봉한 MIT License
+   ├─ THIRD_PARTY_NOTICES.md          # 플러그인 패키지에 동봉한 권리 고지
    ├─ compatibility-manifest.json     # 구성요소 버전·해시·API 범위
    ├─ pyproject.toml / uv.lock        # Python 3.12 의존성 잠금
    ├─ update-policy.json              # 공식 Release 자동 업데이트 정책
@@ -454,7 +496,8 @@ gsghwp/
    ├─ addon/
    │  ├─ HancomLiveBridgeNative/      # C++ UserAction DLL 및 ATL 배치 소스
    │  ├─ HancomEventBridge/           # Win32 이벤트 사이드카
-   │  └─ HancomMcpLauncher/           # MCP 사용자 세션 런처
+   │  ├─ HancomMcpLauncher/           # MCP 사용자 세션 런처
+   │  └─ HancomApiHarness/            # 공식 API 검증 하네스
    └─ skills/                         # HWP 작업 지침, Python MCP 구현, API 카탈로그
 ```
 
@@ -494,8 +537,8 @@ codex plugin add gsg-hwp@gsg-hwp
 ## 문제 해결
 
 - `uv가 필요합니다`: `winget install --id astral-sh.uv -e` 후 새 PowerShell을 엽니다.
-- `runtime is incomplete`: 저장소 루트에서 `install.ps1 -AcceptChanges`를 다시 실행합니다.
-- `안전 설치가 완료되지 않았습니다`: MCP가 자동 수정하지 않은 정상 보호 동작입니다. 한/글을 닫고 설치 스크립트를 실행합니다.
+- `GSG HWP Python 런타임을 준비하지 못해 MCP 서버를 시작할 수 없습니다`: 바로 앞 줄의 `[GSG HWP]` 안내가 원인을 알려줍니다. 대개 `uv`가 없어서이며, `winget install --id astral-sh.uv -e` 후 MCP 클라이언트를 다시 시작하면 런타임을 스스로 갖춥니다. 그래도 안 되면 저장소 루트에서 `install.ps1 -AcceptChanges`를 실행합니다.
+- `한/글이 실행 중이라 네이티브 브리지 설치를 건너뜁니다`: MCP가 자동 수정하지 않은 정상 보호 동작입니다. 한/글을 모두 닫고 MCP 클라이언트를 다시 시작하면 그때 설치되고, 그 다음 한/글을 실행하면 새 브리지가 물립니다. 설치 스크립트를 따로 실행할 필요는 없습니다.
 - 도구가 보이지 않음: Codex는 `codex plugin list`, Claude Code는 `claude mcp list`로 등록 상태를 확인하고 새 작업을 엽니다.
 - DLL이 로드되지 않음: 한/글을 완전히 종료한 뒤 다시 실행합니다.
 - 복원 실패: 레지스트리를 수동 편집하지 말고 오류에 표시된 백업 폴더를 보존한 채 이슈를 등록합니다.

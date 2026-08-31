@@ -11,19 +11,24 @@
 
 - 한/글이 실행 중일 때 DLL을 교체하지 않는다. `install.ps1`,
   `uninstall.ps1`, `restore-update.ps1`은 한/글 프로세스가 남아 있으면
-  스스로 거부한다.
+  실제 변경 단계에서 스스로 거부한다. 미리보기(옵션 없는 실행)는 한/글이
+  떠 있어도 정상이다.
 - 레지스트리 직접 편집, `regsvr32`, 관리자 권한, HKLM 변경, 키보드·마우스
   자동화를 사용하지 않는다. 저장소의 스크립트만 사용한다.
 - 옵션 없이 실행하면 미리보기만 하고 종료 코드 2로 끝난다. 실제 변경은
   `-AcceptChanges`를 붙인 실행에서만 일어난다. 종료 코드 2는 실패가 아니다.
+  단 `restore-update.ps1`은 되돌릴 자동 업데이트 기록이 없으면 미리보기에
+  닿기 전에 `되돌릴 자동 업데이트 기록이 없습니다`를 출력하고 종료 코드 0으로
+  끝난다.
 - 시스템 Python을 쓰지 않는다. 배포 버전별 uv 관리 `.venv`만 사용한다.
 - 실제 설치 전에 바뀌는 DLL 2개·HKCU 값 3개·백업 위치·자동 업데이트·복원
   방법을 사용자에게 먼저 안내한다.
 - 설치나 복원이 실패하면 우회하지 않는다. 오류 원문과 백업 폴더 경로를
   보존한 채 사용자에게 보고한다.
-- 기능이 공개 도구에 없으면 1,448개 활성 공식 API 라우트를 조사해 필요한
-  기능만 전용 도구나 recipe로 연결한다. 전체 API를 한꺼번에 도구로 노출하지
-  않는다.
+- 기능이 공개 도구에 없으면 활성 공식 API 라우트를 조사해 필요한 기능만
+  전용 도구나 recipe로 연결한다. 라우트 수는 `compatibility-manifest.json`의
+  `official_api_enabled_routes`에서 읽는다(현재 1,448개). 전체 API를 한꺼번에
+  도구로 노출하지 않는다.
 
 ## 설치와 등록
 
@@ -124,8 +129,9 @@ claude mcp list
      배포 zip을 그 폴더에 다시 풀고 MCP 클라이언트를 재시작한다.
    - `GSG HWP Python 런타임을 준비하지 못해 MCP 서버를 시작할 수 없습니다` —
      바로 앞 줄의 `[GSG HWP]` 메시지가 원인이다. 대개 uv 부재다.
-   - `GSG HWP automatic update bootstrap is missing.` — 배포 폴더에서
-     `plugins\gsg-hwp\scripts` 가 통째로 빠졌다. 다시 푼다.
+   - `GSG HWP automatic update bootstrap is missing.` — 배포 폴더에
+     `plugins\gsg-hwp\scripts\GsgHwp.Update.psm1`이 없다. 폴더째 빠졌든 그
+     파일만 빠졌든 같은 메시지가 난다. 다시 푼다.
 
 ### uv가 없다
 
@@ -151,7 +157,9 @@ Test-Path "$runtime\.venv\Scripts\python.exe"
 Remove-Item -LiteralPath $runtime -Recurse -Force
 ```
 
-`install.ps1 -AcceptChanges`를 다시 실행해도 같은 결과가 된다.
+한/글을 모두 종료할 수 있다면 `install.ps1 -AcceptChanges`로도 런타임이 다시
+만들어진다. 이쪽은 패키지 SHA-256 검증과 네이티브 DLL·HKCU 값 적용까지 함께
+하고, 한/글이 실행 중이면 거부한다. 위 삭제 스니펫은 한/글이 떠 있어도 된다.
 
 ### 도구가 보이지 않는다
 
@@ -194,8 +202,8 @@ Get-Content "$env:LOCALAPPDATA\GSG_HWP\updater\active-package.json" -Raw -Encodi
 
 ## 자동 업데이트 동작과 끄기
 
-- MCP가 기동할 때마다 확인하되, 마지막 확인에서 **6시간**이 지났을 때만
-  실제로 조회한다.
+- MCP가 기동할 때마다 확인하되, 마지막 확인에서 `update-policy.json`의
+  `check_interval_hours`(현재 **6시간**)가 지났을 때만 실제로 조회한다.
 - 조회 대상은 공식 GitHub Release의 `latest.json` 하나뿐이다. 다른 서버나
   브랜치 zip은 실행하지 않는다.
 - 현재 버전보다 높을 때만 태그가 고정된 zip을 받고, SHA-256과 zip 내부
@@ -204,8 +212,8 @@ Get-Content "$env:LOCALAPPDATA\GSG_HWP\updater\active-package.json" -Raw -Encodi
 - 한/글이 실행 중이면 적용하지 않고 `updater\pending-update.json`을 남긴 뒤
   `GSG HWP v<버전> 업데이트는 한/글 종료 후 자동 적용됩니다`를 알린다.
 - 적용에 성공하면 `GSG HWP가 v<버전>로 자동 업데이트되었습니다`, 실패하면
-  `GSG HWP 자동 업데이트를 적용하지 못해 현재 버전을 실행합니다`를 알리고
-  직전 상태로 되돌린 뒤 현재 버전으로 계속 실행한다.
+  `GSG HWP 자동 업데이트를 적용하지 못해 현재 버전을 실행합니다: <원인>`을
+  알리고 직전 상태로 되돌린 뒤 현재 버전으로 계속 실행한다.
 
 자동 업데이트를 끄려면 MCP 클라이언트 환경에 `GSG_HWP_AUTO_UPDATE=0`을
 설정한다(`false`, `off`도 같다). 이미 적용된 업데이트를 되돌리지는 않는다.
@@ -251,6 +259,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1 -AcceptChang
 ```
 
 `uninstall.ps1`은 설치 전 네이티브·파일 경로 보안 DLL과 HKCU 값 3개를
-복원하고 자동 업데이트 패키지를 정리한다. Python 환경을 남기려면
+복원하고 `%LOCALAPPDATA%\GSG_HWP`의 `packages`·`updater`를 지운다. 기본값으로
+`runtime` 아래 **설치된 모든 버전**의 Python 환경까지 지우므로, 남기려면
 `-KeepRuntime`을 함께 쓴다. 복구에 사용한 백업 폴더는 감사와 추가 복구를
-위해 지우지 않는다. 완료 후 사용한 백업 파일 경로를 사용자에게 알린다.
+위해 지우지 않는다. 활성 설치 기록이 있었으면 사용한 백업 파일 경로가
+출력되니 그대로 사용자에게 알린다. 기록이 없으면 `활성 설치 기록이 없어
+DLL과 레지스트리는 변경하지 않았습니다`만 나온다.

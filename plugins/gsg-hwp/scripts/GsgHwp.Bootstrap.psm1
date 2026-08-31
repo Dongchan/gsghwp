@@ -66,13 +66,15 @@ function Open-GsgHwpBootstrapLock {
             }
             if (-not $announced) {
                 Write-GsgHwpBootstrapStatus -Message (
-                    "다른 창에서 GSG HWP 런타임을 준비하고 있습니다. 끝날 때까지 기다립니다."
+                    "다른 창에서 GSG HWP 런타임을 준비하고 있습니다. " +
+                    "최대 $([int]($TimeoutSeconds / 60))분까지 기다립니다."
                 )
                 $announced = $true
             }
             if ([DateTime]::UtcNow -ge $deadline) {
                 Write-GsgHwpBootstrapStatus -Message (
-                    "준비 잠금 대기 시간을 초과해 잠금 없이 계속합니다."
+                    "준비 잠금을 $([int]($TimeoutSeconds / 60))분 기다렸지만 풀리지 않아 " +
+                    "잠금 없이 계속합니다."
                 )
                 return $null
             }
@@ -236,7 +238,7 @@ function Initialize-GsgHwpRuntime {
             }
 
             Write-GsgHwpBootstrapStatus -Message (
-                "1/3 Python 런타임을 구성합니다. 최초 1회는 몇 분 걸릴 수 있습니다: " +
+                "Python 런타임을 구성합니다. 최초 1회는 몇 분 걸릴 수 있습니다: " +
                 $paths.RuntimeEnvironment + " (기록: $logPath)"
             )
             try {
@@ -261,14 +263,16 @@ function Initialize-GsgHwpRuntime {
                 }
                 return $false
             }
-            Write-GsgHwpBootstrapStatus -Message "1/3 Python 런타임 준비 완료"
+            Write-GsgHwpBootstrapStatus -Message "Python 런타임 준비 완료"
         }
 
         $state = Get-GsgHwpBootstrapState -Paths $paths -PendingMarkerPath $PendingMarkerPath
         if ($state.NeedsNative) {
             try {
+                Write-GsgHwpBootstrapStatus -Message (
+                    "패키지 무결성과 파일 경로 보안 모듈을 확인합니다."
+                )
                 $packageManifest = Test-GsgHwpPackage -Paths $paths
-                Write-GsgHwpBootstrapStatus -Message "2/3 파일 경로 보안 모듈을 확인합니다."
                 $null = Test-GsgHwpSecurityModule -Paths $paths `
                     -ExpectedSha256 ([string]$packageManifest.file_path_checker_sha256)
 
@@ -283,7 +287,7 @@ function Initialize-GsgHwpRuntime {
                 }
                 else {
                     Write-GsgHwpBootstrapStatus -Message (
-                        "3/3 네이티브 브리지를 설치하고 등록합니다."
+                        "네이티브 브리지를 설치하고 등록합니다."
                     )
                     $installArguments = @{
                         Paths = $paths
@@ -297,7 +301,7 @@ function Initialize-GsgHwpRuntime {
                     }
                     $null = Install-GsgHwpNative @installArguments
                     Remove-GsgHwpPendingNativeMarker -Path $PendingMarkerPath
-                    Write-GsgHwpBootstrapStatus -Message "3/3 네이티브 브리지 준비 완료"
+                    Write-GsgHwpBootstrapStatus -Message "네이티브 브리지 준비 완료"
                 }
             }
             catch {
@@ -311,7 +315,14 @@ function Initialize-GsgHwpRuntime {
 
         $state = Get-GsgHwpBootstrapState -Paths $paths -PendingMarkerPath $PendingMarkerPath
         if (-not $state.NeedsRuntime) {
-            Write-GsgHwpBootstrapStatus -Message "GSG HWP 실행 준비를 마쳤습니다."
+            if ($state.NeedsNative) {
+                Write-GsgHwpBootstrapStatus -Message (
+                    "런타임은 준비했고 네이티브 브리지 설치만 남았습니다."
+                )
+            }
+            else {
+                Write-GsgHwpBootstrapStatus -Message "GSG HWP 실행 준비를 마쳤습니다."
+            }
         }
         return (-not $state.NeedsRuntime)
     }

@@ -412,7 +412,9 @@ function Invoke-GsgHwpAutoUpdate {
                 reason = "hwp_running"
             }) -Path (Join-Path $updaterRoot "pending-update.json")
             [Console]::Error.WriteLine(
-                "GSG HWP v$($latest.distribution) 업데이트는 한/글 종료 후 자동 적용됩니다."
+                "GSG HWP v$($latest.distribution) 업데이트는 한/글을 모두 닫은 뒤 " +
+                "MCP 서버를 다시 시작하면 적용됩니다" +
+                "(다음 확인은 최소 $([int]$policy.check_interval_hours)시간 뒤)."
             )
             return $CurrentRoot
         }

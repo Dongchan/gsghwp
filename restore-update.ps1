@@ -34,7 +34,7 @@ $paths = Get-GsgHwpPaths -PackageRoot $currentRoot -LocalAppData $localAppData
 Write-Host "GSG HWP 자동 업데이트 되돌리기 예정 변경사항"
 Write-Host "  현재 배포 버전: $($state.distribution)"
 Write-Host "  이전 패키지: $($state.previous_package_root)"
-Write-Host "  직전 DLL과 HKCU 레지스트리 값 복원"
+Write-Host "  직전 네이티브/파일 경로 보안 DLL과 HKCU 레지스트리 값 복원"
 Write-Host "  업데이트 패키지와 감사용 백업은 보존"
 
 if (-not $AcceptChanges) {
@@ -71,4 +71,7 @@ else {
 }
 
 Write-Host "직전 GSG HWP 버전으로 복원했습니다."
+Write-Host "자동 업데이트가 켜져 있으면 다음 확인 주기에 같은 버전이 다시 적용됩니다."
+Write-Host "막으려면 MCP 클라이언트 환경에 GSG_HWP_AUTO_UPDATE=0을 설정하거나"
+Write-Host "update-policy.json의 enabled를 false로 두세요."
 Write-Host "한/글과 Codex·Claude를 다시 시작하세요."

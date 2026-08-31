@@ -23,6 +23,9 @@ $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
 $bootstrapUpdateModule = Join-Path $bootstrapRoot "scripts\GsgHwp.Update.psm1"
 if (-not (Test-Path -LiteralPath $bootstrapUpdateModule -PathType Leaf)) {
     [Console]::Error.WriteLine("GSG HWP automatic update bootstrap is missing.")
+    Write-GsgHwpLauncherError -Message (
+        "패키지에 scripts\GsgHwp.Update.psm1이 없습니다: $bootstrapUpdateModule"
+    )
     exit 2
 }
 
@@ -72,7 +75,8 @@ foreach ($requiredPath in @($launcher, $server)) {
             "GSG HWP 플러그인 파일이 빠져 있어 MCP 서버를 시작할 수 없습니다: $requiredPath"
         )
         Write-GsgHwpLauncherError -Message (
-            "최신 릴리스 zip을 플러그인 폴더에 다시 풀어 넣은 뒤 MCP 클라이언트를 재시작하세요."
+            "릴리스 자산 gsg-hwp-plugin-v<배포버전>.zip을 받아 zip 안의 gsg-hwp 폴더 내용을 " +
+            "플러그인 폴더에 다시 풀어 넣은 뒤 MCP 클라이언트를 재시작하세요."
         )
         exit 2
     }
@@ -81,6 +85,12 @@ foreach ($requiredPath in @($launcher, $server)) {
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     Write-GsgHwpLauncherError -Message (
         "GSG HWP Python 런타임을 준비하지 못해 MCP 서버를 시작할 수 없습니다: $python"
+    )
+    Write-GsgHwpLauncherError -Message (
+        "uv가 설치돼 있는지 확인하세요: winget install --id astral-sh.uv -e"
+    )
+    Write-GsgHwpLauncherError -Message (
+        "자세한 기록: " + (Join-Path $localAppData "GSG_HWP\updater\logs")
     )
     exit 2
 }

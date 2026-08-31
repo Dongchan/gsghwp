@@ -4,23 +4,25 @@
 해시가 일치하면 **내려받은 파일이 게시된 것과 같다**는 뜻입니다. 코드 서명처럼 **누가 만들었는지**를
 증명하지는 못합니다. 그 차이를 알고 쓰시기 바랍니다.
 
-## v1.2.4 바이너리 SHA-256
+## v1.6.2 바이너리 SHA-256
 
 | 파일 | SHA-256 | 크기 |
 |---|---|---|
-| `gsg-hwp-plugin-v1.2.4.zip` | `6da07957bc2855f78d7457af5aa039baea46b83d4e7c05a5a4138f6ac682d21f` | `2,656,347` |
-| `addon\HancomMcpLauncher\bin\Release\HancomMcpLauncher.exe` | `69c5109c2e4027c4e2ecb915926a00c64c1ad63e16673267f2232e29cae70fbb` |  |
-| `addon\HancomEventBridge\bin\Release\HancomEventBridge.exe` | `50611c5e6a5607b830dc5274bbd0f1fb4485bcf66590efaf4f770eb82eeb9f0d` |  |
-| `addon\HancomLiveBridgeNative\bin\0.5.168\HancomLiveBridge.dll` | `4fa62db54c8d873818891d4241be7509a8534081c6d3be55b23ce755441272ab` |  |
+| `gsg-hwp-plugin-v1.6.2.zip` | `d1d715b5067bcddbff6962c337eecc5635f547d22e5eef18bdb21fd2c29790d4` | `4,239,297` |
+| `addon\HancomMcpLauncher\bin\Release\HancomMcpLauncher.exe` | `69c5109c2e4027c4e2ecb915926a00c64c1ad63e16673267f2232e29cae70fbb` | `178,688` |
+| `addon\HancomEventBridge\bin\Release\HancomEventBridge.exe` | `50611c5e6a5607b830dc5274bbd0f1fb4485bcf66590efaf4f770eb82eeb9f0d` | `148,992` |
+| `addon\HancomLiveBridgeNative\bin\0.5.176\HancomLiveBridge.dll` | `4063d81ac34c50534cc4a28aa930d46e3796a7de86cc399acafbc83bf5ab3b88` | `2,211,328` |
 
-이 표는 로컬에서 독립 빌드한 릴리스 후보의 기록입니다. CI가 발행한 `latest.json`이 공식 배포 기준이며 수동 편집하지 않습니다. 런처와 이벤트 브리지는 이전 릴리스와 동일합니다.
+실행 파일 세 개의 값은 `compatibility-manifest.json`의 `launcher_sha256`·`event_bridge_sha256`·`native_sha256`과 같습니다. ZIP 행은 로컬에서 독립 빌드한 릴리스 후보의 기록이라 CI가 만든 자산과 압축 시각이 달라 값이 다를 수 있습니다. 내려받은 ZIP은 릴리스에 함께 올라온 `latest.json`의 `package_sha256`과 대조하십시오. CI가 발행한 `latest.json`이 공식 배포 기준이며 수동 편집하지 않습니다. 런처와 이벤트 브리지는 v1.2.4 이후 바뀌지 않았습니다.
+
+설치기가 `%LOCALAPPDATA%\GSG_HWP\security`로 복사하는 `FilePathCheckerModule.dll`은 이 ZIP에 들어 있지 않고 잠금된 `pyhwpx==1.6.6` 환경에서 가져옵니다. 기대값은 매니페스트의 `file_path_checker_sha256`이며 현재 `9ac5b97c47ac8aed1e8bca27a3eef39411361d8f68c262509f0c40a8f9d21bb6`입니다.
 
 ## 직접 확인하는 방법
 
 ### 1. 내려받은 ZIP
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\gsg-hwp-plugin-v1.2.4.zip
+Get-FileHash -Algorithm SHA256 .\gsg-hwp-plugin-v1.6.2.zip
 ```
 
 ### 2. 압축을 푼 뒤 실행 파일 3개
@@ -30,15 +32,18 @@ $root = "압축을 푼 경로\gsg-hwp"
 @(
   "$root\addon\HancomMcpLauncher\bin\Release\HancomMcpLauncher.exe",
   "$root\addon\HancomEventBridge\bin\Release\HancomEventBridge.exe",
-  "$root\addon\HancomLiveBridgeNative\bin\0.5.168\HancomLiveBridge.dll"
+  "$root\addon\HancomLiveBridgeNative\bin\0.5.176\HancomLiveBridge.dll"
 ) | ForEach-Object { Get-FileHash -Algorithm SHA256 $_ }
 ```
+
+네이티브 DLL의 폴더 이름은 매니페스트의 `native_bridge` 값입니다.
 
 ### 3. 매니페스트 기록값과 대조
 
 ```powershell
 $m = Get-Content "$root\compatibility-manifest.json" -Raw | ConvertFrom-Json
 $m.launcher_sha256
+$m.event_bridge_sha256
 $m.native_sha256
 ```
 
@@ -48,11 +53,12 @@ $m.native_sha256
 
 ```powershell
 Get-FileHash -Algorithm SHA256 `
-  "$env:LOCALAPPDATA\HancomDocumentAutomation\native\0.5.168\HancomLiveBridge.dll"
+  "$env:LOCALAPPDATA\HancomDocumentAutomation\native\0.5.176\HancomLiveBridge.dll"
 ```
 
-MCP는 시작할 때 런처와 네이티브 DLL을 매니페스트 값과 스스로 대조하며,
-일치하지 않으면 서버를 시작하지 않습니다.
+설치기와 자동 업데이트, 그리고 네이티브 브리지를 처음 놓는 준비 단계는 런처·이벤트 브리지·
+네이티브 DLL의 SHA-256을 매니페스트 값과 대조하고, 어긋나면 그 단계를 중단합니다.
+평소 MCP 서버 기동은 필요한 파일이 있는지만 확인하므로, 위 절차로 직접 대조하는 편이 확실합니다.
 
 ## 코드 서명
 
@@ -125,10 +131,10 @@ Windows Defender에서 격리된 항목을 복원합니다.
 
 | 대상 | 경로 |
 |---|---|
-| 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.168\HancomLiveBridge.dll` |
+| 네이티브 DLL | `%LOCALAPPDATA%\HancomDocumentAutomation\native\0.5.176\HancomLiveBridge.dll` |
 | 파일 경로 보안 DLL | `%LOCALAPPDATA%\GSG_HWP\security\FilePathCheckerModule.dll` |
-| 레지스트리 | `HKCU\Software\HNC\HwpUserAction\Modules`, `HKCU\Software\HNC\HwpAutomation\Modules` |
-| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.2.4\.venv` |
+| 레지스트리 | `HKCU\Software\HNC\HwpUserAction\Modules`, `HKCU\Software\HNC\HwpUserAction\Modules\Uses`, `HKCU\Software\HNC\HwpAutomation\Modules`의 값 3개 |
+| Python 환경 | `%LOCALAPPDATA%\GSG_HWP\runtime\1.6.2\.venv` |
 
 `FilePathCheckerModule.dll`은 잠금된 `pyhwpx==1.6.6` 환경에 포함된 것을 쓰며,
 설치기가 SHA-256을 확인한 뒤 복사합니다.

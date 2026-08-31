@@ -15,13 +15,14 @@
 4. 기존 DLL 2개와 레지스트리 값의 존재 여부·종류·값은 `%LOCALAPPDATA%\GSG_HWP\backups`에 먼저 저장된다.
 5. `uninstall.ps1 -AcceptChanges`로 설치 전 상태를 복원할 수 있다.
 6. HKLM, `regsvr32`, 관리자 권한은 사용하지 않는다.
-7. 설치 후 MCP 시작 시 6시간 간격으로 공식 GitHub Release를 확인하고, 한/글이 종료된 경우에만 해시 검증된 업데이트의 DLL·HKCU 값을 적용한다.
+7. 설치 후 MCP 시작 시 `update-policy.json`의 `check_interval_hours` 간격(현재 6시간)으로 공식 GitHub Release를 확인하고, 한/글이 종료된 경우에만 해시 검증된 업데이트의 DLL·HKCU 값을 적용한다.
 8. 각 업데이트 전 직전 상태도 백업되며 `restore-update.ps1 -AcceptChanges`로 직전 버전을 복원할 수 있다.
 9. Python은 시스템 설치본이 아니라 `%LOCALAPPDATA%\GSG_HWP\runtime\<버전>\.venv`의 uv 관리 Python 3.12만 사용한다.
+10. `uninstall.ps1 -AcceptChanges`는 위 복원에 더해 `%LOCALAPPDATA%\GSG_HWP`의 `packages`와 `updater`를 지우고, `-KeepRuntime`을 함께 주지 않으면 `runtime` 아래 설치된 모든 버전의 `.venv`도 지운다. 백업 폴더는 지우지 않는다.
 
 ## 설치 절차
 
-1. Windows, 한/글 2024, Git을 확인한다.
+1. Windows, 한/글 2024, `uv`를 확인한다. 배포 ZIP으로 설치하면 Git은 필요 없다. 저장소를 `git clone`으로 받아 쓰는 경우에만 Git이 필요하다.
 2. 한/글 프로세스가 실행 중이면 저장을 안내하고 모두 종료한다. 설치 목적으로 사용자의 열린 문서를 수정하거나 테스트 문서를 새로 열지 않는다.
 3. 저장소 루트에서 `install.ps1`을 옵션 없이 실행한다. 종료 코드 2는 변경 없이 미리보기만 마친 정상 결과다.
 4. 위 변경·백업·복원 내용을 안내했고 사용자가 설치를 요청한 상태라면 `install.ps1 -AcceptChanges`를 실행한다.
@@ -30,10 +31,14 @@
 
 ### Codex
 
+`<배포경로>`는 압축을 푼 `gsghwp` 폴더의 절대 경로다. `marketplace.json`의 플러그인 소스가 로컬 경로(`./plugins/gsg-hwp`)이므로 배포 ZIP으로 설치했다면 같은 폴더를 마켓플레이스로 등록한다.
+
 ```powershell
-codex plugin marketplace add innae1121-bit/gsghwp --ref main
+codex plugin marketplace add "<배포경로>"
 codex plugin add gsg-hwp@gsg-hwp
 ```
+
+저장소를 `git clone`으로 받아 쓰는 경우에만 `codex plugin marketplace add innae1121-bit/gsghwp --ref main`으로 등록한다.
 
 ### Claude Code
 
@@ -45,21 +50,25 @@ claude mcp add --transport stdio --scope user gsg-hwp-beta-live -- `
   powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $startMcp
 ```
 
+이전에 MCP를 `gsg-hwp`라는 이름으로 등록해 둔 사용자는 `claude mcp remove gsg-hwp`로 옛 등록을 지운 뒤 위 명령으로 다시 등록한다. 이름이 다르면 도구 접두사(`mcp__<서버이름>__`)가 달라져 `SKILL.md`가 도구를 찾지 못한다.
+
 ### 다른 MCP 클라이언트
 
 `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <절대 경로>\plugins\gsg-hwp\scripts\start-mcp.ps1`을 stdio 서버로 등록한다.
 
-7. 한/글과 에이전트 앱을 다시 시작하고 새 작업에서 `gsg-hwp-beta-live` 연결과 `hwp_runtime_info`를 확인한다.
+7. 한/글과 에이전트 앱을 다시 시작하고 새 작업에서 MCP 서버(`plugins/gsg-hwp/.mcp.json`의 `gsg-hwp-beta-live`) 연결과 `hwp_runtime_info` 응답을 확인한다.
+
+`install.ps1` 없이 MCP만 등록해도 첫 기동에서 런처가 런타임과 네이티브 브리지를 스스로 갖춘다(`plugins/gsg-hwp/scripts/start-mcp.ps1`, `GsgHwp.Bootstrap.psm1`). 준비 상황은 `[GSG HWP]` 접두가 붙은 stderr로 나온다. 한/글이 실행 중이면 네이티브 설치만 미루고 `%LOCALAPPDATA%\GSG_HWP\state\pending-native-install.json`을 남기므로, 한/글을 모두 닫고 MCP 클라이언트를 다시 시작하면 그때 설치된다. 자세한 내용은 `CLAUDE.md`의 "첫 실행 자동 준비"를 따른다.
 
 ## 제거와 원상복구
 
 직전 자동 업데이트만 되돌리는 요청이면 한/글을 종료하고 `restore-update.ps1` 미리보기 후 `restore-update.ps1 -AcceptChanges`를 실행한다. 이 작업은 직전 DLL·HKCU·활성 패키지 상태를 복원하며 최초 설치 전 백업은 유지한다.
 
-1. 대상 앱에서 `gsg-hwp-beta-live` MCP 또는 `gsg-hwp` 플러그인을 제거한다.
+1. 대상 앱에서 MCP 등록(`gsg-hwp-beta-live`) 또는 Codex 플러그인(`gsg-hwp`)을 제거한다. 옛 이름 `gsg-hwp`로 등록한 MCP가 남아 있으면 그것도 함께 지운다.
 2. 한/글을 모두 종료한다.
 3. `uninstall.ps1`을 옵션 없이 실행해 복원 예정 내용을 표시한다.
-4. 안내 후 `uninstall.ps1 -AcceptChanges`를 실행한다.
-5. 설치 전 네이티브/파일 경로 보안 DLL과 레지스트리 3개 값의 상태가 복원되었다는 스크립트 결과와 사용한 백업 파일 경로를 사용자에게 알린다.
+4. 안내 후 `uninstall.ps1 -AcceptChanges`를 실행한다. `-KeepRuntime`을 주지 않으면 `%LOCALAPPDATA%\GSG_HWP\runtime` 아래 설치된 모든 버전의 Python 환경까지 지워지므로 남길지 먼저 확인한다.
+5. 설치 전 네이티브/파일 경로 보안 DLL과 레지스트리 3개 값의 상태가 복원되었다는 스크립트 결과와 사용한 백업 파일 경로를 사용자에게 알린다. 활성 설치 기록이 없었으면 스크립트가 "활성 설치 기록이 없어 DLL과 레지스트리는 변경하지 않았습니다"만 출력하니 그 결과를 그대로 전달한다.
 6. 백업 폴더는 감사와 추가 복구를 위해 삭제하지 않는다.
 
 Codex 제거 명령:
@@ -79,4 +88,4 @@ claude mcp remove gsg-hwp-beta-live
 
 ## 기능 확장 요청
 
-공개 도구에 원하는 기능이 없으면 `plugins/gsg-hwp/skills/automate-hancom-documents/resources/hancom_official_api_catalog_v1.json`과 1,448개 활성 네이티브 라우트를 먼저 조사한다. 대응 API가 있더라도 1,448개를 모두 개별 도구로 노출하지 않는다. 필요한 기능 하나를 작업 중심 도구 또는 recipe로 연결하고 대상·상태 검증, 결과 검수, 회귀 테스트와 `compatibility-manifest.json` 갱신을 함께 수행한다.
+공개 도구에 원하는 기능이 없으면 `plugins/gsg-hwp/skills/automate-hancom-documents/resources/hancom_official_api_catalog_v1.json`과 활성 네이티브 라우트를 먼저 조사한다. 라우트 수는 `compatibility-manifest.json`의 `official_api_enabled_routes`에서 읽는다(현재 1,448개). 대응 API가 있더라도 그 라우트를 모두 개별 도구로 노출하지 않는다. 필요한 기능 하나를 작업 중심 도구 또는 recipe로 연결하고 대상·상태 검증, 결과 검수, 회귀 테스트와 `compatibility-manifest.json` 갱신을 함께 수행한다.
